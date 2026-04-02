@@ -126,6 +126,7 @@ def run(rank, n_gpus, a, hps):
                               batch_size=hps["training_cfg"]["batch_size"], pin_memory=True, drop_last=True)
 
     # Validation dataset configuration
+    validation_loader = None
     if rank == 0:
         validset = GSRDataset(
         hps,
@@ -141,15 +142,18 @@ def run(rank, n_gpus, a, hps):
         seed=None,
         mode="Validation"
         )
-        validation_loader = DataLoader(
-            validset,
-            num_workers=1,
-            shuffle=False,
-            sampler=None,
-            batch_size=1,
-            pin_memory=True,
-            drop_last=True,
-        )
+        if len(validset) > 0:
+            validation_loader = DataLoader(
+                validset,
+                num_workers=1,
+                shuffle=False,
+                sampler=None,
+                batch_size=1,
+                pin_memory=True,
+                drop_last=True,
+            )
+        else:
+            print("Validation disabled: no paired validation files were provided.")
 
         # Initialize Weights & Biases logging
         wandb.init(project=f"{a.experiment_name}", resume="allow")
@@ -165,7 +169,10 @@ def run(rank, n_gpus, a, hps):
     fn_mel_loss_multiscale = MultiScaleMelSpectrogramLoss(
                 sampling_rate=hps["stft_cfg"]["sampling_rate"]
             ).to(device) 
-    mrstft, pesq, utmos = load_modules(hps, device)
+    if validation_loader is not None or rank != 0:
+        mrstft, pesq, utmos = load_modules(hps, device)
+    else:
+        mrstft, pesq, utmos = None, None, None
     # Print model parameter counts
     if rank == 0:
         print('Number of Parameters for SEMambapp:', get_param_num(univsemamba))
@@ -388,7 +395,7 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                     raise ValueError("NaN values found in loss_gen_all")
 
                 # Validation
-                if steps % a.validation_interval == 0 and steps != 0:
+                if validation_loader is not None and steps % a.validation_interval == 0 and steps != 0:
                     print("Validation Started...")
                     generator.eval()
                     torch.cuda.empty_cache()
