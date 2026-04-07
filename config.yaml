@@ -2,7 +2,7 @@
 # These settings specify the hardware and distributed setup for the model training.
 # Adjust `num_gpus` and `dist_config` according to your distributed training environment.
 env_setting:
-  num_workers: 32  # Number of worker threads for data loading.
+  num_workers: 8  # Number of worker threads for data loading.
   seed: 1234  # Seed for random number generators to ensure reproducibility.
   dist_cfg:
     dist_backend: nccl  # Distributed training backend, 'nccl' for NVIDIA GPUs.
@@ -19,9 +19,9 @@ data_cfg:
 experiment_cfg:
   exp_path: exp
   experiment_name: train_semambapp
-  stdout_interval: 1250
+  stdout_interval: 200
   checkpoint_interval: 5000
-  summary_interval: 1250
+  summary_interval: 1000
   validation_interval: 5000
 
 
@@ -48,7 +48,7 @@ degradation_cfg:
 # including batch sizes, learning rates, and optimizer specifics.
 training_cfg:
   training_epochs: 100 # Training epoch.
-  batch_size: 8  # Training batch size.
+  batch_size: 24  # Training batch size.
   learning_rate: 0.0002  # Initial learning rate.
   adam_b1: 0.8  # Beta1 hyperparameter for the AdamW optimizer.
   adam_b2: 0.99  # Beta2 hyperparameter for the AdamW optimizer.

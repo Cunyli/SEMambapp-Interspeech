@@ -156,8 +156,7 @@ def run(rank, n_gpus, a, hps):
             print("Validation disabled: no paired validation files were provided.")
 
         # Initialize Weights & Biases logging
-        wandb.init(project=f"{a.experiment_name}", resume="allow")
-        wandb.run.name = ""
+        wandb.init(project="semambapp", name=a.experiment_name, resume="allow")
         wandb.config.update(hps)
 
 
