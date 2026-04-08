@@ -16,3 +16,4 @@ easydict
 matplotlib
 resampy
 joblib
+nnAudio
