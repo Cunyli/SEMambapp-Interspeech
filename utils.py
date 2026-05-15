@@ -3,18 +3,46 @@ import torch
 import os
 import shutil
 import glob
+import re
+from pathlib import Path
 from torch.distributed import init_process_group
 import json
 
+
+_ENV_DEFAULT_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\:\-([^}]*)\}")
+
 def load_json_file(file_path):
+    file_path = os.path.expanduser(os.path.expandvars(file_path))
     with open(file_path, 'r') as json_file:
         data = json.load(json_file)
     return data
 
 def load_config(config_path):
     """Load configuration from a YAML file."""
+    config_path = os.path.expanduser(os.path.expandvars(config_path))
     with open(config_path, 'r') as file:
-        return yaml.safe_load(file)
+        return expand_paths(yaml.safe_load(file))
+
+def expand_env_defaults(value):
+    if not isinstance(value, str):
+        return value
+
+    def replace(match):
+        name = match.group(1)
+        default = match.group(2)
+        return os.environ.get(name, default)
+
+    return _ENV_DEFAULT_PATTERN.sub(replace, value)
+
+def expand_paths(value):
+    if isinstance(value, str):
+        expanded = expand_env_defaults(value)
+        return os.path.expanduser(os.path.expandvars(expanded))
+    if isinstance(value, list):
+        return [expand_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {key: expand_paths(item) for key, item in value.items()}
+    return value
 
 def initialize_seed(seed):
     """Initialize the random seed for both CPU and GPU."""
@@ -73,6 +101,37 @@ def save_checkpoint(filepath, obj):
         os.makedirs(os.path.dirname(filepath))
     torch.save(obj, filepath)
     print("Complete.")
+
+
+def prune_step_checkpoints(cp_dir, keep=3, prefixes=("ln_g_", "ln_do_")):
+    cp_dir = Path(cp_dir)
+    steps = []
+    for path in cp_dir.glob(f"{prefixes[0]}*.pth"):
+        try:
+            steps.append(int(path.stem.replace(prefixes[0], "")))
+        except ValueError:
+            continue
+
+    for step in sorted(steps)[:-keep]:
+        for prefix in prefixes:
+            checkpoint = cp_dir / f"{prefix}{step:08d}.pth"
+            if checkpoint.exists():
+                try:
+                    checkpoint.unlink()
+                    print(f"Deleted checkpoint: {checkpoint}")
+                except OSError as exc:
+                    print(f"Failed to delete checkpoint {checkpoint}: {exc}")
+
+
+def save_best_step_checkpoints(cp_dir, step, generator_state, optimizer_state, generator_prefix="ln_g_", optimizer_prefix="ln_do_"):
+    cp_dir = Path(cp_dir)
+    save_checkpoint(str(cp_dir / f"best_{generator_prefix}{step:08d}.pth"), generator_state)
+    save_checkpoint(str(cp_dir / f"best_{optimizer_prefix}{step:08d}.pth"), optimizer_state)
+
+    for pattern in (f"best_{generator_prefix}*.pth", f"best_{optimizer_prefix}*.pth"):
+        for checkpoint in cp_dir.glob(pattern):
+            if f"{step:08d}" not in checkpoint.name:
+                checkpoint.unlink()
 
 
 def scan_checkpoint(cp_dir, prefix):

@@ -1,0 +1,72 @@
+# TAU fixed USE_simulation pair fine-tuning config for SEMamba++.
+# Paths are resolved from environment variables by utils.load_config().
+
+repo_name: semambapp
+experiment: tau_fixed
+
+env_setting:
+  num_workers: 8
+  seed: 20260511
+  dist_cfg:
+    dist_backend: nccl
+    dist_url: tcp://localhost:19427
+    world_size: 1
+
+data_cfg:
+  dataset_type: use_simulation_fixed
+  use_simulation_root: ${USE_SIMULATION_ROOT:-../USE_simulation}
+  train_pair_manifest: ${SEMAMBAPP_TAU_FIXED_TRAIN_CSV:-/path/to/tau/simulated/phone_room/train/paired.csv}
+  valid_pair_manifest: ${SEMAMBAPP_TAU_FIXED_VALID_CSV:-/path/to/tau/simulated/phone_room/valid/paired.csv}
+
+experiment_cfg:
+  exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-exp}
+  experiment_name: train_semambapp_tau_fixed
+  stdout_interval: 5
+  checkpoint_interval: 100
+  summary_interval: 20
+  validation_interval: 50
+  use_wandb: true
+  wandb_project: semambapp
+  wandb_entity: null
+  wandb_mode: online
+  wandb_tags: ["tau", "use_simulation", "fixed"]
+
+training_cfg:
+  training_epochs: 120
+  batch_size: 12
+  learning_rate: 0.0001
+  adam_b1: 0.8
+  adam_b2: 0.99
+  lr_decay: 0.99
+  segment_size: 24000
+  loss:
+    adv_g: 1.0
+    metric: 0.05
+    fm_g: 1.0
+    magnitude: 0.9
+    phase: 0.3
+    complex: 0.1
+    time: 0.05
+    mel: 0.1
+    consistancy: 0.1
+  use_PCS400: False
+
+stft_cfg:
+  sampling_rate: 16000
+  n_fft: 400
+  hop_size: 100
+  win_size: 400
+
+model_cfg:
+  hid_feature: 48
+  unet_expansion: 1
+  compress_factor: 0.3
+  num_tfmamba: 4
+  d_state: 16
+  d_conv: 4
+  expand: 2
+  norm_epsilon: 0.00001
+  beta: 2.0
+  input_channel: 2
+  output_channel: 1
+  dropout: 0.1

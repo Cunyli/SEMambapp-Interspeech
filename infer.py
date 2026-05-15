@@ -64,7 +64,7 @@ def enhance_audio(model, audio, cfg, device):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run SEMambapp inference on a single audio file.")
-    parser.add_argument("--config", default="config.yaml", help="Path to config yaml.")
+    parser.add_argument("--config", default="configs/train/semambapp_default.yaml", help="Path to config yaml.")
     parser.add_argument("--checkpoint", required=True, help="Path to generator checkpoint.")
     parser.add_argument("--input", required=True, help="Path to input noisy wav/flac.")
     parser.add_argument("--output", required=True, help="Path to output enhanced wav.")

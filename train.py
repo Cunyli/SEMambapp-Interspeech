@@ -3,6 +3,8 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 import itertools
 import os
 import time
+import argparse
+from datetime import datetime
 import torch
 import torch.nn.functional as F
 import wandb
@@ -10,21 +12,32 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler, DataLoader
 import torch.multiprocessing as mp
 import easydict
-from dataset import GSRDataset
+from dataloaders.use_simulation import USESimulationSEMambaDataset
 from model.stfts import mag_phase_stft, mag_phase_istft
 from model.discriminator import MultiScaleSubbandCQTDiscriminator, MultiResolutionDiscriminator, \
     feature_loss, generator_loss, discriminator_loss
 from model.loss import phase_losses, MultiScaleMelSpectrogramLoss
-from utils import load_config, load_ckpts, load_optimizer_states, save_checkpoint, build_env, load_json_file, scan_checkpoint
+from utils import (
+    load_config,
+    load_ckpts,
+    load_optimizer_states,
+    prune_step_checkpoints,
+    save_best_step_checkpoints,
+    save_checkpoint,
+    build_env,
+    load_json_file,
+    scan_checkpoint,
+)
 import random
 import torchaudio
 import torch.distributed as dist
-from evaluation_metrics import load_modules, compute_val_metrics
+from metrics.evaluation import load_modules, compute_val_metrics
 from model.semambapp import SEMambapp
 
 os.environ['MASTER_ADDR'] = 'localhost'
 torch.backends.cudnn.benchmark = True
 steps = 0
+best_pesq = float("-inf")
 
 def get_param_num(model):
     num_param = sum(param.numel() for param in model.parameters())
@@ -71,11 +84,10 @@ def build_runtime_args(config_path, hps):
 
     a = easydict.EasyDict({
         "config": config_path,
-        "clean_train_json": data_cfg.get("clean_train_json", "data/train_speech.json"),
-        "noise_train_json": data_cfg.get("noise_train_json", "data/train_noise.json"),
-        "rir_train_json": data_cfg.get("rir_train_json", "data/train_rir.json"),
-        "clean_valid_json": data_cfg.get("clean_valid_json", "data/val_clean.json"),
-        "degraded_valid_json": data_cfg.get("degraded_valid_json", "data/val_degraded.json"),
+        "dataset_type": data_cfg.get("dataset_type", "use_simulation_fixed"),
+        "use_simulation_root": data_cfg.get("use_simulation_root", "/scratch/work/lil14/USE_simulation"),
+        "train_pair_manifest": data_cfg.get("train_pair_manifest", ""),
+        "valid_pair_manifest": data_cfg.get("valid_pair_manifest", ""),
         "stdout_interval": experiment_cfg.get("stdout_interval", 1250),
         "checkpoint_interval": experiment_cfg.get("checkpoint_interval", 5000),
         "summary_interval": experiment_cfg.get("summary_interval", 1250),
@@ -83,15 +95,48 @@ def build_runtime_args(config_path, hps):
         "exp_path": experiment_cfg.get("exp_path", "exp"),
         "fine_tuning": False,
         "experiment_name": experiment_cfg.get("experiment_name", "train_semambapp"),
+        "use_wandb": bool(experiment_cfg.get("use_wandb", True)),
+        "wandb_project": experiment_cfg.get("wandb_project", "semambapp"),
+        "wandb_entity": experiment_cfg.get("wandb_entity", None),
+        "wandb_mode": experiment_cfg.get("wandb_mode", "online"),
+        "wandb_tags": experiment_cfg.get("wandb_tags", []),
     })
     a.exp_path = os.path.join(a.exp_path, a.experiment_name)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    a.wandb_run_name = "__".join([
+        hps.get("repo_name", "semambapp"),
+        hps.get("experiment", a.experiment_name),
+        a.dataset_type,
+        timestamp,
+    ])
     return a
+
+
+def build_dataset(hps, a, mode, device):
+    if a.dataset_type == "use_simulation_fixed":
+        manifest = a.train_pair_manifest if mode == "Train" else a.valid_pair_manifest
+        if not manifest:
+            raise ValueError(f"{mode} pair manifest is required for use_simulation_fixed dataset.")
+        return USESimulationSEMambaDataset(
+            hps,
+            pair_manifest=manifest,
+            use_simulation_root=a.use_simulation_root,
+            mode=mode,
+            random_start=(mode == "Train"),
+            normalize=True,
+            seed=hps["env_setting"]["seed"],
+        )
+
+    raise ValueError(
+        f"Unsupported dataset_type={a.dataset_type!r}. "
+        "SEMamba training now expects USE_simulation fixed manifests."
+    )
 
 
 def run(rank, n_gpus, a, hps):
 
 
-    global steps
+    global steps, best_pesq
 
     # Initialize distributed training if using multiple GPUs
     if n_gpus > 1:
@@ -104,20 +149,7 @@ def run(rank, n_gpus, a, hps):
     # Collecting filelists for training and validation
 
     # Training dataset configuration
-    trainset = GSRDataset(
-        hps,
-        a.clean_train_json,
-        a.noise_train_json,
-        a.rir_train_json,
-        a.clean_valid_json,
-        a.degraded_valid_json,
-        n_cache_reuse=1, 
-        shuffle=True, 
-        device=device, 
-        pcs=False,
-        seed=None,
-        mode="Train"
-    )
+    trainset = build_dataset(hps, a, "Train", device)
     
     train_sampler = DistributedSampler(trainset, rank = rank) if n_gpus > 1 else None
 
@@ -128,20 +160,7 @@ def run(rank, n_gpus, a, hps):
     # Validation dataset configuration
     validation_loader = None
     if rank == 0:
-        validset = GSRDataset(
-        hps,
-        a.clean_train_json,
-        a.noise_train_json,
-        a.rir_train_json,
-        a.clean_valid_json,
-        a.degraded_valid_json,
-        n_cache_reuse=1, 
-        shuffle=True, 
-        device=device, 
-        pcs=False,
-        seed=None,
-        mode="Validation"
-        )
+        validset = build_dataset(hps, a, "Validation", device)
         if len(validset) > 0:
             validation_loader = DataLoader(
                 validset,
@@ -156,8 +175,23 @@ def run(rank, n_gpus, a, hps):
             print("Validation disabled: no paired validation files were provided.")
 
         # Initialize Weights & Biases logging
-        wandb.init(project="semambapp", name=a.experiment_name, resume="allow")
-        wandb.config.update(hps)
+        if a.use_wandb:
+            os.environ.setdefault("WANDB_DIR", os.path.join(os.getcwd(), "runs", "wandb"))
+            os.environ.setdefault("WANDB_CACHE_DIR", os.path.join(os.getcwd(), "runs", "wandb-cache"))
+            os.makedirs(os.environ["WANDB_DIR"], exist_ok=True)
+            os.makedirs(os.environ["WANDB_CACHE_DIR"], exist_ok=True)
+            wandb.init(
+                project=a.wandb_project,
+                entity=a.wandb_entity,
+                name=a.wandb_run_name,
+                resume="allow",
+                mode=a.wandb_mode,
+                tags=a.wandb_tags,
+                config=hps,
+            )
+            wandb.define_metric("steps")
+            wandb.define_metric("Training/*", step_metric="steps")
+            wandb.define_metric("Validation/*", step_metric="steps")
 
 
     # Initializing modules
@@ -355,29 +389,32 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
 
                 # Checkpointing
                 if steps % a.checkpoint_interval == 0 and steps != 0:
+                    generator_state = {
+                        'generator': (generator.module if n_gpus > 1 else generator).state_dict()
+                    }
+                    optimizer_state = {
+                        'mssbcqtd': (mssbcqtd.module if n_gpus > 1 else mssbcqtd).state_dict(),
+                        'mrd': (mrd.module if n_gpus > 1 else mrd).state_dict(),
+                        'optim_g': optim_g.state_dict(),
+                        'optim_d': optim_d.state_dict(),
+                        'steps': steps,
+                        'epoch': epoch
+                    }
                     exp_name = f"{a.exp_path}/ln_g_{steps:08d}.pth"
                     save_checkpoint(
                         exp_name,
-                        {
-                            'generator': (generator.module if n_gpus > 1 else generator).state_dict()
-                        }
+                        generator_state
                     )
                     exp_name = f"{a.exp_path}/ln_do_{steps:08d}.pth"
 
                     save_checkpoint(
                         exp_name,
-                        {
-                            'mssbcqtd': (mssbcqtd.module if n_gpus > 1 else mssbcqtd).state_dict(),
-                            'mrd': (mrd.module if n_gpus > 1 else mrd).state_dict(),
-                            'optim_g': optim_g.state_dict(),
-                            'optim_d': optim_d.state_dict(),
-                            'steps': steps,
-                            'epoch': epoch
-                        }
+                        optimizer_state
                     )
+                    prune_step_checkpoints(a.exp_path, keep=3, prefixes=("ln_g_", "ln_do_"))
 
                 # Tensorboard summary logging
-                if steps % a.summary_interval == 0:
+                if a.use_wandb and steps % a.summary_interval == 0:
                     wandb.log({"Training/adv_g_loss" :adv_g_loss, "steps":steps})
                     wandb.log({"Training/loss_gen_all" :loss_gen_all, "steps":steps})
                     wandb.log({"Training/adv_d_loss" :loss_disc_all, "steps":steps})
@@ -448,11 +485,31 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                         print('Steps : {:d}, PESQ Score: {:4.3f}, UTMOS: {:4.3f}, MRSTFT Score: {:4.3f}, s/b : {:4.3f}'.
                                 format(steps, val_pesq_score, val_utmos, val_mrstft_score, time.time() - start_b))
 
-                        wandb.log({"Validation/PESQ Score" : val_pesq_score, "steps":steps})
-                        wandb.log({"Validation/UTMOS" : val_utmos, "steps":steps})
-                        wandb.log({"Validation/mrstft_score" : val_mrstft_score, "steps":steps})
-                        wandb.log({"Validation/Magnitude Loss" : val_mag_err, "steps":steps})
-                        wandb.log({"Validation/Phase Loss" : val_pha_err, "steps":steps})
+                        if val_pesq_score > best_pesq:
+                            best_pesq = val_pesq_score
+                            save_best_step_checkpoints(
+                                a.exp_path,
+                                steps,
+                                {
+                                    'generator': (generator.module if n_gpus > 1 else generator).state_dict()
+                                },
+                                {
+                                    'mssbcqtd': (mssbcqtd.module if n_gpus > 1 else mssbcqtd).state_dict(),
+                                    'mrd': (mrd.module if n_gpus > 1 else mrd).state_dict(),
+                                    'optim_g': optim_g.state_dict(),
+                                    'optim_d': optim_d.state_dict(),
+                                    'steps': steps,
+                                    'epoch': epoch,
+                                    'best_pesq': best_pesq,
+                                },
+                            )
+
+                        if a.use_wandb:
+                            wandb.log({"Validation/PESQ Score" : val_pesq_score, "steps":steps})
+                            wandb.log({"Validation/UTMOS" : val_utmos, "steps":steps})
+                            wandb.log({"Validation/mrstft_score" : val_mrstft_score, "steps":steps})
+                            wandb.log({"Validation/Magnitude Loss" : val_mag_err, "steps":steps})
+                            wandb.log({"Validation/Phase Loss" : val_pha_err, "steps":steps})
 
                     generator.train()
 
@@ -467,27 +524,30 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
 def main():
 
     print('Initializing Training Process..')
-    config_path = "config.yaml"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/train/semambapp_default.yaml", help="Path to YAML config.")
+    args = parser.parse_args()
+    config_path = os.path.expanduser(os.path.expandvars(args.config))
 
-    # Ensure CUDA availability for RAF training
-    assert torch.cuda.is_available(), "GSR training requires CUDA."
+    # Ensure CUDA availability for SEMamba++ training
+    assert torch.cuda.is_available(), "SEMamba++ training requires CUDA."
 
-    # Load RAF configuration
+    # Load SEMamba++ configuration
     hps = load_config(config_path)
     a = build_runtime_args(config_path, hps)
 
-    # Setup multi-GPU RAF training
+    # Setup multi-GPU SEMamba++ training
     n_gpus = torch.cuda.device_count()
     hps["training_cfg"]["batch_size"] = hps["training_cfg"]["batch_size"] // n_gpus  # Divide batch size by number of GPUs
-    print("The number of GPUs used for GSR training is:", n_gpus)
-    print("GSR Batch size per GPU is set to:", hps["training_cfg"]["batch_size"])
+    print("The number of GPUs used for SEMamba++ training is:", n_gpus)
+    print("SEMamba++ batch size per GPU is set to:", hps["training_cfg"]["batch_size"])
 
     port = 50000 + random.randint(0, 100)
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = str(port)
     hps["env_setting"]["num_gpus"] = n_gpus
     
-    # Launch RAF training
+    # Launch SEMamba++ training
     if n_gpus > 1:
         mp.spawn(run, nprocs=n_gpus, args=(n_gpus, a, hps,))
     else:
