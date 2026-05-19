@@ -41,7 +41,7 @@ metric_cfg:
 
 training_cfg:
   training_epochs: 120
-  batch_size: 12
+  batch_size: 6
   learning_rate: 0.00002
   adam_b1: 0.8
   adam_b2: 0.99
