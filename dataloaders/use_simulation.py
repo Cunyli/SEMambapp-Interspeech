@@ -12,11 +12,6 @@ def _add_use_simulation_to_path(root):
         sys.path.insert(0, str(root))
 
 
-def peak_normalize(audio_tensor, eps=1e-9):
-    peak = audio_tensor.abs().max()
-    return audio_tensor / (peak + eps)
-
-
 class USESimulationSEMambaDataset(torch.utils.data.Dataset):
     """SEMamba adapter around USE_simulation fixed noisy/clean pair datasets."""
 
@@ -34,12 +29,28 @@ class USESimulationSEMambaDataset(torch.utils.data.Dataset):
         from use_simulation_datasets import FixedPairDataset
 
         self.sampling_rate = int(cfg["stft_cfg"]["sampling_rate"])
-        self.segment_size = int(cfg["training_cfg"]["segment_size"])
+        train_segment_size = int(cfg["training_cfg"]["segment_size"])
+        if mode == "Train":
+            self.segment_size = train_segment_size
+        else:
+            validation_seconds = cfg["training_cfg"].get("validation_segment_seconds")
+            self.segment_size = int(
+                cfg["training_cfg"].get(
+                    "validation_segment_size",
+                    round(float(validation_seconds) * self.sampling_rate)
+                    if validation_seconds is not None
+                    else train_segment_size,
+                )
+            )
         self.n_fft = int(cfg["stft_cfg"]["n_fft"])
         self.hop_size = int(cfg["stft_cfg"]["hop_size"])
         self.win_size = int(cfg["stft_cfg"]["win_size"])
         self.compress_factor = float(cfg["model_cfg"]["compress_factor"])
         self.mode = mode
+        self.validation_random_start = bool(cfg["training_cfg"].get("validation_random_start", False))
+        self.validation_prefer_active = bool(cfg["training_cfg"].get("validation_prefer_active", True))
+        self.activity_threshold = float(cfg["training_cfg"].get("validation_activity_threshold", 0.01))
+        self.min_active_ratio = float(cfg["training_cfg"].get("validation_min_active_ratio", 0.05))
 
         self.dataset = FixedPairDataset(
             pair_manifest=pair_manifest,
@@ -51,15 +62,12 @@ class USESimulationSEMambaDataset(torch.utils.data.Dataset):
             normalize=normalize,
             seed=seed,
         )
-        self.random_start = bool(random_start and mode == "Train")
+        self.random_start = bool((random_start and mode == "Train") or (mode != "Train" and self.validation_random_start))
 
     def __getitem__(self, index):
         degraded_audio, clean_audio, _ = self.dataset[index]
         clean_audio = torch.as_tensor(clean_audio, dtype=torch.float32).reshape(1, -1)
         degraded_audio = torch.as_tensor(degraded_audio, dtype=torch.float32).reshape(1, -1)
-
-        clean_audio = peak_normalize(clean_audio)
-        degraded_audio = peak_normalize(degraded_audio)
 
         clean_audio, degraded_audio = self._crop_or_pad_pair(clean_audio, degraded_audio)
 
@@ -83,16 +91,20 @@ class USESimulationSEMambaDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    def sample_id(self, index):
+        return self.dataset.meta_selected[index]["id"]
+
     def _crop_or_pad_pair(self, clean_audio, degraded_audio):
         length = min(clean_audio.size(1), degraded_audio.size(1))
         clean_audio = clean_audio[:, :length]
         degraded_audio = degraded_audio[:, :length]
 
         if length >= self.segment_size:
+            start = 0
             if self.random_start:
                 start = int(torch.randint(0, length - self.segment_size + 1, (1,)).item())
-            else:
-                start = 0
+            if self.mode != "Train" and self.validation_prefer_active:
+                start = self._active_start(clean_audio, length, fallback=start)
             return (
                 clean_audio[:, start : start + self.segment_size],
                 degraded_audio[:, start : start + self.segment_size],
@@ -102,3 +114,18 @@ class USESimulationSEMambaDataset(torch.utils.data.Dataset):
         clean_audio = torch.nn.functional.pad(clean_audio, (0, pad), "constant")
         degraded_audio = torch.nn.functional.pad(degraded_audio, (0, pad), "constant")
         return clean_audio, degraded_audio
+
+    def _active_start(self, clean_audio, length, fallback):
+        max_start = length - self.segment_size
+        if max_start <= 0:
+            return 0
+
+        active = (clean_audio.squeeze(0).abs() > self.activity_threshold).float()
+        window = torch.ones(1, 1, self.segment_size, device=active.device)
+        counts = torch.nn.functional.conv1d(active.view(1, 1, -1), window).squeeze()
+        valid = torch.nonzero(counts >= self.segment_size * self.min_active_ratio).flatten()
+        if valid.numel() == 0:
+            return fallback
+        if self.random_start:
+            return int(valid[torch.randint(0, valid.numel(), (1,)).item()].item())
+        return int(valid[0].item())

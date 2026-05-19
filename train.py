@@ -4,6 +4,8 @@ import itertools
 import os
 import time
 import argparse
+import math
+import json
 from datetime import datetime
 import torch
 import torch.nn.functional as F
@@ -78,6 +80,51 @@ def load_ckpts_spec(args, device, prefix):
     return None, None, 0, -1
 
 
+def load_pretrained_if_requested(args, hps, device):
+    """Load a base checkpoint for fine-tuning when no local resume checkpoint exists."""
+    fine_tune_cfg = hps.get("fine_tuning_cfg", {})
+    if not args.fine_tuning:
+        return None, None
+
+    generator_path = fine_tune_cfg.get("pretrained_generator_checkpoint", "")
+    discriminator_path = fine_tune_cfg.get("pretrained_discriminator_checkpoint", "")
+
+    if not generator_path:
+        raise ValueError(
+            "fine_tuning_cfg.enabled is true, but pretrained_generator_checkpoint is empty "
+            "and no local resume checkpoint was found."
+        )
+
+    state_dict_g = load_checkpoint(generator_path, device) if generator_path else None
+    state_dict_do = load_checkpoint(discriminator_path, device) if discriminator_path else None
+
+    if state_dict_g is not None and args.fine_tuning:
+        print(f"Starting fine-tuning from pretrained generator: {generator_path}")
+    if state_dict_do is not None and args.fine_tuning:
+        print(f"Starting fine-tuning from pretrained discriminators: {discriminator_path}")
+
+    return state_dict_g, state_dict_do
+
+
+def load_pesq_invalid_ids(hps):
+    metric_cfg = hps.get("metric_cfg", {})
+    path = metric_cfg.get("pesq_invalid_manifest", "")
+    if not path:
+        return set()
+
+    invalid_ids = set()
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            sample_id = record.get("uid") or record.get("id")
+            if sample_id:
+                invalid_ids.add(sample_id)
+    print(f"Loaded {len(invalid_ids)} PESQ-invalid sample ids from {path}")
+    return invalid_ids
+
+
 def build_runtime_args(config_path, hps):
     data_cfg = hps.get("data_cfg", {})
     experiment_cfg = hps.get("experiment_cfg", {})
@@ -93,7 +140,7 @@ def build_runtime_args(config_path, hps):
         "summary_interval": experiment_cfg.get("summary_interval", 1250),
         "validation_interval": experiment_cfg.get("validation_interval", 5000),
         "exp_path": experiment_cfg.get("exp_path", "exp"),
-        "fine_tuning": False,
+        "fine_tuning": bool(hps.get("fine_tuning_cfg", {}).get("enabled", False)),
         "experiment_name": experiment_cfg.get("experiment_name", "train_semambapp"),
         "use_wandb": bool(experiment_cfg.get("use_wandb", True)),
         "wandb_project": experiment_cfg.get("wandb_project", "semambapp"),
@@ -189,10 +236,6 @@ def run(rank, n_gpus, a, hps):
                 tags=a.wandb_tags,
                 config=hps,
             )
-            wandb.define_metric("steps")
-            wandb.define_metric("Training/*", step_metric="steps")
-            wandb.define_metric("Validation/*", step_metric="steps")
-
 
     # Initializing modules
     univsemamba = SEMambapp(hps).to(device)
@@ -202,6 +245,7 @@ def run(rank, n_gpus, a, hps):
     fn_mel_loss_multiscale = MultiScaleMelSpectrogramLoss(
                 sampling_rate=hps["stft_cfg"]["sampling_rate"]
             ).to(device) 
+    pesq_invalid_ids = load_pesq_invalid_ids(hps) if rank == 0 else set()
     if validation_loader is not None or rank != 0:
         mrstft, pesq, utmos = load_modules(hps, device)
     else:
@@ -217,10 +261,14 @@ def run(rank, n_gpus, a, hps):
 
 
     state_dict_g, state_dict_do, steps, last_epoch = load_ckpts_spec(a, device, prefix='ln_')
+    resume_from_local_checkpoint = state_dict_g is not None
+    if state_dict_g is None:
+        state_dict_g, state_dict_do = load_pretrained_if_requested(a, hps, device)
     if state_dict_g is not None:
-        univsemamba.load_state_dict(state_dict_g['generator'], strict=False)
-        mssbcqtd.load_state_dict(state_dict_do['mssbcqtd'], strict=False)
-        mrd.load_state_dict(state_dict_do['mrd'], strict=False)
+        univsemamba.load_state_dict(state_dict_g.get('generator', state_dict_g), strict=False)
+        if state_dict_do is not None and 'mssbcqtd' in state_dict_do and 'mrd' in state_dict_do:
+            mssbcqtd.load_state_dict(state_dict_do['mssbcqtd'], strict=False)
+            mrd.load_state_dict(state_dict_do['mrd'], strict=False)
 
 
     optim_g = torch.optim.AdamW(univsemamba.parameters(), hps["training_cfg"]["learning_rate"], betas=[hps["training_cfg"]["adam_b1"], hps["training_cfg"]["adam_b2"]])
@@ -228,7 +276,7 @@ def run(rank, n_gpus, a, hps):
                                 hps["training_cfg"]["learning_rate"], betas=[hps["training_cfg"]["adam_b1"], hps["training_cfg"]["adam_b2"]])
 
     # Load optimizer states
-    if state_dict_do is not None:
+    if resume_from_local_checkpoint and state_dict_do is not None:
         print("Loading Optimizer States...")
         optim_g.load_state_dict(state_dict_do['optim_g'])
         optim_d.load_state_dict(state_dict_do['optim_d'])
@@ -257,13 +305,13 @@ def run(rank, n_gpus, a, hps):
             print("Epoch: {:d}".format(epoch))
             print('Learning Rate : {:.6f}'.format(optim_g.param_groups[0]['lr']))
             train(a, rank, epoch, hps, univsemamba, [mssbcqtd, mrd], [fn_mel_loss_multiscale, mrstft, pesq, utmos], [optim_g, optim_d],
-                     [scheduler_g, scheduler_d], [train_loader, validation_loader], n_gpus, device)
+                     [scheduler_g, scheduler_d], [train_loader, validation_loader], n_gpus, device, pesq_invalid_ids)
             print('Time taken for epoch {} is {} sec\n'.format(epoch + 1, int(time.time() - start)))
         else:
             train(a, rank, epoch, hps, univsemamba, [mssbcqtd, mrd], [fn_mel_loss_multiscale, mrstft, pesq, utmos], [optim_g, optim_d],
-                     [scheduler_g, scheduler_d], [train_loader, None], n_gpus, device)
+                     [scheduler_g, scheduler_d], [train_loader, None], n_gpus, device, pesq_invalid_ids)
 
-def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_gpus, device=None):
+def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_gpus, device=None, pesq_invalid_ids=None):
 
     generator = nets
     mssbcqtd, mrd = discs
@@ -272,7 +320,8 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
     scheduler_g, scheduler_d = schedulers
     train_loader, validation_loader = loaders
 
-    global steps
+    global steps, best_pesq
+    pesq_invalid_ids = pesq_invalid_ids or set()
 
     # Set epoch for distributed sampler
     if n_gpus > 1:
@@ -343,7 +392,7 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
         # L2 Complex Loss
         loss_com = F.mse_loss(clean_com, com_g) * 2
         # Time Loss
-        #loss_time = F.l1_loss(clean_audio, audio_g)
+        loss_time = F.l1_loss(clean_audio, audio_g)
 
         # Consistency Loss
         _, _, rec_com = mag_phase_stft(audio_g, hps["stft_cfg"]["n_fft"], hps["stft_cfg"]["hop_size"], hps["stft_cfg"]["win_size"], hps["model_cfg"]["compress_factor"], addeps=True)
@@ -360,6 +409,7 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
             loss_mag * hps['training_cfg']['loss']['magnitude'] +
             loss_pha * hps['training_cfg']['loss']['phase'] +
             loss_com * hps['training_cfg']['loss']['complex'] +
+            loss_time * hps['training_cfg']['loss'].get('time', 0.0) +
             loss_con * hps['training_cfg']['loss']['consistancy']
         )
 
@@ -377,7 +427,7 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                         ip_error, gd_error, iaf_error = phase_losses(clean_pha, pha_g, hps)
                         pha_error = (ip_error+gd_error+iaf_error).item()
                         com_error = F.mse_loss(clean_com, com_g).item()
-                        time_error = F.l1_loss(clean_audio, audio_g).item()
+                        time_error = loss_time.item()
                         con_error = F.mse_loss( com_g, rec_com ).item()
                         mel_error = fn_mel_loss_multiscale(clean_audio.unsqueeze(1), audio_g.unsqueeze(1)).item()
                         print(
@@ -415,16 +465,20 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
 
                 # Tensorboard summary logging
                 if a.use_wandb and steps % a.summary_interval == 0:
-                    wandb.log({"Training/adv_g_loss" :adv_g_loss, "steps":steps})
-                    wandb.log({"Training/loss_gen_all" :loss_gen_all, "steps":steps})
-                    wandb.log({"Training/adv_d_loss" :loss_disc_all, "steps":steps})
-                    wandb.log({"Training/fm_g_loss" :fm_g_loss, "steps":steps})
-                    wandb.log({"Training/mag_error" :mag_error, "steps":steps})
-                    wandb.log({"Training/pha_error" :pha_error, "steps":steps})
-                    wandb.log({"Training/com_error" :com_error, "steps":steps})
-                    wandb.log({"Training/time_error" :time_error, "steps":steps})
-                    wandb.log({"Training/con_error" :con_error, "steps":steps})
-                    wandb.log({"Training/mel_error" :mel_loss, "steps":steps})
+                    wandb.log({
+                        "Training/adv_g_loss": adv_g_loss,
+                        "Training/loss_gen_all": loss_gen_all,
+                        "Training/adv_d_loss": loss_disc_all,
+                        "Training/fm_g_loss": fm_g_loss,
+                        "Training/mag_error": mag_error,
+                        "Training/pha_error": pha_error,
+                        "Training/com_error": com_error,
+                        "Training/time_error": time_error,
+                        "Training/con_error": con_error,
+                        "Training/mel_error": mel_loss,
+                        "Charts/epoch": epoch,
+                        "Charts/learning_rate": optim_g.param_groups[0]['lr'],
+                    }, step=steps)
 
                 # If NaN happend in training period, RaiseError
                 if torch.isnan(loss_gen_all).any():
@@ -439,10 +493,15 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                     val_mag_err_tot = 0
                     val_pha_err_tot = 0
                     val_com_err_tot = 0
+                    val_time_err_tot = 0
                     val_mrstft_score = 0
                     val_pesq_score = 0
+                    val_pesq_count = 0
+                    val_pesq_failures = 0
+                    val_pesq_skipped = 0
                     val_utmos = 0
                     with torch.no_grad():
+                        validation_dataset = getattr(validation_loader, "dataset", None)
                         for j, batch in enumerate(validation_loader):
                             clean_audio, clean_mag, clean_pha, clean_com, noisy_audio, noisy_mag, noisy_pha = batch # [B, 1, F, T], F = nfft // 2+ 1, T = nframes
                             clean_audio = torch.autograd.Variable(clean_audio.to(device, non_blocking=True))
@@ -468,24 +527,34 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                                 audio_g = audio_g[:, :clean_audio.size(1)]
                             elif audio_g.size(1) < clean_audio.size(1):
                                 clean_audio = clean_audio[:, :audio_g.size(1)]
+                            val_time_err_tot += F.l1_loss(clean_audio, audio_g).item()
 
-                            score_metrics = compute_val_metrics(mrstft, pesq, utmos, clean_audio, audio_g, hps) 
+                            sample_id = validation_dataset.sample_id(j) if validation_dataset is not None and hasattr(validation_dataset, "sample_id") else None
+                            skip_pesq = sample_id in pesq_invalid_ids if sample_id is not None else False
+                            score_metrics = compute_val_metrics(mrstft, pesq, utmos, clean_audio, audio_g, hps, skip_pesq=skip_pesq) 
 
                             val_mrstft_score += score_metrics["mrstft_score"].item()
-                            val_pesq_score += score_metrics["pesq_score"].item()
+                            if score_metrics["pesq_valid"] and not torch.isnan(score_metrics["pesq_score"]).any():
+                                val_pesq_score += score_metrics["pesq_score"].item()
+                                val_pesq_count += 1
+                            elif score_metrics.get("pesq_skipped", False):
+                                val_pesq_skipped += 1
+                            else:
+                                val_pesq_failures += 1
                             val_utmos += score_metrics["utmos_score"].item()
 
                         val_mag_err = val_mag_err_tot / (j+1)
                         val_pha_err = val_pha_err_tot / (j+1)
                         val_com_err = val_com_err_tot / (j+1)
+                        val_time_err = val_time_err_tot / (j+1)
                         val_mrstft_score = val_mrstft_score / (j+1)
-                        val_pesq_score = val_pesq_score / (j+1)
+                        val_pesq_score = val_pesq_score / val_pesq_count if val_pesq_count > 0 else float("nan")
                         val_utmos = val_utmos / (j+1)
 
-                        print('Steps : {:d}, PESQ Score: {:4.3f}, UTMOS: {:4.3f}, MRSTFT Score: {:4.3f}, s/b : {:4.3f}'.
-                                format(steps, val_pesq_score, val_utmos, val_mrstft_score, time.time() - start_b))
+                        print('Steps : {:d}, PESQ Score: {:4.3f}, UTMOS: {:4.3f}, MRSTFT Score: {:4.3f}, Mag Loss: {:4.3f}, Pha Loss: {:4.3f}, Com Loss: {:4.3f}, Time Loss: {:4.3f}, s/b : {:4.3f}'.
+                                format(steps, val_pesq_score, val_utmos, val_mrstft_score, val_mag_err, val_pha_err, val_com_err, val_time_err, time.time() - start_b))
 
-                        if val_pesq_score > best_pesq:
+                        if val_pesq_count > 0 and not math.isnan(val_pesq_score) and val_pesq_score > best_pesq:
                             best_pesq = val_pesq_score
                             save_best_step_checkpoints(
                                 a.exp_path,
@@ -505,11 +574,17 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                             )
 
                         if a.use_wandb:
-                            wandb.log({"Validation/PESQ Score" : val_pesq_score, "steps":steps})
-                            wandb.log({"Validation/UTMOS" : val_utmos, "steps":steps})
-                            wandb.log({"Validation/mrstft_score" : val_mrstft_score, "steps":steps})
-                            wandb.log({"Validation/Magnitude Loss" : val_mag_err, "steps":steps})
-                            wandb.log({"Validation/Phase Loss" : val_pha_err, "steps":steps})
+                            validation_log = {
+                                "Validation/UTMOS": val_utmos,
+                                "Validation/mrstft_score": val_mrstft_score,
+                                "Validation/Magnitude Loss": val_mag_err,
+                                "Validation/Phase Loss": val_pha_err,
+                                "Validation/Time Loss": val_time_err,
+                                "Validation/Complex Loss": val_com_err,
+                            }
+                            if not math.isnan(val_pesq_score):
+                                validation_log["Validation/PESQ Score"] = val_pesq_score
+                            wandb.log(validation_log, step=steps)
 
                     generator.train()
 

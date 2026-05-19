@@ -35,10 +35,15 @@ def enhance_audio(model, audio, cfg, device):
         audio = audio.squeeze(0)
     audio = audio.unsqueeze(0)
 
+    eps = 1e-9
+    input_peak = audio.abs().max()
+    input_scale = 0.9 / (input_peak + eps)
+    normalized_audio = audio * input_scale
+
     stft_cfg = cfg["stft_cfg"]
     compress_factor = cfg["model_cfg"]["compress_factor"]
     mag, pha, _ = mag_phase_stft(
-        audio,
+        normalized_audio,
         stft_cfg["n_fft"],
         stft_cfg["hop_size"],
         stft_cfg["win_size"],
@@ -55,10 +60,11 @@ def enhance_audio(model, audio, cfg, device):
         compress_factor,
     )
 
+    enhanced_audio = enhanced_audio / input_scale
     enhanced_audio = enhanced_audio.squeeze(0).cpu()
     peak = enhanced_audio.abs().max()
     if peak > 1.0:
-        enhanced_audio = enhanced_audio / peak
+        enhanced_audio = enhanced_audio * (0.99 / peak)
     return enhanced_audio.unsqueeze(0)
 
 

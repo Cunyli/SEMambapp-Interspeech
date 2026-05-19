@@ -25,7 +25,7 @@ def load_modules(cfg, device):
     return mrstft, pesq, utmos
 
 
-def compute_val_metrics(mrstft, pesq, utmos, clean, pred, cfg):
+def compute_val_metrics(mrstft, pesq, utmos, clean, pred, cfg, skip_pesq=False):
     """
     clean, pred: torch.FloatTensor (B, T)
     """
@@ -37,11 +37,20 @@ def compute_val_metrics(mrstft, pesq, utmos, clean, pred, cfg):
 
     # PESQ can fail on pathological or very low-energy utterances. Keep
     # validation running and rely on MRSTFT/UTMOS for those cases.
-    try:
-        pesq_score = pesq(pred, clean)
-    except Exception as exc:
-        print(f"Warning: PESQ failed during validation ({exc}). Using 0.0.")
-        pesq_score = torch.zeros((), device=device)
+    if skip_pesq:
+        pesq_score = torch.full((), float("nan"), device=device)
+        pesq_valid = False
+        pesq_skipped = True
+    else:
+        try:
+            pesq_score = pesq(pred, clean)
+            pesq_valid = True
+            pesq_skipped = False
+        except Exception as exc:
+            print(f"Warning: PESQ failed during validation ({exc}). Excluding this sample from PESQ mean.")
+            pesq_score = torch.full((), float("nan"), device=device)
+            pesq_valid = False
+            pesq_skipped = False
 
 
     # UTMOS
@@ -51,5 +60,7 @@ def compute_val_metrics(mrstft, pesq, utmos, clean, pred, cfg):
     return {
         "mrstft_score": mrstft_loss.mean(),
         "pesq_score": pesq_score.mean(),
+        "pesq_valid": pesq_valid,
+        "pesq_skipped": pesq_skipped,
         "utmos_score": utmos_score.mean()
     }
