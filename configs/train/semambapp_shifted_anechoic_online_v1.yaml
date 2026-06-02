@@ -1,14 +1,14 @@
 repo_name: semambapp
 model_name: semambapp
-experiment: legacy_pretrain_main_v1
-wandb_change: legacy_pretrain_main_v1
+experiment: shifted_anechoic_online_v1
+wandb_change: shifted_anechoic_online_v1
 
 env_setting:
   num_workers: 8
   seed: 1234
   dist_cfg:
     dist_backend: nccl
-    dist_url: tcp://localhost:19427
+    dist_url: tcp://localhost:19428
     world_size: 1
 
 data_cfg:
@@ -21,12 +21,12 @@ data_cfg:
   degraded_valid_json: ${SEMAMBAPP_LEGACY_DEGRADED_VALID_JSON:-/scratch/work/lil14/USE_simulation/data/main/valid/degraded.json}
 
 target_cfg:
-  type: legacy_clean
+  type: shifted_anechoic
   rir_delay_mode: argmax_abs
 
 experiment_cfg:
   exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-/scratch/work/lil14/SEMambapp-Interspeech/exp}
-  experiment_name: pretrain_semambapp_main_v1
+  experiment_name: semambapp_shifted_anechoic_online_v1
   stdout_interval: 50
   checkpoint_interval_steps: 5000
   wandb_log_interval_steps: 50
@@ -39,7 +39,7 @@ experiment_cfg:
   wandb_mode: online
   wandb_tags:
     - legacy_pretrain
-    - main
+    - shifted_anechoic
     - online_degradation
     - fixed_validation
 

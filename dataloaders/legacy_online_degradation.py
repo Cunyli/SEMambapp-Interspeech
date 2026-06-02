@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import librosa
+import numpy as np
 import torch
 
 from model.stfts import mag_phase_stft
@@ -37,6 +38,52 @@ def _load_json_file(path):
         return json.load(handle)
 
 
+def _rir_direct_path_delay(rir_audio, mode="argmax_abs"):
+    if mode != "argmax_abs":
+        raise ValueError(f"Unsupported rir_delay_mode: {mode}")
+
+    rir_array = np.asarray(rir_audio)
+    if rir_array.ndim == 0 or rir_array.size == 0:
+        return 0
+    if rir_array.ndim == 1:
+        rir_magnitude = np.abs(rir_array)
+    else:
+        rir_magnitude = np.max(np.abs(rir_array), axis=0)
+    return int(np.argmax(rir_magnitude))
+
+
+def _shift_clean_by_delay(clean_audio, delay_samples):
+    delay_samples = int(delay_samples)
+    clean_array = np.asarray(clean_audio)
+    if delay_samples <= 0:
+        return clean_array.copy()
+
+    shifted = np.zeros_like(clean_array)
+    length = clean_array.shape[-1]
+    if delay_samples < length:
+        shifted[..., delay_samples:] = clean_array[..., : length - delay_samples]
+    return shifted
+
+
+def _target_audio_for_selected_degradations(
+    clean_audio,
+    rir_audio,
+    selected_degradations,
+    target_type="legacy_clean",
+    rir_delay_mode="argmax_abs",
+):
+    if target_type == "legacy_clean":
+        return np.asarray(clean_audio).copy()
+    if target_type != "shifted_anechoic":
+        raise ValueError(f"Unsupported target_cfg.type: {target_type}")
+
+    if "reverb" not in selected_degradations:
+        return np.asarray(clean_audio).copy()
+
+    delay_samples = _rir_direct_path_delay(rir_audio, mode=rir_delay_mode)
+    return _shift_clean_by_delay(clean_audio, delay_samples)
+
+
 class LegacyOnlineDegradationDataset(torch.utils.data.Dataset):
     """Legacy SEMamba++ pretraining dataset with on-the-fly train degradation."""
 
@@ -66,6 +113,9 @@ class LegacyOnlineDegradationDataset(torch.utils.data.Dataset):
         self.hop_size = int(cfg["stft_cfg"]["hop_size"])
         self.win_size = int(cfg["stft_cfg"]["win_size"])
         self.compress_factor = float(cfg["model_cfg"]["compress_factor"])
+        target_cfg = cfg.get("target_cfg", {})
+        self.target_type = target_cfg.get("type", "legacy_clean")
+        self.rir_delay_mode = target_cfg.get("rir_delay_mode", "argmax_abs")
 
         self.clean_wavs_path = _load_json_file(clean_json)
         self.noise_wavs_path = _load_json_file(noise_json)
@@ -113,16 +163,23 @@ class LegacyOnlineDegradationDataset(torch.utils.data.Dataset):
                 selected_degrads,
                 seed=self.seed,
             )
+            target_audio = _target_audio_for_selected_degradations(
+                clean_audio,
+                rir_audio,
+                selected_degrads,
+                target_type=getattr(self, "target_type", "legacy_clean"),
+                rir_delay_mode=getattr(self, "rir_delay_mode", "argmax_abs"),
+            )
         else:
-            clean_audio = self._load_audio(self.clean_val_path[index])
+            target_audio = self._load_audio(self.clean_val_path[index])
             degraded_audio = self._load_audio(self.degraded_val_path[index])
 
-        clean_audio = _peak_normalize(torch.as_tensor(clean_audio, dtype=torch.float32))
+        target_audio = _peak_normalize(torch.as_tensor(target_audio, dtype=torch.float32))
         degraded_audio = _peak_normalize(torch.as_tensor(degraded_audio, dtype=torch.float32))
-        clean_audio, degraded_audio = self._crop_or_pad_pair(clean_audio, degraded_audio)
+        target_audio, degraded_audio = self._crop_or_pad_pair(target_audio, degraded_audio)
 
-        clean_mag, clean_pha, clean_com = mag_phase_stft(
-            clean_audio,
+        target_mag, target_pha, target_com = mag_phase_stft(
+            target_audio,
             self.n_fft,
             self.hop_size,
             self.win_size,
@@ -137,10 +194,10 @@ class LegacyOnlineDegradationDataset(torch.utils.data.Dataset):
         )
 
         return (
-            clean_audio.squeeze(),
-            clean_mag.squeeze(),
-            clean_pha.squeeze(),
-            clean_com.squeeze(),
+            target_audio.squeeze(),
+            target_mag.squeeze(),
+            target_pha.squeeze(),
+            target_com.squeeze(),
             degraded_audio.squeeze(),
             degraded_mag.squeeze(),
             degraded_pha.squeeze(),
