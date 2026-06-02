@@ -12,6 +12,7 @@ GPUS="${GPUS:-1}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 MEMORY="${MEMORY:-64G}"
 TIME_LIMIT="${TIME_LIMIT:-04:00:00}"
+DEPENDENCY="${DEPENDENCY:-}"
 SOFTWARE_STACK_MODULE="${SOFTWARE_STACK_MODULE:-triton/2025.1-gcc}"
 COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
 
@@ -32,6 +33,10 @@ submit_self() {
     "--output=$LOG_DIR/slurm_%j.out"
     "--error=$LOG_DIR/slurm_%j.err"
   )
+
+  if [[ -n "$DEPENDENCY" ]]; then
+    sbatch_args+=("--dependency=$DEPENDENCY")
+  fi
 
   if [[ -n "$GPU_TYPE" ]]; then
     sbatch_args+=("--gres=gpu:${GPU_TYPE}:${GPUS}")
@@ -62,8 +67,21 @@ load_runtime() {
 
 best_semambapp_checkpoint() {
   local ckpt_dir="${1:-$ROOT_DIR/exp/train_semambapp_tau_fixed}"
-  find "$ckpt_dir" -maxdepth 1 -type f -name "best_ln_g_*.pth" | sort -V | tail -n 1 ||
-    find "$ckpt_dir" -maxdepth 1 -type f -name "ln_g_*.pth" | sort -V | tail -n 1
+  local ckpt
+
+  ckpt="$(find "$ckpt_dir" -maxdepth 1 -type f -name "best_guarded_ln_g_*.pth" | sort -V | tail -n 1)"
+  if [[ -n "$ckpt" ]]; then
+    echo "$ckpt"
+    return 0
+  fi
+
+  ckpt="$(find "$ckpt_dir" -maxdepth 1 -type f -name "best_avqi_gap_ln_g_*.pth" | sort -V | tail -n 1)"
+  if [[ -n "$ckpt" ]]; then
+    echo "$ckpt"
+    return 0
+  fi
+
+  find "$ckpt_dir" -maxdepth 1 -type f -name "ln_g_*.pth" | sort -V | tail -n 1
 }
 
 write_eval_scps() {
@@ -95,9 +113,12 @@ run_train() {
   CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/train/semambapp_tau_fixed.yaml}"
   USE_SIMULATION_ROOT="${USE_SIMULATION_ROOT:-/scratch/work/lil14/USE_simulation}"
   SEMAMBAPP_EXPERIMENT_ROOT="${SEMAMBAPP_EXPERIMENT_ROOT:-$ROOT_DIR/exp}"
+  SEMAMBAPP_PRETRAINED_GENERATOR_CKPT="${SEMAMBAPP_PRETRAINED_GENERATOR_CKPT:-}"
+  SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT="${SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT:-}"
   SEMAMBAPP_TAU_FIXED_TRAIN_CSV="${SEMAMBAPP_TAU_FIXED_TRAIN_CSV:-/scratch/work/lil14/data/TAU/simulated/phone_room/train/paired.csv}"
   SEMAMBAPP_TAU_FIXED_VALID_CSV="${SEMAMBAPP_TAU_FIXED_VALID_CSV:-/scratch/work/lil14/data/TAU/simulated/phone_room/valid/paired.csv}"
   export USE_SIMULATION_ROOT SEMAMBAPP_EXPERIMENT_ROOT
+  export SEMAMBAPP_PRETRAINED_GENERATOR_CKPT SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT
   export SEMAMBAPP_TAU_FIXED_TRAIN_CSV SEMAMBAPP_TAU_FIXED_VALID_CSV
 
   test -f "$CONFIG_PATH"

@@ -5,8 +5,15 @@ import os
 import time
 import argparse
 import math
-import json
+import re
+import sys
 from datetime import datetime
+
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+if REPO_ROOT in sys.path:
+    sys.path.remove(REPO_ROOT)
+sys.path.insert(0, REPO_ROOT)
+
 import torch
 import torch.nn.functional as F
 import wandb
@@ -14,6 +21,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler, DataLoader
 import torch.multiprocessing as mp
 import easydict
+from dataloaders.legacy_online_degradation import LegacyOnlineDegradationDataset
 from dataloaders.use_simulation import USESimulationSEMambaDataset
 from model.stfts import mag_phase_stft, mag_phase_istft
 from model.discriminator import MultiScaleSubbandCQTDiscriminator, MultiResolutionDiscriminator, \
@@ -35,11 +43,168 @@ import torchaudio
 import torch.distributed as dist
 from metrics.evaluation import load_modules, compute_val_metrics
 from model.semambapp import SEMambapp
+sys.path.append("/scratch/work/lil14/use_simulation_pipeline/scripts")
+from validation_avqi_gap import run_validation_avqi_metrics
+
+
+def log_validation_avqi_metrics(generator, hps, device, global_step):
+    sampling_rate = hps["stft_cfg"]["sampling_rate"]
+    generator.eval()
+
+    @torch.inference_mode()
+    def enhance_one(path):
+        audio, source_rate = torchaudio.load(path)
+        if audio.size(0) > 1:
+            audio = audio.mean(dim=0, keepdim=True)
+        if source_rate != sampling_rate:
+            audio = torchaudio.functional.resample(audio, source_rate, sampling_rate)
+        audio = audio.squeeze(0).to(device)
+        scale = 0.9 / audio.abs().max().clamp_min(1e-9)
+        normalized = (audio * scale).unsqueeze(0)
+        mag, pha, _ = mag_phase_stft(
+            normalized,
+            hps["stft_cfg"]["n_fft"],
+            hps["stft_cfg"]["hop_size"],
+            hps["stft_cfg"]["win_size"],
+            hps["model_cfg"]["compress_factor"],
+        )
+        enhanced_mag, enhanced_pha, _ = generator(mag, pha)
+        enhanced = mag_phase_istft(
+            enhanced_mag,
+            enhanced_pha,
+            hps["stft_cfg"]["n_fft"],
+            hps["stft_cfg"]["hop_size"],
+            hps["stft_cfg"]["win_size"],
+            hps["model_cfg"]["compress_factor"],
+        )
+        return (enhanced / scale).squeeze().cpu().numpy(), sampling_rate
+
+    metrics = run_validation_avqi_metrics("semambapp", global_step, enhance_one)
+    generator.train()
+    return metrics
+
+
+def save_best_avqi_gap_checkpoints(generator, discs, optims, exp_path, epoch, global_step, n_gpus, gap):
+    generator_module = generator.module if n_gpus > 1 else generator
+    best_gap = getattr(generator_module, "_best_avqi_gap_to_clean", float("inf"))
+    if gap < 0 or gap >= best_gap:
+        return
+
+    mssbcqtd, mrd = discs
+    optim_g, optim_d = optims
+    generator_module._best_avqi_gap_to_clean = gap
+    generator_state = {"generator": generator_module.state_dict()}
+    optimizer_state = {
+        "mssbcqtd": (mssbcqtd.module if n_gpus > 1 else mssbcqtd).state_dict(),
+        "mrd": (mrd.module if n_gpus > 1 else mrd).state_dict(),
+        "optim_g": optim_g.state_dict(),
+        "optim_d": optim_d.state_dict(),
+        "steps": global_step,
+        "epoch": epoch,
+        "best_avqi_gap_to_clean": gap,
+    }
+    save_best_step_checkpoints(
+        exp_path,
+        global_step,
+        generator_state,
+        optimizer_state,
+        generator_prefix="avqi_gap_ln_g_",
+        optimizer_prefix="avqi_gap_ln_do_",
+    )
+
+
+def save_best_guarded_checkpoints(generator, discs, optims, exp_path, epoch, global_step, n_gpus, val_loss):
+    generator_module = generator.module if n_gpus > 1 else generator
+    latest_gap = getattr(generator_module, "_latest_avqi_gap_to_clean", None)
+    best_loss = getattr(generator_module, "_best_guarded_val_loss", float("inf"))
+    if latest_gap is None or latest_gap < 0 or val_loss >= best_loss:
+        return
+
+    mssbcqtd, mrd = discs
+    optim_g, optim_d = optims
+    generator_module._best_guarded_val_loss = val_loss
+    generator_state = {"generator": generator_module.state_dict()}
+    optimizer_state = {
+        "mssbcqtd": (mssbcqtd.module if n_gpus > 1 else mssbcqtd).state_dict(),
+        "mrd": (mrd.module if n_gpus > 1 else mrd).state_dict(),
+        "optim_g": optim_g.state_dict(),
+        "optim_d": optim_d.state_dict(),
+        "steps": global_step,
+        "epoch": epoch,
+        "best_avqi_gap_to_clean": getattr(generator_module, "_best_avqi_gap_to_clean", float("inf")),
+        "latest_avqi_gap_to_clean": latest_gap,
+        "best_guarded_val_loss": val_loss,
+    }
+    save_best_step_checkpoints(
+        exp_path,
+        global_step,
+        generator_state,
+        optimizer_state,
+        generator_prefix="guarded_ln_g_",
+        optimizer_prefix="guarded_ln_do_",
+    )
+
 
 os.environ['MASTER_ADDR'] = 'localhost'
 torch.backends.cudnn.benchmark = True
 steps = 0
-best_pesq = float("-inf")
+
+
+WANDB_STANDARD_TAG = "wandb_standard_v1"
+
+
+def scalar_value(value):
+    if torch.is_tensor(value):
+        return float(value.detach().cpu().item())
+    return float(value)
+
+
+def grad_norm(parameters):
+    total = 0.0
+    for parameter in parameters:
+        if parameter.grad is None:
+            continue
+        total += parameter.grad.detach().norm(2).item() ** 2
+    return math.sqrt(total)
+
+
+def add_metric_window(metric_sums, metrics):
+    for name, value in metrics.items():
+        metric_sums[name] = metric_sums.get(name, 0.0) + scalar_value(value)
+
+
+def average_metric_window(metric_sums, count):
+    if count <= 0:
+        return {}
+    return {name: value / count for name, value in metric_sums.items()}
+
+
+def name_token(value, default="na"):
+    text = str(value if value not in (None, "") else default).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text or default
+
+
+def build_wandb_identity(repo_name, model_name, dataset_type, experiment, change, timestamp):
+    run_name = "__".join(
+        [
+            name_token(timestamp),
+            name_token(repo_name),
+            name_token(model_name),
+            name_token(dataset_type),
+            name_token(change or experiment),
+        ]
+    )
+    group = "__".join(
+        [
+            name_token(repo_name),
+            name_token(model_name),
+            name_token(dataset_type),
+            name_token(experiment),
+        ]
+    )
+    return run_name, group
+
 
 def get_param_num(model):
     num_param = sum(param.numel() for param in model.parameters())
@@ -106,25 +271,6 @@ def load_pretrained_if_requested(args, hps, device):
     return state_dict_g, state_dict_do
 
 
-def load_pesq_invalid_ids(hps):
-    metric_cfg = hps.get("metric_cfg", {})
-    path = metric_cfg.get("pesq_invalid_manifest", "")
-    if not path:
-        return set()
-
-    invalid_ids = set()
-    with open(path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            sample_id = record.get("uid") or record.get("id")
-            if sample_id:
-                invalid_ids.add(sample_id)
-    print(f"Loaded {len(invalid_ids)} PESQ-invalid sample ids from {path}")
-    return invalid_ids
-
-
 def build_runtime_args(config_path, hps):
     data_cfg = hps.get("data_cfg", {})
     experiment_cfg = hps.get("experiment_cfg", {})
@@ -135,10 +281,16 @@ def build_runtime_args(config_path, hps):
         "use_simulation_root": data_cfg.get("use_simulation_root", "/scratch/work/lil14/USE_simulation"),
         "train_pair_manifest": data_cfg.get("train_pair_manifest", ""),
         "valid_pair_manifest": data_cfg.get("valid_pair_manifest", ""),
+        "clean_train_json": data_cfg.get("clean_train_json", ""),
+        "noise_train_json": data_cfg.get("noise_train_json", ""),
+        "rir_train_json": data_cfg.get("rir_train_json", ""),
+        "clean_valid_json": data_cfg.get("clean_valid_json", ""),
+        "degraded_valid_json": data_cfg.get("degraded_valid_json", ""),
         "stdout_interval": experiment_cfg.get("stdout_interval", 1250),
-        "checkpoint_interval": experiment_cfg.get("checkpoint_interval", 5000),
-        "summary_interval": experiment_cfg.get("summary_interval", 1250),
-        "validation_interval": experiment_cfg.get("validation_interval", 5000),
+        "checkpoint_interval": experiment_cfg.get("checkpoint_interval_steps", experiment_cfg.get("checkpoint_interval", 5000)),
+        "summary_interval": experiment_cfg.get("wandb_log_interval_steps", experiment_cfg.get("summary_interval", 1250)),
+        "validation_interval": experiment_cfg.get("validation_interval_steps", experiment_cfg.get("validation_interval", 5000)),
+        "max_steps": int(experiment_cfg.get("max_steps", 0) or 0),
         "exp_path": experiment_cfg.get("exp_path", "exp"),
         "fine_tuning": bool(hps.get("fine_tuning_cfg", {}).get("enabled", False)),
         "experiment_name": experiment_cfg.get("experiment_name", "train_semambapp"),
@@ -146,16 +298,23 @@ def build_runtime_args(config_path, hps):
         "wandb_project": experiment_cfg.get("wandb_project", "semambapp"),
         "wandb_entity": experiment_cfg.get("wandb_entity", None),
         "wandb_mode": experiment_cfg.get("wandb_mode", "online"),
-        "wandb_tags": experiment_cfg.get("wandb_tags", []),
+        "wandb_tags": list(dict.fromkeys(experiment_cfg.get("wandb_tags", []) + [WANDB_STANDARD_TAG])),
     })
     a.exp_path = os.path.join(a.exp_path, a.experiment_name)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    a.wandb_run_name = "__".join([
+    model_name = hps.get("model_name", "semambapp")
+    experiment = hps.get("experiment", a.experiment_name)
+    change = experiment_cfg.get("wandb_change") or hps.get("wandb_change") or hps.get("change") or experiment
+    a.wandb_run_name, a.wandb_group = build_wandb_identity(
         hps.get("repo_name", "semambapp"),
-        hps.get("experiment", a.experiment_name),
+        model_name,
         a.dataset_type,
+        experiment,
+        change,
         timestamp,
-    ])
+    )
+    a.model_name = model_name
+    a.wandb_change = change
     return a
 
 
@@ -174,16 +333,42 @@ def build_dataset(hps, a, mode, device):
             seed=hps["env_setting"]["seed"],
         )
 
+    if a.dataset_type == "legacy_online_degradation":
+        required = {
+            "clean_train_json": a.clean_train_json,
+            "noise_train_json": a.noise_train_json,
+            "rir_train_json": a.rir_train_json,
+            "clean_valid_json": a.clean_valid_json,
+            "degraded_valid_json": a.degraded_valid_json,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise ValueError(
+                "Legacy online degradation requires data_cfg fields: "
+                + ", ".join(missing)
+            )
+        return LegacyOnlineDegradationDataset(
+            hps,
+            clean_json=a.clean_train_json,
+            noise_json=a.noise_train_json,
+            rir_json=a.rir_train_json,
+            clean_valid_json=a.clean_valid_json,
+            degraded_valid_json=a.degraded_valid_json,
+            use_simulation_root=a.use_simulation_root,
+            mode=mode,
+            seed=hps["env_setting"]["seed"],
+        )
+
     raise ValueError(
         f"Unsupported dataset_type={a.dataset_type!r}. "
-        "SEMamba training now expects USE_simulation fixed manifests."
+        "Expected use_simulation_fixed or legacy_online_degradation."
     )
 
 
 def run(rank, n_gpus, a, hps):
 
 
-    global steps, best_pesq
+    global steps
 
     # Initialize distributed training if using multiple GPUs
     if n_gpus > 1:
@@ -231,11 +416,25 @@ def run(rank, n_gpus, a, hps):
                 project=a.wandb_project,
                 entity=a.wandb_entity,
                 name=a.wandb_run_name,
+                group=a.wandb_group,
                 resume="allow",
                 mode=a.wandb_mode,
                 tags=a.wandb_tags,
-                config=hps,
+                config={
+                    **hps,
+                    "model_name": a.model_name,
+                    "wandb_change": a.wandb_change,
+                    "wandb_group": a.wandb_group,
+                },
             )
+            wandb.define_metric("charts/global_step", overwrite=True)
+            wandb.define_metric("*", step_metric="charts/global_step", step_sync=True, overwrite=True)
+            wandb.define_metric("trainer/global_step", hidden=True, overwrite=True)
+            wandb.define_metric("charts/epoch", step_metric="charts/global_step", overwrite=True)
+            wandb.define_metric("train/*", step_metric="charts/global_step", overwrite=True)
+            wandb.define_metric("val/*", step_metric="charts/global_step", overwrite=True)
+            wandb.define_metric("val_avqi/*", step_metric="charts/global_step", overwrite=True)
+            wandb.define_metric("charts/*", step_metric="charts/global_step", overwrite=True)
 
     # Initializing modules
     univsemamba = SEMambapp(hps).to(device)
@@ -245,11 +444,10 @@ def run(rank, n_gpus, a, hps):
     fn_mel_loss_multiscale = MultiScaleMelSpectrogramLoss(
                 sampling_rate=hps["stft_cfg"]["sampling_rate"]
             ).to(device) 
-    pesq_invalid_ids = load_pesq_invalid_ids(hps) if rank == 0 else set()
     if validation_loader is not None or rank != 0:
-        mrstft, pesq, utmos = load_modules(hps, device)
+        mrstft = load_modules(hps, device)
     else:
-        mrstft, pesq, utmos = None, None, None
+        mrstft = None
     # Print model parameter counts
     if rank == 0:
         print('Number of Parameters for SEMambapp:', get_param_num(univsemamba))
@@ -269,7 +467,21 @@ def run(rank, n_gpus, a, hps):
         if state_dict_do is not None and 'mssbcqtd' in state_dict_do and 'mrd' in state_dict_do:
             mssbcqtd.load_state_dict(state_dict_do['mssbcqtd'], strict=False)
             mrd.load_state_dict(state_dict_do['mrd'], strict=False)
-
+    univsemamba._best_avqi_gap_to_clean = (
+        float(state_dict_do.get("best_avqi_gap_to_clean", float("inf")))
+        if state_dict_do is not None
+        else float("inf")
+    )
+    univsemamba._latest_avqi_gap_to_clean = (
+        float(state_dict_do["latest_avqi_gap_to_clean"])
+        if state_dict_do is not None and "latest_avqi_gap_to_clean" in state_dict_do
+        else None
+    )
+    univsemamba._best_guarded_val_loss = (
+        float(state_dict_do.get("best_guarded_val_loss", float("inf")))
+        if state_dict_do is not None
+        else float("inf")
+    )
 
     optim_g = torch.optim.AdamW(univsemamba.parameters(), hps["training_cfg"]["learning_rate"], betas=[hps["training_cfg"]["adam_b1"], hps["training_cfg"]["adam_b2"]])
     optim_d = torch.optim.AdamW(itertools.chain(mrd.parameters(), mssbcqtd.parameters()),
@@ -304,24 +516,23 @@ def run(rank, n_gpus, a, hps):
         if rank == 0:
             print("Epoch: {:d}".format(epoch))
             print('Learning Rate : {:.6f}'.format(optim_g.param_groups[0]['lr']))
-            train(a, rank, epoch, hps, univsemamba, [mssbcqtd, mrd], [fn_mel_loss_multiscale, mrstft, pesq, utmos], [optim_g, optim_d],
-                     [scheduler_g, scheduler_d], [train_loader, validation_loader], n_gpus, device, pesq_invalid_ids)
+            train(a, rank, epoch, hps, univsemamba, [mssbcqtd, mrd], [fn_mel_loss_multiscale, mrstft], [optim_g, optim_d],
+                     [scheduler_g, scheduler_d], [train_loader, validation_loader], n_gpus, device)
             print('Time taken for epoch {} is {} sec\n'.format(epoch + 1, int(time.time() - start)))
         else:
-            train(a, rank, epoch, hps, univsemamba, [mssbcqtd, mrd], [fn_mel_loss_multiscale, mrstft, pesq, utmos], [optim_g, optim_d],
-                     [scheduler_g, scheduler_d], [train_loader, None], n_gpus, device, pesq_invalid_ids)
+            train(a, rank, epoch, hps, univsemamba, [mssbcqtd, mrd], [fn_mel_loss_multiscale, mrstft], [optim_g, optim_d],
+                     [scheduler_g, scheduler_d], [train_loader, None], n_gpus, device)
 
-def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_gpus, device=None, pesq_invalid_ids=None):
+def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_gpus, device=None):
 
     generator = nets
     mssbcqtd, mrd = discs
-    fn_mel_loss_multiscale, mrstft, pesq, utmos = aux
+    fn_mel_loss_multiscale, mrstft = aux
     optim_g, optim_d = optims
     scheduler_g, scheduler_d = schedulers
     train_loader, validation_loader = loaders
 
-    global steps, best_pesq
-    pesq_invalid_ids = pesq_invalid_ids or set()
+    global steps
 
     # Set epoch for distributed sampler
     if n_gpus > 1:
@@ -331,11 +542,29 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
     generator.train()
     mssbcqtd.train()
     mrd.train()
+    train_metric_sums = {}
+    train_metric_count = 0
+    train_window_elapsed_sec = 0.0
+    samples_seen = 0
+    train_window_samples = 0
+    optimizer_metric_sums = {}
+    optimizer_metric_count = 0
+    summary_interval = max(1, int(a.summary_interval))
+    validation_interval = max(1, int(a.validation_interval))
+    avqi_interval = int(hps["experiment_cfg"].get("avqi_validation_interval_steps", 1000) or 0)
+    gradient_accumulation_steps = max(1, int(hps["training_cfg"].get("gradient_accumulation_steps", 1)))
+    discriminator_parameters = list(itertools.chain(mssbcqtd.parameters(), mrd.parameters()))
+    optim_d.zero_grad()
+    optim_g.zero_grad()
 
     # Training loop over batches
     for i, batch in enumerate(train_loader):
-        if rank == 0:
-            start_b = time.time()
+        if i % gradient_accumulation_steps == 0:
+            # Keep every optimizer step at the configured effective batch size.
+            if len(train_loader) - i < gradient_accumulation_steps:
+                break
+            if rank == 0:
+                optimizer_step_start = time.time()
         clean_audio, clean_mag, clean_pha, clean_com, _, noisy_mag, noisy_pha = batch # [B, 1, F, T], F = nfft // 2+ 1, T = nframes
         del _
         clean_audio = torch.autograd.Variable(clean_audio.to(device, non_blocking=True))
@@ -351,7 +580,6 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
 
         # Discriminator
         # ------------------------------------------------------- #
-        optim_d.zero_grad()
         y_dq_hat_r, y_dq_hat_g, _, _ = mssbcqtd(clean_audio.unsqueeze(1), audio_g.unsqueeze(1).detach())
         loss_disc_q, losses_disc_q_r, losses_disc_q_g = discriminator_loss(
             y_dq_hat_r, y_dq_hat_g
@@ -364,13 +592,13 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
 
         loss_disc_all = loss_disc_q + loss_disc_r
         
-        loss_disc_all.backward()
-        optim_d.step()
+        (loss_disc_all / gradient_accumulation_steps).backward()
         # ------------------------------------------------------- #
         
         # Generator
         # ------------------------------------------------------- #
-        optim_g.zero_grad()
+        for parameter in discriminator_parameters:
+            parameter.requires_grad_(False)
 
         y_dq_hat_r, y_dq_hat_g, fmap_q_r, fmap_q_g = mssbcqtd(clean_audio.unsqueeze(1), audio_g.unsqueeze(1))
         loss_fm_q = feature_loss(fmap_q_r, fmap_q_g)
@@ -413,32 +641,77 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
             loss_con * hps['training_cfg']['loss']['consistancy']
         )
 
-        loss_gen_all.backward()
+        (loss_gen_all / gradient_accumulation_steps).backward()
+        for parameter in discriminator_parameters:
+            parameter.requires_grad_(True)
+
+        if rank == 0:
+            with torch.no_grad():
+                optimizer_metrics = {
+                    "loss": loss_gen_all,
+                    "loss_generator": loss_gen_all,
+                    "loss_adv_g": adv_g_loss,
+                    "loss_discriminator": loss_disc_all,
+                    "loss_feature_matching": fm_g_loss,
+                    "loss_magnitude": F.mse_loss(clean_mag, mag_g),
+                    "loss_phase": loss_pha,
+                    "loss_complex": F.mse_loss(clean_com, com_g),
+                    "loss_time": loss_time,
+                    "loss_consistency": F.mse_loss(com_g, rec_com),
+                    "loss_mel": mel_loss,
+                }
+                add_metric_window(optimizer_metric_sums, optimizer_metrics)
+                optimizer_metric_count += 1
+
+        if (i + 1) % gradient_accumulation_steps != 0:
+            continue
+
+        grad_norm_d = grad_norm(discriminator_parameters)
+        grad_norm_g = grad_norm(generator.parameters())
+        optim_d.step()
+        optim_d.zero_grad()
         optim_g.step()
+        optim_g.zero_grad()
         
 
         if rank == 0:
+                global_step = steps + 1
+                optimizer_step_elapsed_sec = time.time() - optimizer_step_start
+                with torch.no_grad():
+                    train_metrics = average_metric_window(optimizer_metric_sums, optimizer_metric_count)
+                    train_metrics["grad_norm_g"] = grad_norm_g
+                    train_metrics["grad_norm_d"] = grad_norm_d
+                    add_metric_window(train_metric_sums, train_metrics)
+                    train_metric_count += 1
+                    train_window_elapsed_sec += optimizer_step_elapsed_sec
+                    optimizer_step_samples = clean_audio.size(0) * n_gpus * gradient_accumulation_steps
+                    samples_seen += optimizer_step_samples
+                    train_window_samples += optimizer_step_samples
+                    optimizer_metric_sums = {}
+                    optimizer_metric_count = 0
+
                 # STDOUT logging
-                if steps % a.stdout_interval == 0:
-                    with torch.no_grad():
-                        adv_g_loss = adv_g_loss.item()
-                        fm_g_loss = fm_g_loss.item()
-                        mag_error = F.mse_loss(clean_mag, mag_g).item()
-                        ip_error, gd_error, iaf_error = phase_losses(clean_pha, pha_g, hps)
-                        pha_error = (ip_error+gd_error+iaf_error).item()
-                        com_error = F.mse_loss(clean_com, com_g).item()
-                        time_error = loss_time.item()
-                        con_error = F.mse_loss( com_g, rec_com ).item()
-                        mel_error = fn_mel_loss_multiscale(clean_audio.unsqueeze(1), audio_g.unsqueeze(1)).item()
-                        print(
-                            'Steps : {:d}, Gen Loss: {:4.3f}, Disc Loss: {:4.3f}, adv_g_loss Loss: {:4.3f}, '
-                            'fm_g_loss: {:4.3f}, Mag Loss: {:4.3f}, Pha Loss: {:4.3f}, Com Loss: {:4.3f}, Time Loss: {:4.3f}, Mel Loss: {:4.3f}, Cons Loss: {:4.3f}, s/b : {:4.3f}'.format(
-                                steps, loss_gen_all, loss_disc_all, adv_g_loss, fm_g_loss, mag_error, pha_error, com_error, time_error, mel_error, con_error, time.time() - start_b
-                            )
+                if global_step % a.stdout_interval == 0:
+                    print(
+                        'Steps : {:d}, Gen Loss: {:4.3f}, Disc Loss: {:4.3f}, adv_g_loss Loss: {:4.3f}, '
+                        'fm_g_loss: {:4.3f}, Mag Loss: {:4.3f}, Pha Loss: {:4.3f}, Com Loss: {:4.3f}, Time Loss: {:4.3f}, Mel Loss: {:4.3f}, Cons Loss: {:4.3f}, s/b : {:4.3f}'.format(
+                            global_step,
+                            scalar_value(train_metrics["loss_generator"]),
+                            scalar_value(train_metrics["loss_discriminator"]),
+                            scalar_value(train_metrics["loss_adv_g"]),
+                            scalar_value(train_metrics["loss_feature_matching"]),
+                            scalar_value(train_metrics["loss_magnitude"]),
+                            scalar_value(train_metrics["loss_phase"]),
+                            scalar_value(train_metrics["loss_complex"]),
+                            scalar_value(train_metrics["loss_time"]),
+                            scalar_value(train_metrics["loss_mel"]),
+                            scalar_value(train_metrics["loss_consistency"]),
+                            optimizer_step_elapsed_sec,
                         )
+                    )
 
                 # Checkpointing
-                if steps % a.checkpoint_interval == 0 and steps != 0:
+                if global_step % a.checkpoint_interval == 0:
                     generator_state = {
                         'generator': (generator.module if n_gpus > 1 else generator).state_dict()
                     }
@@ -447,15 +720,30 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                         'mrd': (mrd.module if n_gpus > 1 else mrd).state_dict(),
                         'optim_g': optim_g.state_dict(),
                         'optim_d': optim_d.state_dict(),
-                        'steps': steps,
-                        'epoch': epoch
+                        'steps': global_step,
+                        'epoch': epoch,
+                        'best_avqi_gap_to_clean': getattr(
+                            generator.module if n_gpus > 1 else generator,
+                            "_best_avqi_gap_to_clean",
+                            float("inf"),
+                        ),
+                        'latest_avqi_gap_to_clean': getattr(
+                            generator.module if n_gpus > 1 else generator,
+                            "_latest_avqi_gap_to_clean",
+                            None,
+                        ),
+                        'best_guarded_val_loss': getattr(
+                            generator.module if n_gpus > 1 else generator,
+                            "_best_guarded_val_loss",
+                            float("inf"),
+                        ),
                     }
-                    exp_name = f"{a.exp_path}/ln_g_{steps:08d}.pth"
+                    exp_name = f"{a.exp_path}/ln_g_{global_step:08d}.pth"
                     save_checkpoint(
                         exp_name,
                         generator_state
                     )
-                    exp_name = f"{a.exp_path}/ln_do_{steps:08d}.pth"
+                    exp_name = f"{a.exp_path}/ln_do_{global_step:08d}.pth"
 
                     save_checkpoint(
                         exp_name,
@@ -463,30 +751,58 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                     )
                     prune_step_checkpoints(a.exp_path, keep=3, prefixes=("ln_g_", "ln_do_"))
 
+                if avqi_interval > 0 and rank == 0 and global_step % avqi_interval == 0:
+                    avqi_metrics = log_validation_avqi_metrics(generator, hps, device, global_step)
+                    gap = avqi_metrics["avqi_gap_to_clean"]
+                    (generator.module if n_gpus > 1 else generator)._latest_avqi_gap_to_clean = gap
+                    print(
+                        "Steps : {:d}, AVQI gap to clean: {:4.3f}".format(
+                            global_step,
+                            gap,
+                        )
+                    )
+                    if a.use_wandb:
+                        avqi_log = {"charts/global_step": global_step}
+                        for name, value in avqi_metrics.items():
+                            avqi_log[f"val_avqi/{name}"] = value
+                        wandb.log(
+                            avqi_log,
+                            step=global_step,
+                        )
+                    save_best_avqi_gap_checkpoints(
+                        generator, [mssbcqtd, mrd], [optim_g, optim_d], a.exp_path, epoch, global_step, n_gpus, gap
+                    )
+
                 # Tensorboard summary logging
-                if a.use_wandb and steps % a.summary_interval == 0:
-                    wandb.log({
-                        "Training/adv_g_loss": adv_g_loss,
-                        "Training/loss_gen_all": loss_gen_all,
-                        "Training/adv_d_loss": loss_disc_all,
-                        "Training/fm_g_loss": fm_g_loss,
-                        "Training/mag_error": mag_error,
-                        "Training/pha_error": pha_error,
-                        "Training/com_error": com_error,
-                        "Training/time_error": time_error,
-                        "Training/con_error": con_error,
-                        "Training/mel_error": mel_loss,
-                        "Charts/epoch": epoch,
-                        "Charts/learning_rate": optim_g.param_groups[0]['lr'],
-                    }, step=steps)
+                if a.use_wandb and global_step % summary_interval == 0:
+                    train_log = {
+                        "charts/epoch": epoch + 1,
+                        "charts/global_step": global_step,
+                        "charts/lr": optim_g.param_groups[0]['lr'],
+                        "charts/samples_per_sec": train_window_samples / train_window_elapsed_sec,
+                    }
+                    averaged_train_metrics = average_metric_window(train_metric_sums, train_metric_count)
+                    if "grad_norm_g" in averaged_train_metrics:
+                        train_log["charts/grad_norm"] = averaged_train_metrics["grad_norm_g"]
+                    for name, value in averaged_train_metrics.items():
+                        if name.startswith("grad_norm"):
+                            train_log[f"charts/{name}"] = value
+                        else:
+                            train_log[f"train/{name}"] = value
+                    wandb.log(train_log, step=global_step)
+                    train_metric_sums = {}
+                    train_metric_count = 0
+                    train_window_elapsed_sec = 0.0
+                    train_window_samples = 0
 
                 # If NaN happend in training period, RaiseError
                 if torch.isnan(loss_gen_all).any():
                     raise ValueError("NaN values found in loss_gen_all")
 
                 # Validation
-                if validation_loader is not None and steps % a.validation_interval == 0 and steps != 0:
+                if validation_loader is not None and global_step % validation_interval == 0:
                     print("Validation Started...")
+                    validation_start_time = time.time()
                     generator.eval()
                     torch.cuda.empty_cache()
                     audios_r, audios_g = [], []
@@ -495,11 +811,6 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                     val_com_err_tot = 0
                     val_time_err_tot = 0
                     val_mrstft_score = 0
-                    val_pesq_score = 0
-                    val_pesq_count = 0
-                    val_pesq_failures = 0
-                    val_pesq_skipped = 0
-                    val_utmos = 0
                     with torch.no_grad():
                         validation_dataset = getattr(validation_loader, "dataset", None)
                         for j, batch in enumerate(validation_loader):
@@ -529,66 +840,59 @@ def train(a, rank, epoch, hps, nets, discs, aux, optims, schedulers, loaders, n_
                                 clean_audio = clean_audio[:, :audio_g.size(1)]
                             val_time_err_tot += F.l1_loss(clean_audio, audio_g).item()
 
-                            sample_id = validation_dataset.sample_id(j) if validation_dataset is not None and hasattr(validation_dataset, "sample_id") else None
-                            skip_pesq = sample_id in pesq_invalid_ids if sample_id is not None else False
-                            score_metrics = compute_val_metrics(mrstft, pesq, utmos, clean_audio, audio_g, hps, skip_pesq=skip_pesq) 
+                            score_metrics = compute_val_metrics(mrstft, clean_audio, audio_g)
 
                             val_mrstft_score += score_metrics["mrstft_score"].item()
-                            if score_metrics["pesq_valid"] and not torch.isnan(score_metrics["pesq_score"]).any():
-                                val_pesq_score += score_metrics["pesq_score"].item()
-                                val_pesq_count += 1
-                            elif score_metrics.get("pesq_skipped", False):
-                                val_pesq_skipped += 1
-                            else:
-                                val_pesq_failures += 1
-                            val_utmos += score_metrics["utmos_score"].item()
 
                         val_mag_err = val_mag_err_tot / (j+1)
                         val_pha_err = val_pha_err_tot / (j+1)
                         val_com_err = val_com_err_tot / (j+1)
                         val_time_err = val_time_err_tot / (j+1)
                         val_mrstft_score = val_mrstft_score / (j+1)
-                        val_pesq_score = val_pesq_score / val_pesq_count if val_pesq_count > 0 else float("nan")
-                        val_utmos = val_utmos / (j+1)
+                        loss_cfg = hps["training_cfg"]["loss"]
+                        val_loss = (
+                            val_mag_err * loss_cfg.get("magnitude", 0.0)
+                            + val_pha_err * loss_cfg.get("phase", 0.0)
+                            + val_com_err * loss_cfg.get("complex", 0.0)
+                            + val_time_err * loss_cfg.get("time", 0.0)
+                        )
 
-                        print('Steps : {:d}, PESQ Score: {:4.3f}, UTMOS: {:4.3f}, MRSTFT Score: {:4.3f}, Mag Loss: {:4.3f}, Pha Loss: {:4.3f}, Com Loss: {:4.3f}, Time Loss: {:4.3f}, s/b : {:4.3f}'.
-                                format(steps, val_pesq_score, val_utmos, val_mrstft_score, val_mag_err, val_pha_err, val_com_err, val_time_err, time.time() - start_b))
-
-                        if val_pesq_count > 0 and not math.isnan(val_pesq_score) and val_pesq_score > best_pesq:
-                            best_pesq = val_pesq_score
-                            save_best_step_checkpoints(
-                                a.exp_path,
-                                steps,
-                                {
-                                    'generator': (generator.module if n_gpus > 1 else generator).state_dict()
-                                },
-                                {
-                                    'mssbcqtd': (mssbcqtd.module if n_gpus > 1 else mssbcqtd).state_dict(),
-                                    'mrd': (mrd.module if n_gpus > 1 else mrd).state_dict(),
-                                    'optim_g': optim_g.state_dict(),
-                                    'optim_d': optim_d.state_dict(),
-                                    'steps': steps,
-                                    'epoch': epoch,
-                                    'best_pesq': best_pesq,
-                                },
-                            )
+                        print('Steps : {:d}, MRSTFT Score: {:4.3f}, Mag Loss: {:4.3f}, Pha Loss: {:4.3f}, Com Loss: {:4.3f}, Time Loss: {:4.3f}, s/b : {:4.3f}'.
+                                format(global_step, val_mrstft_score, val_mag_err, val_pha_err, val_com_err, val_time_err, time.time() - validation_start_time))
 
                         if a.use_wandb:
                             validation_log = {
-                                "Validation/UTMOS": val_utmos,
-                                "Validation/mrstft_score": val_mrstft_score,
-                                "Validation/Magnitude Loss": val_mag_err,
-                                "Validation/Phase Loss": val_pha_err,
-                                "Validation/Time Loss": val_time_err,
-                                "Validation/Complex Loss": val_com_err,
+                                "charts/epoch": epoch + 1,
+                                "charts/global_step": global_step,
+                                "val/loss": val_loss,
+                                "val/mrstft": val_mrstft_score,
+                                "val/loss_magnitude": val_mag_err,
+                                "val/loss_phase": val_pha_err,
+                                "val/loss_time": val_time_err,
+                                "val/loss_complex": val_com_err,
                             }
-                            if not math.isnan(val_pesq_score):
-                                validation_log["Validation/PESQ Score"] = val_pesq_score
-                            wandb.log(validation_log, step=steps)
+                            wandb.log(validation_log, step=global_step)
+                        save_best_guarded_checkpoints(
+                            generator,
+                            [mssbcqtd, mrd],
+                            [optim_g, optim_d],
+                            a.exp_path,
+                            epoch,
+                            global_step,
+                            n_gpus,
+                            val_loss,
+                        )
 
                     generator.train()
 
-        steps += 1
+        completed_step = steps + 1
+        if a.max_steps > 0 and completed_step >= a.max_steps:
+            steps = completed_step
+            if n_gpus > 1:
+                dist.barrier()
+            return
+
+        steps = completed_step
 
     scheduler_g.step()
     scheduler_d.step()

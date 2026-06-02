@@ -2,7 +2,9 @@
 # Paths are resolved from environment variables by utils.load_config().
 
 repo_name: semambapp
+model_name: semambapp
 experiment: tau_fixed_time_l1
+wandb_change: tau_fixed_time_l1
 
 env_setting:
   num_workers: 8
@@ -22,9 +24,10 @@ experiment_cfg:
   exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-exp}
   experiment_name: train_semambapp_tau_fixed_finetune_time_l1
   stdout_interval: 5
-  checkpoint_interval: 100
-  summary_interval: 20
-  validation_interval: 50
+  checkpoint_interval_steps: 1000
+  wandb_log_interval_steps: 50
+  avqi_validation_interval_steps: 1000
+  validation_interval_steps: 300
   use_wandb: true
   wandb_project: semambapp
   wandb_entity: null
@@ -36,9 +39,6 @@ fine_tuning_cfg:
   pretrained_generator_checkpoint: ${SEMAMBAPP_PRETRAINED_GENERATOR_CKPT:-}
   pretrained_discriminator_checkpoint: ${SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT:-}
 
-metric_cfg:
-  pesq_invalid_manifest: ${SEMAMBAPP_PESQ_INVALID_MANIFEST:-/scratch/work/lil14/data/TAU/simulated/phone_room/pesq_invalid_samples.jsonl}
-
 training_cfg:
   training_epochs: 120
   batch_size: 12
@@ -48,7 +48,7 @@ training_cfg:
   lr_decay: 0.99
   segment_size: 24000
   validation_segment_seconds: 3.0
-  validation_random_start: true
+  validation_random_start: false
   validation_prefer_active: true
   validation_activity_threshold: 0.01
   validation_min_active_ratio: 0.05

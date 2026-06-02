@@ -121,8 +121,8 @@ class USESimulationSEMambaDataset(torch.utils.data.Dataset):
             return 0
 
         active = (clean_audio.squeeze(0).abs() > self.activity_threshold).float()
-        window = torch.ones(1, 1, self.segment_size, device=active.device)
-        counts = torch.nn.functional.conv1d(active.view(1, 1, -1), window).squeeze()
+        prefix = torch.nn.functional.pad(torch.cumsum(active, dim=0), (1, 0))
+        counts = prefix[self.segment_size:] - prefix[:-self.segment_size]
         valid = torch.nonzero(counts >= self.segment_size * self.min_active_ratio).flatten()
         if valid.numel() == 0:
             return fallback

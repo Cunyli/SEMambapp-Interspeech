@@ -3,15 +3,15 @@
 
 repo_name: semambapp
 model_name: semambapp
-experiment: tau_fixed_fresh_0to120_v2
-wandb_change: fresh_0to120_v2
+experiment: tau_fixed_effective_bs16_stepmatch_v1
+wandb_change: effective_bs16_stepmatch_v1
 
 env_setting:
   num_workers: 8
   seed: 20260511
   dist_cfg:
     dist_backend: nccl
-    dist_url: tcp://localhost:19427
+    dist_url: tcp://localhost:19428
     world_size: 1
 
 data_cfg:
@@ -22,7 +22,7 @@ data_cfg:
 
 experiment_cfg:
   exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-exp}
-  experiment_name: train_semambapp_tau_fixed_fresh_0to120_v2
+  experiment_name: train_semambapp_tau_fixed_effective_bs16_stepmatch_v1
   stdout_interval: 5
   checkpoint_interval_steps: 1000
   wandb_log_interval_steps: 50
@@ -32,7 +32,7 @@ experiment_cfg:
   wandb_project: semambapp
   wandb_entity: null
   wandb_mode: online
-  wandb_tags: ["tau", "use_simulation", "fixed", "fresh_0to120_v2"]
+  wandb_tags: ["tau", "use_simulation", "fixed", "effective_bs16_stepmatch_v1", "wandb_standard_v1"]
 
 fine_tuning_cfg:
   enabled: true
@@ -40,8 +40,9 @@ fine_tuning_cfg:
   pretrained_discriminator_checkpoint: ${SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT:-}
 
 training_cfg:
-  training_epochs: 120
-  batch_size: 6
+  training_epochs: 480
+  batch_size: 4
+  gradient_accumulation_steps: 4
   learning_rate: 0.00002
   adam_b1: 0.8
   adam_b2: 0.99
