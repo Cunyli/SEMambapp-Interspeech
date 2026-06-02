@@ -467,20 +467,13 @@ def run(rank, n_gpus, a, hps):
         if state_dict_do is not None and 'mssbcqtd' in state_dict_do and 'mrd' in state_dict_do:
             mssbcqtd.load_state_dict(state_dict_do['mssbcqtd'], strict=False)
             mrd.load_state_dict(state_dict_do['mrd'], strict=False)
-    univsemamba._best_avqi_gap_to_clean = (
-        float(state_dict_do.get("best_avqi_gap_to_clean", float("inf")))
-        if state_dict_do is not None
-        else float("inf")
-    )
-    univsemamba._latest_avqi_gap_to_clean = (
-        float(state_dict_do["latest_avqi_gap_to_clean"])
-        if state_dict_do is not None and "latest_avqi_gap_to_clean" in state_dict_do
-        else None
-    )
+    best_gap = state_dict_do.get("best_avqi_gap_to_clean", float("inf")) if state_dict_do is not None else None
+    latest_gap = state_dict_do.get("latest_avqi_gap_to_clean") if state_dict_do is not None else None
+    best_guarded_loss = state_dict_do.get("best_guarded_val_loss", float("inf")) if state_dict_do is not None else None
+    univsemamba._best_avqi_gap_to_clean = float(best_gap) if best_gap is not None else float("inf")
+    univsemamba._latest_avqi_gap_to_clean = float(latest_gap) if latest_gap is not None else None
     univsemamba._best_guarded_val_loss = (
-        float(state_dict_do.get("best_guarded_val_loss", float("inf")))
-        if state_dict_do is not None
-        else float("inf")
+        float(best_guarded_loss) if best_guarded_loss is not None else float("inf")
     )
 
     optim_g = torch.optim.AdamW(univsemamba.parameters(), hps["training_cfg"]["learning_rate"], betas=[hps["training_cfg"]["adam_b1"], hps["training_cfg"]["adam_b2"]])
