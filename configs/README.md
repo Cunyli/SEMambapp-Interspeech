@@ -24,6 +24,11 @@ The inherited configuration key `pretrained_generator_checkpoint` can also mean
 belong under `checkpoints/`; only weights obtained outside this project belong
 under `pretrained/`.
 
+Historical TAU configurations still point to `exp/` when that is the verified
+location of the corresponding local run and initialization checkpoints. Keep
+those paths intact until the artifacts and their manifests are migrated
+together. New runs should use `checkpoints/`.
+
 `semambapp_legacy_pretrain_main_v1.yaml` is retained for historical comparison
 and is not the recommended starting point.
 
