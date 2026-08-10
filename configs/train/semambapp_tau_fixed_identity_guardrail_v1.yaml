@@ -1,0 +1,98 @@
+# TAU fold_00 phone-room fine-tuning smoke with SV identity guardrails.
+# Uses a run-coupled manifest that appends clean SV identity rows to the fixed phone-room pairs.
+
+repo_name: semambapp
+model_name: semambapp
+experiment: tau_fixed_identity_guardrail_v1
+wandb_change: identity_guardrail_v1
+
+env_setting:
+  num_workers: 4
+  seed: 20260708
+  dist_cfg:
+    dist_backend: nccl
+    dist_url: tcp://localhost:19431
+    world_size: 1
+
+data_cfg:
+  dataset_type: use_simulation_fixed
+  use_simulation_root: /scratch/work/lil14/USE_simulation
+  train_pair_manifest: /scratch/work/lil14/SEMambapp-Interspeech/runs/tau_s1_identity_guardrail_20260708_01/manifests/fold00_train_phone_room_plus_sv_identity.csv
+  valid_pair_manifest: /scratch/work/lil14/use_simulation_pipeline/outputs/organized/csv/tau_selected_clean_5fold_oof/fold_00/valid_selected_phone_room_pair_manifest.csv
+  avqi_validation_pair_manifest: /scratch/work/lil14/use_simulation_pipeline/outputs/organized/csv/tau_selected_clean_5fold_oof/fold_00/valid_selected_phone_room_pair_manifest.csv
+
+experiment_cfg:
+  exp_path: /scratch/work/lil14/SEMambapp-Interspeech/exp
+  experiment_name: tau_s1_identity_guardrail_fold00_smoke_v1
+  stdout_interval: 5
+  checkpoint_interval_steps: 50
+  wandb_log_interval_steps: 25
+  avqi_validation_interval_steps: 0
+  validation_interval_steps: 50
+  max_steps: 100
+  use_wandb: false
+  wandb_project: semambapp
+  wandb_entity: null
+  wandb_mode: online
+  wandb_tags: ["tau", "use_simulation", "fixed", "identity_guardrail", "sv_guardrail", "fold00_smoke"]
+  avqi_validation_output_root: /scratch/work/lil14/SEMambapp-Interspeech/runs/tau_s1_identity_guardrail_20260708_01/avqi_validation
+  avqi_validation_clean_cache: /scratch/work/lil14/use_simulation_pipeline/outputs/validation/tau_selected_clean_5fold_oof_refreshed_20260629/clean_cache/selected_phone_room/fold_00_clean_avqi_16k.json
+
+fine_tuning_cfg:
+  enabled: true
+  pretrained_generator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/exp/semambapp_shifted_anechoic_online_v1/ln_g_00180000.pth
+  pretrained_discriminator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/exp/semambapp_shifted_anechoic_online_v1/ln_do_00180000.pth
+
+training_cfg:
+  training_epochs: 20
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 0.00002
+  adam_b1: 0.8
+  adam_b2: 0.99
+  lr_decay: 0.99
+  segment_size: 48000
+  validation_segment_seconds: 3.0
+  validation_random_start: false
+  validation_prefer_active: true
+  validation_activity_threshold: 0.01
+  validation_min_active_ratio: 0.05
+  return_metadata: true
+  sv_guardrail:
+    enabled: true
+    sv_time_weight: 0.20
+    severe_sv_time_weight: 0.20
+    identity_time_weight: 0.50
+    sv_energy_floor_weight: 0.20
+    sv_energy_floor_db: -6.0
+  loss:
+    adv_g: 0.1
+    metric: 0.05
+    fm_g: 0.5
+    magnitude: 0.9
+    phase: 0.3
+    complex: 0.1
+    time: 0.05
+    mel: 0.1
+    consistancy: 0.1
+  use_PCS400: false
+
+stft_cfg:
+  sampling_rate: 16000
+  n_fft: 400
+  hop_size: 100
+  win_size: 400
+
+model_cfg:
+  hid_feature: 48
+  unet_expansion: 1
+  compress_factor: 0.3
+  num_tfmamba: 4
+  d_state: 16
+  d_conv: 4
+  expand: 2
+  norm_epsilon: 0.00001
+  beta: 2.0
+  input_channel: 2
+  output_channel: 1
+  dropout: 0.1

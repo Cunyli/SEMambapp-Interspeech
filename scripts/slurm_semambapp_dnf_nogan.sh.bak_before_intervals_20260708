@@ -1,0 +1,125 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT_DIR="${ROOT_DIR:-/scratch/work/lil14/SEMambapp-Interspeech}"
+LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
+JOB_NAME="${JOB_NAME:-semambapp-dnf-nogan-smoke}"
+PARTITION="${PARTITION:-gpu-debug}"
+GPU_TYPE="${GPU_TYPE:-v100}"
+GPUS="${GPUS:-1}"
+CPUS_PER_TASK="${CPUS_PER_TASK:-4}"
+MEMORY="${MEMORY:-24G}"
+TIME_LIMIT="${TIME_LIMIT:-00:15:00}"
+MODE="${MODE:-standard}"
+RUN_NAME="${RUN_NAME:-}"
+MAX_STEPS="${MAX_STEPS:-2}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
+NUM_WORKERS="${NUM_WORKERS:-0}"
+CUT_DURATION="${CUT_DURATION:-0.5}"
+SAMPLES_PER_EPOCH="${SAMPLES_PER_EPOCH:-16}"
+MAX_SHARDS_PER_ROLE="${MAX_SHARDS_PER_ROLE:-1}"
+ADDED_NOISE_SNR_MIN="${ADDED_NOISE_SNR_MIN:-0}"
+ADDED_NOISE_SNR_MAX="${ADDED_NOISE_SNR_MAX:-15}"
+IDENTITY_RATIO="${IDENTITY_RATIO:-0.0}"
+TINY_MODEL="${TINY_MODEL:-1}"
+USE_WANDB="${USE_WANDB:-0}"
+WANDB_PROJECT="${WANDB_PROJECT:-semambapp-dnf}"
+WANDB_GROUP="${WANDB_GROUP:-semambapp-dnf-nogan-smoke}"
+CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/train/semambapp_shifted_anechoic_online_v1.yaml}"
+SPLIT_ROOT="${SPLIT_ROOT:-/scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/splits/hybrid_unise_v1_stream_80_10_10}"
+SIMULATION_CONFIG="${SIMULATION_CONFIG:-/scratch/work/lil14/DNF_USE/conf/simulation_train_shifted_anechoic.yaml}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/runs/semambapp_dnf_nogan}"
+SOFTWARE_STACK_MODULE="${SOFTWARE_STACK_MODULE:-triton/2025.1-gcc}"
+COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
+
+mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"
+
+submit_self() {
+  local script_path="$ROOT_DIR/scripts/slurm_semambapp_dnf_nogan.sh"
+  local sbatch_args=(
+    "--job-name=$JOB_NAME"
+    "--partition=$PARTITION"
+    "--cpus-per-task=$CPUS_PER_TASK"
+    "--mem=$MEMORY"
+    "--time=$TIME_LIMIT"
+    "--output=$LOG_DIR/slurm_%j.out"
+    "--error=$LOG_DIR/slurm_%j.err"
+  )
+  if [[ -n "$GPU_TYPE" ]]; then
+    sbatch_args+=("--gres=gpu:${GPU_TYPE}:${GPUS}")
+  else
+    sbatch_args+=("--gres=gpu:${GPUS}")
+  fi
+  sbatch "${sbatch_args[@]}" --export=ALL "$script_path"
+}
+
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+  submit_self
+  exit 0
+fi
+
+cd "$ROOT_DIR"
+LIVE_LOG="$LOG_DIR/semambapp_dnf_nogan_${MODE}_${SLURM_JOB_ID}.log"
+echo "Live log: $LIVE_LOG"
+echo "Job ${SLURM_JOB_ID} started at $(date)" | tee -a "$LIVE_LOG"
+echo "Host: $(hostname)" | tee -a "$LIVE_LOG"
+echo "Mode: $MODE" | tee -a "$LIVE_LOG"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}" | tee -a "$LIVE_LOG"
+echo "Config: $CONFIG_PATH" | tee -a "$LIVE_LOG"
+echo "Split root: $SPLIT_ROOT" | tee -a "$LIVE_LOG"
+echo "Output root: $OUTPUT_ROOT" | tee -a "$LIVE_LOG"
+
+module load "$SOFTWARE_STACK_MODULE"
+module load "$COMPILER_MODULE"
+eval "$(conda shell.bash hook)"
+conda activate semambapp
+export CC="$(command -v gcc)"
+export CXX="$(command -v g++)"
+export WANDB_DIR="${WANDB_DIR:-$ROOT_DIR/runs/wandb}"
+export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$ROOT_DIR/runs/wandb-cache}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR"
+
+echo "Python: $(command -v python)" | tee -a "$LIVE_LOG"
+echo "GCC: $(command -v gcc)" | tee -a "$LIVE_LOG"
+python - <<'PY' | tee -a "$LIVE_LOG"
+import os
+import torch
+print("torch", torch.__version__)
+print("cuda_available", torch.cuda.is_available())
+print("cuda_device_count", torch.cuda.device_count())
+print("CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES"))
+PY
+
+args=(
+  --mode "$MODE"
+  --config "$CONFIG_PATH"
+  --split-root "$SPLIT_ROOT"
+  --simulation-config "$SIMULATION_CONFIG"
+  --output-root "$OUTPUT_ROOT"
+  --max-steps "$MAX_STEPS"
+  --batch-size "$BATCH_SIZE"
+  --num-workers "$NUM_WORKERS"
+  --cut-duration "$CUT_DURATION"
+  --samples-per-epoch "$SAMPLES_PER_EPOCH"
+  --max-shards-per-role "$MAX_SHARDS_PER_ROLE"
+  --added-noise-snr "$ADDED_NOISE_SNR_MIN" "$ADDED_NOISE_SNR_MAX"
+  --identity-ratio "$IDENTITY_RATIO"
+  --checkpoint-interval "$MAX_STEPS"
+  --log-interval 1
+  --wandb-project "$WANDB_PROJECT"
+  --wandb-group "$WANDB_GROUP"
+)
+
+if [[ -n "$RUN_NAME" ]]; then
+  args+=(--run-name "$RUN_NAME")
+fi
+if [[ "$TINY_MODEL" == "1" ]]; then
+  args+=(--tiny-model)
+fi
+if [[ "$USE_WANDB" == "1" ]]; then
+  args+=(--use-wandb)
+fi
+
+python scripts/train_semambapp_dnf_nogan.py "${args[@]}" 2>&1 | tee -a "$LIVE_LOG"
+echo "Job ${SLURM_JOB_ID} completed at $(date)" | tee -a "$LIVE_LOG"

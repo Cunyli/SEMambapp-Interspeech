@@ -1,0 +1,389 @@
+import argparse
+import copy
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import wandb
+import yaml
+from torch.utils.data import DataLoader
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DNF_REPO = Path("/scratch/work/lil14/DNF_USE")
+for path_entry in (str(DNF_REPO), str(REPO_ROOT)):
+    if path_entry in sys.path:
+        sys.path.remove(path_entry)
+sys.path.insert(0, str(REPO_ROOT))
+
+from model.semambapp import SEMambapp
+from model.stfts import mag_phase_istft, mag_phase_stft
+
+sys.path.insert(1, str(DNF_REPO))
+from dataloader.dnf_webdataset_protocol import DNFHybridStreamDataset, dnf_collate
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train SeMamba++ no-GAN on DNF WebDataset batches.")
+    parser.add_argument("--mode", choices=("standard", "dnf"), required=True)
+    parser.add_argument("--config", default="configs/train/semambapp_shifted_anechoic_online_v1.yaml")
+    parser.add_argument(
+        "--split-root",
+        default="/scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/splits/hybrid_unise_v1_stream_80_10_10",
+    )
+    parser.add_argument("--simulation-config", default="/scratch/work/lil14/DNF_USE/conf/simulation_train_shifted_anechoic.yaml")
+    parser.add_argument("--source-routing-config", default="/scratch/work/lil14/DNF_USE/conf/source_routing_webdataset_v1.json")
+    parser.add_argument("--output-root", default="runs/semambapp_dnf_nogan")
+    parser.add_argument("--run-name", default="")
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--samples-per-epoch", type=int, default=2048)
+    parser.add_argument("--max-steps", type=int, default=200)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--checkpoint-interval", type=int, default=100)
+    parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument("--cut-duration", type=float, default=1.0)
+    parser.add_argument("--added-noise-snr", nargs=2, type=float, default=(0.0, 15.0))
+    parser.add_argument("--identity-ratio", type=float, default=0.0)
+    parser.add_argument("--clean-shuffle-buffer", type=int, default=64)
+    parser.add_argument("--noise-buffer-size", type=int, default=64)
+    parser.add_argument("--rir-buffer-size", type=int, default=16)
+    parser.add_argument("--max-shards-per-role", type=int, default=None)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--tiny-model", action="store_true")
+    parser.add_argument("--tiny-hid-feature", type=int, default=16)
+    parser.add_argument("--tiny-num-tfmamba", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--use-wandb", action="store_true")
+    parser.add_argument("--wandb-project", default="semambapp-dnf")
+    parser.add_argument("--wandb-group", default="semambapp-dnf-nogan")
+    parser.add_argument("--wandb-mode", default="online")
+    return parser.parse_args()
+
+
+def load_cfg(path, args):
+    with Path(path).open("r", encoding="utf-8") as handle:
+        cfg = yaml.safe_load(handle)
+    cfg = copy.deepcopy(cfg)
+    cfg["env_setting"]["seed"] = int(args.seed)
+    cfg["training_cfg"]["batch_size"] = int(args.batch_size)
+    cfg["training_cfg"]["segment_size"] = int(round(float(args.cut_duration) * int(cfg["stft_cfg"]["sampling_rate"])))
+    if args.learning_rate is not None:
+        cfg["training_cfg"]["learning_rate"] = float(args.learning_rate)
+    if args.tiny_model:
+        cfg["model_cfg"]["hid_feature"] = int(args.tiny_hid_feature)
+        cfg["model_cfg"]["num_tfmamba"] = int(args.tiny_num_tfmamba)
+    return cfg
+
+
+def build_loader(args, cfg):
+    dataset = DNFHybridStreamDataset(
+        split_root=args.split_root,
+        simulation_config=args.simulation_config,
+        target_sample_rate=int(cfg["stft_cfg"]["sampling_rate"]),
+        cut_duration=float(args.cut_duration),
+        samples_per_epoch=int(args.samples_per_epoch),
+        clean_shuffle_buffer=int(args.clean_shuffle_buffer),
+        noise_buffer_size=int(args.noise_buffer_size),
+        rir_buffer_size=int(args.rir_buffer_size),
+        shard_shuffle_seed=int(args.seed),
+        max_shards_per_role=args.max_shards_per_role,
+        added_noise_snr=tuple(float(x) for x in args.added_noise_snr),
+        source_routing_config=args.source_routing_config,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=int(args.batch_size),
+        shuffle=False,
+        num_workers=int(args.num_workers),
+        drop_last=True,
+        collate_fn=dnf_collate,
+    )
+
+
+def stft_features(wav, cfg):
+    return mag_phase_stft(
+        wav,
+        cfg["stft_cfg"]["n_fft"],
+        cfg["stft_cfg"]["hop_size"],
+        cfg["stft_cfg"]["win_size"],
+        cfg["model_cfg"]["compress_factor"],
+        addeps=True,
+    )
+
+
+def istft_waveform(mag, pha, cfg):
+    return mag_phase_istft(
+        mag,
+        pha,
+        cfg["stft_cfg"]["n_fft"],
+        cfg["stft_cfg"]["hop_size"],
+        cfg["stft_cfg"]["win_size"],
+        cfg["model_cfg"]["compress_factor"],
+    )
+
+
+def crop_pair(reference, estimate):
+    length = min(reference.size(-1), estimate.size(-1))
+    return reference[..., :length], estimate[..., :length]
+
+
+def finite_grad_summary(model):
+    total = 0
+    finite = 0
+    max_abs = 0.0
+    for parameter in model.parameters():
+        if parameter.grad is None:
+            continue
+        grad = parameter.grad.detach()
+        total += grad.numel()
+        finite += int(torch.isfinite(grad).sum().item())
+        if grad.numel() > 0:
+            max_abs = max(max_abs, float(grad.abs().max().item()))
+    return {"finite": finite, "total": total, "max_abs": max_abs}
+
+
+class DNFSEMambappNoGAN(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.speech = SEMambapp(cfg)
+        self.noise = SEMambapp(cfg)
+        self.cfg = cfg
+
+    def forward(self, degraded_mag, degraded_pha):
+        speech_mag, speech_pha, speech_com = self.speech(degraded_mag, degraded_pha)
+        noise_mag, noise_pha, noise_com = self.noise(degraded_mag, degraded_pha)
+        speech_wav = istft_waveform(speech_mag, speech_pha, self.cfg)
+        noise_wav = istft_waveform(noise_mag, noise_pha, self.cfg)
+        speech_wav, noise_wav = crop_pair(speech_wav, noise_wav)
+        return {
+            "speech_mag": speech_mag,
+            "speech_pha": speech_pha,
+            "speech_com": speech_com,
+            "speech_wav": speech_wav,
+            "noise_mag": noise_mag,
+            "noise_pha": noise_pha,
+            "noise_com": noise_com,
+            "noise_wav": noise_wav,
+            "final_wav": speech_wav - noise_wav,
+        }
+
+
+def apply_identity_ratio(batch, ratio, seed, step):
+    if ratio <= 0:
+        return batch, 0
+    degraded = batch["degraded_wav"].clone()
+    added_noise = batch["added_noise_wav"].clone()
+    batch_size = degraded.size(0)
+    generator = torch.Generator(device=degraded.device)
+    generator.manual_seed(int(seed) + int(step) * 1009)
+    mask = torch.rand(batch_size, generator=generator, device=degraded.device) < float(ratio)
+    if mask.any():
+        degraded[mask] = batch["s_noisy_wav"][mask]
+        added_noise[mask] = torch.zeros_like(added_noise[mask])
+    updated = dict(batch)
+    updated["degraded_wav"] = degraded
+    updated["added_noise_wav"] = added_noise
+    return updated, int(mask.sum().item())
+
+
+def standard_loss(model, batch, cfg):
+    degraded_mag, degraded_pha, _ = stft_features(batch["degraded_wav"], cfg)
+    target_mag, _, _ = stft_features(batch["s_noisy_wav"], cfg)
+    mag, pha, _ = model(degraded_mag, degraded_pha)
+    wav = istft_waveform(mag, pha, cfg)
+    target_wav, wav = crop_pair(batch["s_noisy_wav"], wav)
+    loss_time = F.l1_loss(wav, target_wav)
+    loss_mag = F.mse_loss(mag, target_mag)
+    loss = loss_time + loss_mag
+    return loss, {
+        "loss": loss,
+        "loss_time": loss_time,
+        "loss_mag": loss_mag,
+        "wav_l1_to_clean_diag": F.l1_loss(*crop_pair(batch["clean_wav"], wav)),
+    }
+
+
+def dnf_loss(model, batch, cfg):
+    degraded_mag, degraded_pha, _ = stft_features(batch["degraded_wav"], cfg)
+    s_noisy_mag, _, _ = stft_features(batch["s_noisy_wav"], cfg)
+    added_noise_mag, _, _ = stft_features(batch["added_noise_wav"], cfg)
+    outputs = model(degraded_mag, degraded_pha)
+    s_target, speech_wav = crop_pair(batch["s_noisy_wav"], outputs["speech_wav"])
+    n_target, noise_wav = crop_pair(batch["added_noise_wav"], outputs["noise_wav"])
+    clean_target, final_wav = crop_pair(batch["clean_wav"], outputs["final_wav"])
+    loss_speech_time = F.l1_loss(speech_wav, s_target)
+    loss_noise_time = F.l1_loss(noise_wav, n_target)
+    loss_speech_mag = F.mse_loss(outputs["speech_mag"], s_noisy_mag)
+    loss_noise_mag = F.mse_loss(outputs["noise_mag"], added_noise_mag)
+    loss = loss_speech_time + loss_noise_time + loss_speech_mag + loss_noise_mag
+    return loss, {
+        "loss": loss,
+        "loss_speech_time": loss_speech_time,
+        "loss_noise_time": loss_noise_time,
+        "loss_speech_mag": loss_speech_mag,
+        "loss_noise_mag": loss_noise_mag,
+        "final_l1_to_clean_diag": F.l1_loss(final_wav, clean_target),
+    }
+
+
+def scalarize(metrics):
+    return {name: float(value.detach().cpu().item()) for name, value in metrics.items()}
+
+
+def cuda_memory_summary(device):
+    if device.type != "cuda":
+        return {}
+    torch.cuda.synchronize(device)
+    gb = 1024 ** 3
+    return {
+        "cuda_allocated_gb": torch.cuda.memory_allocated(device) / gb,
+        "cuda_reserved_gb": torch.cuda.memory_reserved(device) / gb,
+        "cuda_peak_allocated_gb": torch.cuda.max_memory_allocated(device) / gb,
+        "cuda_peak_reserved_gb": torch.cuda.max_memory_reserved(device) / gb,
+    }
+
+
+def save_checkpoint(path, model, optimizer, args, cfg, step):
+    state = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "args": vars(args),
+        "cfg": cfg,
+        "step": int(step),
+        "created_at": datetime.now().isoformat(),
+    }
+    torch.save(state, path)
+
+
+def main():
+    args = parse_args()
+    torch.manual_seed(int(args.seed))
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for SeMamba++ no-GAN training.")
+    device = torch.device(args.device)
+    cfg = load_cfg(args.config, args)
+    run_name = args.run_name or f"{datetime.now().strftime('%Y%m%d-%H%M%S')}__semambapp__{args.mode}__dnf-nogan"
+    output_dir = Path(args.output_root) / run_name
+    checkpoint_dir = output_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=False)
+
+    loader = build_loader(args, cfg)
+    model = SEMambapp(cfg).to(device) if args.mode == "standard" else DNFSEMambappNoGAN(cfg).to(device)
+    model.train()
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(cfg["training_cfg"]["learning_rate"]),
+        betas=(float(cfg["training_cfg"]["adam_b1"]), float(cfg["training_cfg"]["adam_b2"])),
+    )
+    loss_fn = standard_loss if args.mode == "standard" else dnf_loss
+    grad_accum = max(1, int(args.gradient_accumulation_steps))
+    wandb_run = None
+    if args.use_wandb:
+        os.environ.setdefault("WANDB_DIR", str(Path.cwd() / "runs" / "wandb"))
+        os.environ.setdefault("WANDB_CACHE_DIR", str(Path.cwd() / "runs" / "wandb-cache"))
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            name=run_name,
+            group=args.wandb_group,
+            mode=args.wandb_mode,
+            tags=["semambapp", "dnf-webdataset", "no_gan", args.mode],
+            config={"args": vars(args), "cfg": cfg},
+        )
+
+    metadata = {
+        "run_name": run_name,
+        "mode": args.mode,
+        "output_dir": str(output_dir.resolve()),
+        "config": args.config,
+        "split_root": args.split_root,
+        "simulation_config": args.simulation_config,
+        "source_routing_config": args.source_routing_config,
+        "source_routing": getattr(loader.dataset, "route_summary", {}),
+        "device": str(device),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+        "model_cfg": cfg["model_cfg"],
+        "training_cfg": cfg["training_cfg"],
+    }
+    with (output_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    print(json.dumps(metadata, indent=2, sort_keys=True), flush=True)
+
+    optimizer.zero_grad(set_to_none=True)
+    start = time.time()
+    step = 0
+    accum_index = 0
+    metric_window = []
+    identity_count = 0
+    while step < int(args.max_steps):
+        for batch in loader:
+            batch = {key: value.to(device, non_blocking=True) if torch.is_tensor(value) else value for key, value in batch.items()}
+            if device.type == "cuda" and accum_index % grad_accum == 0:
+                torch.cuda.reset_peak_memory_stats(device)
+            batch, identities = apply_identity_ratio(batch, args.identity_ratio, args.seed, step + accum_index)
+            identity_count += identities
+            loss, metrics = loss_fn(model, batch, cfg)
+            if not torch.isfinite(loss):
+                raise ValueError(f"Non-finite loss at step={step + 1}: {scalarize(metrics)}")
+            (loss / grad_accum).backward()
+            metric_window.append(scalarize(metrics))
+            accum_index += 1
+            if accum_index % grad_accum != 0:
+                continue
+
+            grad = finite_grad_summary(model)
+            if grad["total"] == 0 or grad["finite"] != grad["total"]:
+                raise ValueError(f"Non-finite gradient at step={step + 1}: {grad}")
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            step += 1
+            cuda_memory = cuda_memory_summary(device)
+
+            if step % int(args.log_interval) == 0 or step == 1:
+                averaged = {}
+                for name in metric_window[0].keys():
+                    averaged[name] = sum(item[name] for item in metric_window) / len(metric_window)
+                elapsed = max(1e-6, time.time() - start)
+                log_row = {
+                    **averaged,
+                    "step": step,
+                    "samples_per_sec": step * int(args.batch_size) * grad_accum / elapsed,
+                    "grad_finite": grad["finite"],
+                    "grad_total": grad["total"],
+                    "grad_max_abs": grad["max_abs"],
+                    "identity_count_window": identity_count,
+                    **cuda_memory,
+                }
+                print(json.dumps(log_row, sort_keys=True), flush=True)
+                if wandb_run is not None:
+                    wandb.log({f"train/{key}": value for key, value in log_row.items() if key != "step"}, step=step)
+                metric_window = []
+                identity_count = 0
+
+            if step % int(args.checkpoint_interval) == 0 or step == int(args.max_steps):
+                ckpt_path = checkpoint_dir / f"step_{step:08d}.pt"
+                save_checkpoint(ckpt_path, model, optimizer, args, cfg, step)
+                print(f"checkpoint={ckpt_path}", flush=True)
+
+            if step >= int(args.max_steps):
+                break
+
+    final_ckpt = checkpoint_dir / f"step_{step:08d}.pt"
+    if not final_ckpt.exists():
+        save_checkpoint(final_ckpt, model, optimizer, args, cfg, step)
+        print(f"checkpoint={final_ckpt}", flush=True)
+    if wandb_run is not None:
+        wandb.finish()
+    print(f"done step={step} output_dir={output_dir.resolve()}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

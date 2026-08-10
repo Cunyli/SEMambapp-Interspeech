@@ -139,7 +139,7 @@ def scan_checkpoint(cp_dir, prefix):
     cp_list = glob.glob(pattern)
     if len(cp_list) == 0:
         return None
-    return sorted(cp_list)[-1]
+    return sorted(cp_list, key=lambda path: [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", path)])[-1]
 
 def build_env(config, config_name, exp_path):
     os.makedirs(exp_path, exist_ok=True)

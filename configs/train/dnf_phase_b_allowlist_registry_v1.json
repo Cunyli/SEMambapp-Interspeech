@@ -1,0 +1,67 @@
+{
+  "schema_version": "dnf_phase_b_indoor_allowlist_registry_v1",
+  "allowlist_id": "phase-b-v2-indoor-stable-review-v1-20260719",
+  "status": "review_allowlist_only_not_training_ready",
+  "formal_submit_allowed": false,
+  "source_audit": {
+    "schema_version": "dnf_phase_b_source_audit_v2",
+    "run_dir": "/scratch/work/lil14/SEMambapp-Interspeech/runs/dnf_phase_b_audit/phase-b-v2-indoor-stable-20260719"
+  },
+  "noise_review_allowlist": {
+    "candidate_file": "indoor_noise_candidates_pending.jsonl",
+    "required_route": "audit_pending",
+    "required_proposed_route": "noise_only",
+    "required_training_ready": false,
+    "allowed_datasets": [
+      "DNS5_noise",
+      "FSD50K"
+    ],
+    "allowed_selection_reasons": [
+      "dns5_freesound_validated_fan",
+      "fsd50k_mechanical_fan_fail_closed"
+    ],
+    "manual_approval_required": true
+  },
+  "variable_vehicle_exclusion": {
+    "candidate_file": "variable_vehicle_event_candidates.jsonl",
+    "required_route": "audit_pending",
+    "required_proposed_route": "variable_vehicle_event_candidate",
+    "required_training_ready": false,
+    "must_be_disjoint_from_noise_review_allowlist": true,
+    "prohibited_training_routes": [
+      "noise_only",
+      "primary_dnf_noise_component"
+    ]
+  },
+  "rir_review_allowlist": {
+    "candidate_file": "indoor_rir_candidates_pending.jsonl",
+    "required_route": "audit_pending",
+    "required_proposed_route": "rir",
+    "required_training_ready": false,
+    "allowed_datasets": [
+      "Arni",
+      "DNS5_RIR_SLR26",
+      "DNS5_RIR_SLR28"
+    ],
+    "operator_scope": "future_convolution_only_never_additive_eq13",
+    "parameter_approval_required": true
+  },
+  "review_evidence": {
+    "noise_acoustic_review": "indoor_asset_review/indoor_noise_acoustic_review.jsonl",
+    "rir_parameter_review": "indoor_asset_review/indoor_rir_decode_review.jsonl"
+  },
+  "approved_training_allowlists": {
+    "noise_file": "approved_indoor_noise_v1.jsonl",
+    "rir_file": "approved_indoor_rir_v1.jsonl",
+    "initial_state": "empty_fail_closed",
+    "training_ready": false,
+    "promotion_requires_new_version": true
+  },
+  "future_consumer_must_require": [
+    "approved_status",
+    "training_ready_true",
+    "allowlist_version_match",
+    "artifact_sha256_match",
+    "route_specific_schema_match"
+  ]
+}

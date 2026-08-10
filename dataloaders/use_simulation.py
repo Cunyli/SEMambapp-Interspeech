@@ -1,3 +1,5 @@
+import csv
+import json
 import sys
 from pathlib import Path
 
@@ -10,6 +12,29 @@ def _add_use_simulation_to_path(root):
     root = Path(root).expanduser().resolve()
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
+
+
+def _string_metadata(row):
+    return {str(key): "" if value is None else str(value) for key, value in row.items()}
+
+
+def _load_pair_metadata(pair_manifest):
+    path = Path(pair_manifest).expanduser()
+    if path.suffix == ".csv":
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.DictReader(handle))
+    else:
+        with path.open(encoding="utf-8") as handle:
+            rows = json.load(handle)
+        if not isinstance(rows, list):
+            raise ValueError(f"{path} must contain a list of pair rows.")
+    metadata = {}
+    for row in rows:
+        key = row.get("uid") or row.get("id") or Path(row.get("noisy_filepath") or row.get("noisy_path", "")).stem
+        if not key:
+            raise ValueError(f"Pair row is missing uid/id/noisy path: {row}")
+        metadata[str(key)] = _string_metadata(row)
+    return metadata
 
 
 class USESimulationSEMambaDataset(torch.utils.data.Dataset):
@@ -51,6 +76,10 @@ class USESimulationSEMambaDataset(torch.utils.data.Dataset):
         self.validation_prefer_active = bool(cfg["training_cfg"].get("validation_prefer_active", True))
         self.activity_threshold = float(cfg["training_cfg"].get("validation_activity_threshold", 0.01))
         self.min_active_ratio = float(cfg["training_cfg"].get("validation_min_active_ratio", 0.05))
+        self.return_metadata = bool(
+            cfg["training_cfg"].get("return_metadata", False)
+            or cfg["training_cfg"].get("sv_guardrail", {}).get("enabled", False)
+        )
 
         self.dataset = FixedPairDataset(
             pair_manifest=pair_manifest,
@@ -62,10 +91,11 @@ class USESimulationSEMambaDataset(torch.utils.data.Dataset):
             normalize=normalize,
             seed=seed,
         )
+        self.metadata_by_id = _load_pair_metadata(pair_manifest) if self.return_metadata else {}
         self.random_start = bool((random_start and mode == "Train") or (mode != "Train" and self.validation_random_start))
 
     def __getitem__(self, index):
-        degraded_audio, clean_audio, _ = self.dataset[index]
+        degraded_audio, clean_audio, item_info = self.dataset[index]
         clean_audio = torch.as_tensor(clean_audio, dtype=torch.float32).reshape(1, -1)
         degraded_audio = torch.as_tensor(degraded_audio, dtype=torch.float32).reshape(1, -1)
 
@@ -78,7 +108,7 @@ class USESimulationSEMambaDataset(torch.utils.data.Dataset):
             degraded_audio, self.n_fft, self.hop_size, self.win_size, self.compress_factor
         )
 
-        return (
+        item = (
             clean_audio.squeeze(),
             clean_mag.squeeze(),
             clean_pha.squeeze(),
@@ -87,6 +117,15 @@ class USESimulationSEMambaDataset(torch.utils.data.Dataset):
             degraded_mag.squeeze(),
             degraded_pha.squeeze(),
         )
+        if not self.return_metadata:
+            return item
+        metadata = dict(self.metadata_by_id.get(str(item_info["id"]), {}))
+        metadata.setdefault("uid", str(item_info["id"]))
+        metadata.setdefault("sample_rate", str(item_info.get("sample_rate", "")))
+        metadata.setdefault("length", str(item_info.get("length", "")))
+        metadata.setdefault("noisy_filepath", str(item_info.get("noisy_path", "")))
+        metadata.setdefault("clean_filepath", str(item_info.get("clean_path", "")))
+        return (*item, metadata)
 
     def __len__(self):
         return len(self.dataset)
