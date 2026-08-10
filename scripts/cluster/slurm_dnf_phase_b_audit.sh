@@ -1,7 +1,10 @@
 #!/bin/bash
+# Historical cluster helper. Submission requires CONFIRM_SLURM_SUBMIT=1.
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/scratch/work/lil14/SEMambapp-Interspeech}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/runs/dnf_phase_b_audit}"
 JOB_NAME="${JOB_NAME:-dnf-phase-b-audit}"
@@ -25,6 +28,10 @@ LIVE_LOG="$LOG_DIR/dnf_phase_b_${AUDIT_ID}_${SLURM_JOB_ID:-submit}.log"
 mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+  if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
+    echo "Refusing to submit without CONFIRM_SLURM_SUBMIT=1" >&2
+    exit 2
+  fi
   sbatch \
     --job-name="$JOB_NAME" \
     --partition="$PARTITION" \
@@ -36,7 +43,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     --output="$LOG_DIR/slurm_%j.out" \
     --error="$LOG_DIR/slurm_%j.err" \
     --export="ALL,AUDIT_ID=$AUDIT_ID" \
-    "$ROOT_DIR/scripts/slurm_dnf_phase_b_audit.sh"
+    "$ROOT_DIR/scripts/cluster/slurm_dnf_phase_b_audit.sh"
   exit 0
 fi
 

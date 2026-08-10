@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "train_semambapp_dnf_phase_a.py"
 CONTRACT = ROOT / "configs" / "train" / "dnf_phase_ab_v2_contract.json"
-WRAPPER = ROOT / "scripts" / "slurm_semambapp_dnf_phase_a_array.sh"
+WRAPPER = ROOT / "scripts" / "cluster" / "slurm_semambapp_dnf_phase_a_array.sh"
 
 
 def test_training_script_is_valid_python_and_has_no_resume_or_gan_cli() -> None:

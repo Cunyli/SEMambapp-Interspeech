@@ -1,7 +1,10 @@
 #!/bin/bash
+# Historical cluster helper. Submission requires CONFIRM_SLURM_SUBMIT=1.
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/scratch/work/lil14/SEMambapp-Interspeech}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 PARTITION="${PARTITION:-gpu-interactive}"
 GPU_TYPE="${GPU_TYPE:-v100}"
@@ -19,6 +22,10 @@ fi
 mkdir -p "$LOG_DIR"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+  if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
+    echo "Refusing to submit without CONFIRM_SLURM_SUBMIT=1" >&2
+    exit 2
+  fi
   sbatch \
     --job-name="dnf-phase-a-rem3" \
     --partition="$PARTITION" \
@@ -31,7 +38,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     --output="$LOG_DIR/slurm_%j.out" \
     --error="$LOG_DIR/slurm_%j.err" \
     --export=ALL \
-    "$ROOT_DIR/scripts/slurm_semambapp_dnf_phase_a_remaining3.sh"
+    "$ROOT_DIR/scripts/cluster/slurm_semambapp_dnf_phase_a_remaining3.sh"
   exit 0
 fi
 
@@ -69,7 +76,7 @@ launch_arm() {
       VALID_MANIFEST="$VALID_MANIFEST" \
       SLURM_ARRAY_TASK_ID="$task_id" \
       SLURM_ARRAY_JOB_ID="${SLURM_JOB_ID}_${log_tag}" \
-      bash "$ROOT_DIR/scripts/slurm_semambapp_dnf_phase_a_array.sh" &
+      bash "$ROOT_DIR/scripts/cluster/slurm_semambapp_dnf_phase_a_array.sh" &
   pids+=("$!")
   labels+=("$log_tag")
 }

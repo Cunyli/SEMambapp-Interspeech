@@ -25,7 +25,7 @@ target_cfg:
   rir_delay_mode: argmax_abs
 
 experiment_cfg:
-  exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-/scratch/work/lil14/SEMambapp-Interspeech/exp}
+  exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-/scratch/work/lil14/SEMambapp-Interspeech/checkpoints}
   experiment_name: pretrain_semambapp_main_v1
   stdout_interval: 50
   checkpoint_interval_steps: 5000

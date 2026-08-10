@@ -21,7 +21,7 @@ data_cfg:
   avqi_validation_pair_manifest: /scratch/work/lil14/use_simulation_pipeline/outputs/organized/csv/tau_selected_clean_5fold_oof/fold_00/valid_selected_phone_room_pair_manifest.csv
 
 experiment_cfg:
-  exp_path: /scratch/work/lil14/SEMambapp-Interspeech/exp
+  exp_path: /scratch/work/lil14/SEMambapp-Interspeech/checkpoints
   experiment_name: tau_s1_sv_ablation_mig71_fullseg_preflight_step25_v1
   stdout_interval: 5
   checkpoint_interval_steps: 25
@@ -39,8 +39,8 @@ experiment_cfg:
 
 fine_tuning_cfg:
   enabled: true
-  pretrained_generator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/exp/semambapp_shifted_anechoic_online_v1/ln_g_00180000.pth
-  pretrained_discriminator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/exp/semambapp_shifted_anechoic_online_v1/ln_do_00180000.pth
+  pretrained_generator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/checkpoints/semambapp_shifted_anechoic_online_v1/ln_g_00180000.pth
+  pretrained_discriminator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/checkpoints/semambapp_shifted_anechoic_online_v1/ln_do_00180000.pth
 
 training_cfg:
   training_epochs: 100

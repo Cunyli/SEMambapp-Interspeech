@@ -1,16 +1,18 @@
 """Controlled additive WebDataset stream for the paper-faithful DNF test.
 
-This module is intended to live in the SeMamba++ ``dataloaders`` package.  It
-reuses DNF_USE's manifest, tar-item, audio-reader, and deterministic worker
-helpers, but deliberately excludes the simulation/RIR/codec path.  The caller
-must put ``/scratch/work/lil14/DNF_USE`` on ``sys.path`` before importing it.
+The pure mixture and collate utilities are repository-local. The streaming
+dataset loads manifest and tar-reading support from an external ``DNF_USE``
+checkout only when it is instantiated. Set ``DNF_USE_ROOT`` for that route.
 
 The noisy-target training view exposes only ``x=s+n1+n2``, ``s+n1``, and
 ``n2``.  Clean speech is returned only when ``expose_clean_for_eval=True``.
 """
 
 import math
+import os
 import random
+import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Union
@@ -19,18 +21,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
-from dataloader.dnf_webdataset_protocol import (
-    _cycle_items,
-    _iter_shard_items,
-    _load_shard_records,
-    _pop_random_item,
-    _shard_source_counts,
-)
-from dataloader.gap_webdataset import gap_worker_init_fn, stable_uint32
-from dataloader.hybrid_webdataset_protocol import (
-    WebDatasetAudioReader,
-    _checked_pad_or_crop,
-    _duration_samples,
+from dataloaders.dnf_controlled_phase_a import (
+    gap_worker_init_fn,
+    stable_uint32,
 )
 
 
@@ -53,6 +46,80 @@ class ControlledAdditiveMixture:
     clean_speech: np.ndarray
     noise1: np.ndarray
     diagnostics: dict
+
+
+def _normalize_source_name(source: str) -> str:
+    return re.sub(r"_chunk\d+(?:_patch)?$", "", str(source))
+
+
+def _shard_source_counts(shard: dict) -> dict[str, int]:
+    dataset_counts = shard.get("dataset_counts")
+    if isinstance(dataset_counts, dict) and dataset_counts:
+        return {
+            _normalize_source_name(source): int(count or 0)
+            for source, count in dataset_counts.items()
+        }
+    dataset = shard.get("dataset") or shard.get("source") or "<missing>"
+    return {_normalize_source_name(str(dataset)): int(shard.get("sample_count") or 0)}
+
+
+def _duration_samples(
+    cut_duration: Union[float, Sequence[float]],
+    target_sample_rate: int,
+    rng: random.Random,
+) -> int:
+    if isinstance(cut_duration, (list, tuple)):
+        duration = rng.uniform(float(cut_duration[0]), float(cut_duration[1]))
+    else:
+        duration = float(cut_duration)
+    return int(round(duration * int(target_sample_rate)))
+
+
+def _checked_pad_or_crop(
+    waveform: np.ndarray,
+    length: int,
+    rng: np.random.Generator,
+    role: str,
+) -> tuple[np.ndarray, Optional[int]]:
+    if waveform.shape[-1] == 0:
+        raise ControlledSampleRejected(f"empty {role} waveform")
+    if waveform.shape[-1] < length:
+        padding = [(0, 0), (0, length - waveform.shape[-1])]
+        return np.pad(waveform, padding, mode="wrap"), None
+    if waveform.shape[-1] == length:
+        return waveform, 0
+    offset = int(rng.integers(0, waveform.shape[-1] - length + 1))
+    return waveform[..., offset : offset + length], offset
+
+
+def _load_external_webdataset_support():
+    """Load optional DNF_USE streaming helpers only for the streaming route."""
+
+    default_root = Path(__file__).resolve().parents[2] / "DNF_USE"
+    dnf_use_root = Path(os.environ.get("DNF_USE_ROOT", default_root)).expanduser().resolve()
+    if not dnf_use_root.is_dir():
+        raise ImportError(
+            "Controlled DNF streaming requires a DNF_USE checkout. "
+            "Set DNF_USE_ROOT to its repository root."
+        )
+    root_text = str(dnf_use_root)
+    if root_text not in sys.path:
+        sys.path.insert(1, root_text)
+
+    # These imports stay local because DNF_USE is an optional external project.
+    try:
+        from dataloader.dnf_webdataset_protocol import (
+            _cycle_items,
+            _load_shard_records,
+            _pop_random_item,
+        )
+        from dataloader.hybrid_webdataset_protocol import WebDatasetAudioReader
+    except ModuleNotFoundError as exc:
+        raise ImportError(
+            f"Could not import DNF_USE streaming support from {dnf_use_root}"
+        ) from exc
+
+    return _cycle_items, _load_shard_records, _pop_random_item, WebDatasetAudioReader
 
 
 def _item_id(item: dict) -> str:
@@ -284,11 +351,16 @@ class ControlledDNFAdditiveStreamDataset(IterableDataset):
         if max_tuple_attempts <= 0:
             raise ValueError("max_tuple_attempts must be positive")
 
+        cycle_items, load_shard_records, pop_random_item, reader_class = (
+            _load_external_webdataset_support()
+        )
+        self._cycle_items = cycle_items
+        self._pop_random_item = pop_random_item
         self.split_root = Path(split_root)
         self.split = split
         split_dir = self.split_root / split
-        speech_records = _load_shard_records(split_dir / "clean_shards.jsonl", None)
-        noise_records = _load_shard_records(split_dir / "noise_shards.jsonl", None)
+        speech_records = load_shard_records(split_dir / "clean_shards.jsonl", None)
+        noise_records = load_shard_records(split_dir / "noise_shards.jsonl", None)
         self.speech_shards = _select_source_shards(speech_records, clean_sources, "speech")
         self.noise_shards = _select_source_shards(noise_records, (noise_source,), "noise")
         if not self.speech_shards:
@@ -310,7 +382,7 @@ class ControlledDNFAdditiveStreamDataset(IterableDataset):
         self.max_tuple_attempts = int(max_tuple_attempts)
         self.expose_clean_for_eval = bool(expose_clean_for_eval)
         self.noise_source = str(noise_source)
-        self.reader = WebDatasetAudioReader(
+        self.reader = reader_class(
             target_sample_rate=self.target_sample_rate,
             tar_cache_size=tar_cache_size,
         )
@@ -342,7 +414,7 @@ class ControlledDNFAdditiveStreamDataset(IterableDataset):
         quota = self.samples_per_epoch // num_workers
         quota += int(worker_id < self.samples_per_epoch % num_workers)
         rng = random.Random(stable_uint32(self.seed, self.epoch, worker_id, "controlled-dnf"))
-        speech_iter = _cycle_items(
+        speech_iter = self._cycle_items(
             self.speech_shards,
             "controlled-speech",
             self.reader,
@@ -351,7 +423,7 @@ class ControlledDNFAdditiveStreamDataset(IterableDataset):
             self.seed,
             self.epoch,
         )
-        noise_iter = _cycle_items(
+        noise_iter = self._cycle_items(
             self.noise_shards,
             "controlled-noise",
             self.reader,
@@ -372,13 +444,13 @@ class ControlledDNFAdditiveStreamDataset(IterableDataset):
                     f"last rejection: {last_rejection}"
                 )
             attempts += 1
-            speech_item = _pop_random_item(
+            speech_item = self._pop_random_item(
                 speech_buffer, speech_iter, self.clean_shuffle_buffer, rng
             )
-            noise1_item = _pop_random_item(
+            noise1_item = self._pop_random_item(
                 noise_buffer, noise_iter, self.noise_buffer_size, rng
             )
-            noise2_item = _pop_random_item(
+            noise2_item = self._pop_random_item(
                 noise_buffer, noise_iter, self.noise_buffer_size, rng
             )
             if _item_id(noise1_item) == _item_id(noise2_item):

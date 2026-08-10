@@ -1,7 +1,11 @@
 #!/bin/bash
+# Historical Triton helper. Outside an allocation this script can submit an
+# sbatch job, so submission requires CONFIRM_SLURM_SUBMIT=1.
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/scratch/work/lil14/SEMambapp-Interspeech}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 TASK="${TASK:-${1:-train}}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-semambapp}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
@@ -23,7 +27,7 @@ export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$ROOT_DIR/runs/wandb-cache}"
 mkdir -p "$LOG_DIR" "$WANDB_DIR" "$WANDB_CACHE_DIR"
 
 submit_self() {
-  local script_path="$ROOT_DIR/scripts/slurm.sh"
+  local script_path="$ROOT_DIR/scripts/cluster/slurm.sh"
   local sbatch_args=(
     "--job-name=$JOB_NAME"
     "--partition=$PARTITION"
@@ -44,6 +48,10 @@ submit_self() {
     sbatch_args+=("--gres=gpu:${GPUS}")
   fi
 
+  if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
+    echo "Refusing to submit without CONFIRM_SLURM_SUBMIT=1" >&2
+    exit 2
+  fi
   echo "Submitting $JOB_NAME"
   sbatch "${sbatch_args[@]}" --export=ALL,TASK="$TASK" "$script_path" "$TASK"
 }
@@ -66,7 +74,7 @@ load_runtime() {
 }
 
 best_semambapp_checkpoint() {
-  local ckpt_dir="${1:-$ROOT_DIR/exp/train_semambapp_tau_fixed}"
+  local ckpt_dir="${1:-$ROOT_DIR/checkpoints/train_semambapp_tau_fixed}"
   local ckpt
 
   ckpt="$(find "$ckpt_dir" -maxdepth 1 -type f -name "best_guarded_ln_g_*.pth" | sort -V | tail -n 1)"
@@ -112,7 +120,7 @@ PY
 run_train() {
   CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/train/semambapp_tau_fixed.yaml}"
   USE_SIMULATION_ROOT="${USE_SIMULATION_ROOT:-/scratch/work/lil14/USE_simulation}"
-  SEMAMBAPP_EXPERIMENT_ROOT="${SEMAMBAPP_EXPERIMENT_ROOT:-$ROOT_DIR/exp}"
+  SEMAMBAPP_EXPERIMENT_ROOT="${SEMAMBAPP_EXPERIMENT_ROOT:-$ROOT_DIR/checkpoints}"
   SEMAMBAPP_PRETRAINED_GENERATOR_CKPT="${SEMAMBAPP_PRETRAINED_GENERATOR_CKPT:-}"
   SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT="${SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT:-}"
   SEMAMBAPP_TAU_FIXED_TRAIN_CSV="${SEMAMBAPP_TAU_FIXED_TRAIN_CSV:-/scratch/work/lil14/data/TAU/simulated/phone_room/train/paired.csv}"
@@ -132,7 +140,7 @@ run_infer() {
   OUTPUT_DIR="${OUTPUT_DIR:-${OUT_ROOT:-/scratch/work/lil14/data/TAU/enhanced/semambapp/phone_room/test}}"
   PAIR_CSV="${PAIR_CSV:-/scratch/work/lil14/data/TAU/simulated/phone_room/test/paired.csv}"
   CKPT="${CKPT:-}"
-  CKPT_DIR="${CKPT_DIR:-$ROOT_DIR/exp/train_semambapp_tau_fixed}"
+  CKPT_DIR="${CKPT_DIR:-$ROOT_DIR/checkpoints/train_semambapp_tau_fixed}"
   WAV_DIR="$OUTPUT_DIR/wav"
 
   test -f "$CONFIG_PATH"

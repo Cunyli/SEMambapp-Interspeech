@@ -1,88 +1,115 @@
-# SEMambapp
-(Submitted to Interspeech 2026) An official code repository for SEMamba++.
+# SeMamba++ Research Repository
 
+> **Status:** active research code organized for advisor review. The repository
+> records implemented systems and experiment intent; it does not claim that
+> every saved configuration was run or that a final model has been selected.
 
-This repository provides the official codebase and resources for SEMamba++ as described in our research. This repository is currently anonymous and will remain so until the publication process is complete, after which it will be de-anonymized with full author and project details.
-## Prerequisites
-1. Install the dependencies.
+This repository contains the SeMamba++ speech-enhancement implementation,
+fixed-pair and controlled-DNF data paths, experiment configurations, evaluation
+tools, and contract tests. The goal of this tree is to make the research easy
+to inspect while preserving the full Git history.
+
+## Project at a glance
+
+| Area | Current boundary |
+|---|---|
+| SeMamba++ model and training path | Implemented |
+| Fixed-pair USE simulation adapter | Implemented; data remains external |
+| Identity and speaker-verification guardrails | Active research code and configs |
+| Controlled DNF paths | Experimental; external DNF data tooling is required by some routes |
+| Project-trained checkpoints | Stored locally under `checkpoints/`; not tracked |
+| Downloaded model weights | Stored locally under `pretrained/`; not tracked |
+| Final model or paper-level result | Not established by repository structure alone |
+
+## Start here
+
+For a structured review, read:
+
+1. [Architecture](docs/architecture.md)
+2. [Research status](docs/research-status.md)
+3. [Provenance and asset boundaries](docs/provenance.md)
+4. [Configuration guide](configs/README.md)
+5. [Script guide](scripts/README.md)
+
+## Repository layout
+
+```text
+configs/train/              # maintained baselines, experiment configs, and contracts
+dataloaders/                # fixed-pair and controlled research data routes
+docs/                       # architecture, status, and provenance
+metrics/                    # validation metric helpers
+model/                      # SeMamba++ and experimental model components
+scripts/                    # data preparation, evaluation, and training entry points
+scripts/cluster/            # cluster-specific helpers; may submit Slurm jobs
+tests/                      # CPU/static engineering contract tests
+checkpoints/                # project-trained checkpoints; ignored except README
+pretrained/                 # externally obtained weights; ignored except README
+logs/ outputs/ runs/ tmp/   # ignored runtime artifacts
+train.py / infer.py         # baseline training and single-file inference entry points
 ```
-pip install -r requirements.txt
+
+## Local setup
+
+Python 3.10 is the original project baseline. Install runtime dependencies with:
+
+```bash
+python -m pip install -r requirements.txt
 ```
-2. For Mamba, we recommend installing through [SEMamba](https://github.com/RoyChao19477/SEMamba)'s implementation.
 
-## Layout
+Install the test dependency and run the CPU/static suite with:
 
-- `model/`: SEMamba++ model code.
-- `configs/train/`: human-maintained training configs.
-- `dataloaders/use_simulation.py`: adapter from USE_simulation fixed pairs to SEMamba++ batches.
-- `metrics/evaluation.py`: validation metric helpers used during training.
-- `scripts/slurm.sh`: generic Slurm entry point for `train` and `infer`.
-- `runs/wandb/`: local W&B run cache.
-- `outputs/examples/`: local demo/example audio, including migrated raw and normalized demo files.
-- `checkpoints/`, `logs/`, `outputs/`, `runs/`, `tmp/`, and `pretrained/`: local runtime artifacts ignored by git.
+```bash
+python -m pip install -r requirements-dev.txt
+CUDA_VISIBLE_DEVICES='' python -m pytest -q
+```
 
-Local agent notes such as `AGENTS.md`, `CLAUDE.md`, and `docs/` are intentionally ignored. Repository conventions live in this README, `.gitignore`, configs, and scripts.
+Mamba-specific installation may require the environment guidance from the
+[SEMamba project](https://github.com/RoyChao19477/SEMamba). A passing unit test
+suite establishes engineering contracts only; it does not establish training
+convergence or speech quality.
 
-## Datasets
+## Data boundary
 
-The default training flow points to fixed noisy/clean pair manifests exported by the external `USE_simulation` bundle. Use environment variables or config fields to select manifests:
+Datasets and generated manifests are not stored in Git. The main fixed-pair
+training route expects manifests exported by the separate `USE_simulation`
+project. Configure their locations in YAML or with environment variables:
 
 ```yaml
 data_cfg:
   dataset_type: use_simulation_fixed
   use_simulation_root: ${USE_SIMULATION_ROOT:-../USE_simulation}
-  train_pair_manifest: ${SEMAMBAPP_TAU_FIXED_TRAIN_CSV:-/path/to/tau/simulated/phone_room/train/paired.csv}
-  valid_pair_manifest: ${SEMAMBAPP_TAU_FIXED_VALID_CSV:-/path/to/tau/simulated/phone_room/valid/paired.csv}
+  train_pair_manifest: ${SEMAMBAPP_TAU_FIXED_TRAIN_CSV:-/path/to/train/paired.csv}
+  valid_pair_manifest: ${SEMAMBAPP_TAU_FIXED_VALID_CSV:-/path/to/valid/paired.csv}
 ```
 
-SEMamba++ does not contain its own degradation or simulation implementation.
-Generate or update synthetic datasets in `USE_simulation`, then point this
-repository at the exported manifests.
+Some historical controlled-DNF routes reuse loaders from a separate `DNF_USE`
+checkout. Set `DNF_USE_ROOT` to that repository when running those paths. Pure
+controlled-mixture utilities and their unit tests remain usable without it.
 
-The repository-local `data/` directory is reserved for a README only. Generated
-manifests, degraded validation audio, and old local source lists should stay
-outside git, preferably under external data roots or ignored runtime folders.
+The original experiments used VCTK and EARS speech, DNS/WHAM-style noise, and
+external room-response resources. See [Provenance](docs/provenance.md) before
+reusing any external asset.
 
-## Slurm
+## Checkpoint and output policy
 
-Use generic task names and choose data through config/environment variables:
+- Put checkpoints trained by this project in `checkpoints/<run_id>/`.
+- Put downloaded or upstream weights in `pretrained/<source>/`.
+- Put run records in `runs/<run_id>/` and generated audio in
+  `runs/<run_id>/outputs/` or `outputs/`.
+- A shareable listening set should contain 3--5 deterministic sample IDs and a
+  manifest that records the config and checkpoint used to create them.
+- Legacy configs may retain absolute Triton paths as experiment history. Their
+  presence is not evidence that a run completed successfully.
 
-```bash
-bash scripts/slurm.sh train
-bash scripts/slurm.sh infer
-```
+## Operational safety
 
-Common overrides:
+Cluster helpers are isolated under `scripts/cluster/`. A helper that can call
+`sbatch` refuses submission unless `CONFIRM_SLURM_SUBMIT=1` is set explicitly.
+Review all paths, resources, and output locations before enabling that gate.
+No root documentation command submits a job or starts training.
 
-```bash
-CONFIG_PATH=configs/train/semambapp_tau_fixed.yaml bash scripts/slurm.sh train
-OUTPUT_DIR=/path/to/enhanced CKPT=/path/to/ln_g_00000100.pth bash scripts/slurm.sh infer
-```
+## Reference implementations
 
-Inference intended for ABQI/ABQY-style evaluation writes:
-
-```text
-<output_dir>/wav/
-<output_dir>/inf.scp
-<output_dir>/ref.scp
-```
-
-
-## Link to datasets
-
-1. Download [VCTK](https://datashare.ed.ac.uk/handle/10283/2950) for speech.
-2. Download [DNS Challenge 2020](https://github.com/microsoft/DNS-Challenge) and [WHAM!](http://wham.whisper.ai/) for noise.
-3. Download [Arni](https://github.com/AaltoAcousticsLab/aalto-datasets) and [DNS5](https://github.com/microsoft/DNS-Challenge) for reverberation.
-
-Set `USE_SIMULATION_ROOT` to the directory that contains the external `data/` bundle when you submit training jobs.
-
-
-## Notices
-
-Pretrained models will be made publicly available upon completion of the publication process.
-
-## References
-
-SEMamba: [SEMamba](https://github.com/RoyChao19477/SEMamba)
-BigVGAN: [BigVGAN](https://github.com/NVIDIA/BigVGAN)
-MP-SENet: [MPSENet](https://github.com/yxlu-0102/MP-SENet)
+- [SEMamba](https://github.com/RoyChao19477/SEMamba)
+- [BigVGAN](https://github.com/NVIDIA/BigVGAN)
+- [MP-SENet](https://github.com/yxlu-0102/MP-SENet)

@@ -27,23 +27,15 @@ from torch.utils.data import DataLoader
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DNF_REPO = Path("/scratch/work/lil14/DNF_USE")
 if str(REPO_ROOT) in sys.path:
     sys.path.remove(str(REPO_ROOT))
-if str(DNF_REPO) in sys.path:
-    sys.path.remove(str(DNF_REPO))
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(1, str(DNF_REPO))
 
 from dataloaders.dnf_controlled_webdataset import (
     ControlledDNFAdditiveStreamDataset,
     controlled_dnf_collate,
     gap_worker_init_fn,
 )
-# DNF_USE also owns a regular top-level ``model`` package.  Keep its root only
-# long enough to resolve the reused ``dataloader`` helpers, then remove it so
-# SeMamba++'s local namespace package is the unambiguous model source.
-sys.path.remove(str(DNF_REPO))
 
 from model.dnf_paper import (
     dnf_noisy_loss_eq13,
@@ -81,7 +73,7 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--samples-per-epoch", type=int, default=8192)
     parser.add_argument("--validation-samples", type=int, default=128)
-    parser.add_argument("--listening-samples", type=int, default=16)
+    parser.add_argument("--listening-samples", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument(

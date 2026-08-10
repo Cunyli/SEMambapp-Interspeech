@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--cut-duration", type=float, default=1.0)
     parser.add_argument("--validation-samples", type=int, default=200)
-    parser.add_argument("--listening-samples", type=int, default=16)
+    parser.add_argument("--listening-samples", type=int, default=5)
     parser.add_argument(
         "--checkpoint-steps",
         nargs="*",

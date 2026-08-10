@@ -21,7 +21,7 @@ data_cfg:
   valid_pair_manifest: ${SEMAMBAPP_TAU_FIXED_VALID_CSV:-/path/to/tau/simulated/phone_room/valid/paired.csv}
 
 experiment_cfg:
-  exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-exp}
+  exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-checkpoints}
   experiment_name: train_semambapp_tau_fixed_effective_bs16_v1
   stdout_interval: 5
   checkpoint_interval_steps: 1000

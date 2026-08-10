@@ -1,7 +1,10 @@
 #!/bin/bash
+# Historical cluster helper. Submission requires CONFIRM_SLURM_SUBMIT=1.
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/scratch/work/lil14/SEMambapp-Interspeech}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 JOB_NAME="${JOB_NAME:-dnf-phase-a-tau-gate}"
 PARTITION="${PARTITION:-gpu-debug}"
@@ -31,6 +34,10 @@ fi
 mkdir -p "$LOG_DIR"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+  if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
+    echo "Refusing to submit without CONFIRM_SLURM_SUBMIT=1" >&2
+    exit 2
+  fi
   if [[ -e "$OUTPUT_DIR" ]]; then
     echo "Refusing to overwrite immutable TAU output: $OUTPUT_DIR" >&2
     exit 2
@@ -47,7 +54,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     --output="$LOG_DIR/slurm_%j.out" \
     --error="$LOG_DIR/slurm_%j.err" \
     --export=ALL \
-    "$ROOT_DIR/scripts/slurm_eval_semambapp_dnf_phase_a_tau_gate.sh"
+    "$ROOT_DIR/scripts/cluster/slurm_eval_semambapp_dnf_phase_a_tau_gate.sh"
   exit 0
 fi
 

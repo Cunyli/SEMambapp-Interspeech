@@ -1,7 +1,10 @@
 #!/bin/bash
+# Historical cluster helper. Submission requires CONFIRM_SLURM_SUBMIT=1.
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/scratch/work/lil14/SEMambapp-Interspeech}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 JOB_NAME="${JOB_NAME:-semambapp-dnf-tau-gate}"
 PARTITION="${PARTITION:-gpu-debug}"
@@ -24,7 +27,7 @@ COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
 mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
 
 submit_self() {
-  local script_path="$ROOT_DIR/scripts/slurm_eval_semambapp_dnf_nogan_tau_gate.sh"
+  local script_path="$ROOT_DIR/scripts/cluster/slurm_eval_semambapp_dnf_nogan_tau_gate.sh"
   local sbatch_args=(
     "--job-name=$JOB_NAME"
     "--partition=$PARTITION"
@@ -38,6 +41,10 @@ submit_self() {
     sbatch_args+=("--gres=gpu:${GPU_TYPE}:${GPUS}")
   else
     sbatch_args+=("--gres=gpu:${GPUS}")
+  fi
+  if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
+    echo "Refusing to submit without CONFIRM_SLURM_SUBMIT=1" >&2
+    exit 2
   fi
   sbatch "${sbatch_args[@]}" --export=ALL "$script_path"
 }

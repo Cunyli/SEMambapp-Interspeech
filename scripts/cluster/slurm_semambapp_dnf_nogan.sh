@@ -1,7 +1,10 @@
 #!/bin/bash
+# Historical cluster helper. Submission requires CONFIRM_SLURM_SUBMIT=1.
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/scratch/work/lil14/SEMambapp-Interspeech}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 JOB_NAME="${JOB_NAME:-semambapp-dnf-nogan-smoke}"
 PARTITION="${PARTITION:-gpu-debug}"
@@ -31,8 +34,9 @@ WANDB_GROUP="${WANDB_GROUP:-semambapp-dnf-nogan-smoke}"
 WANDB_MODE="${WANDB_MODE:-online}"
 CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/train/semambapp_shifted_anechoic_online_v1.yaml}"
 SPLIT_ROOT="${SPLIT_ROOT:-/scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/splits/hybrid_unise_v1_stream_80_10_10}"
-SIMULATION_CONFIG="${SIMULATION_CONFIG:-/scratch/work/lil14/DNF_USE/conf/simulation_train_shifted_anechoic.yaml}"
-SOURCE_ROUTING_CONFIG="${SOURCE_ROUTING_CONFIG:-/scratch/work/lil14/DNF_USE/conf/source_routing_webdataset_v1.json}"
+DNF_USE_ROOT="${DNF_USE_ROOT:-$ROOT_DIR/../DNF_USE}"
+SIMULATION_CONFIG="${SIMULATION_CONFIG:-$DNF_USE_ROOT/conf/simulation_train_shifted_anechoic.yaml}"
+SOURCE_ROUTING_CONFIG="${SOURCE_ROUTING_CONFIG:-$DNF_USE_ROOT/conf/source_routing_webdataset_v1.json}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/runs/semambapp_dnf_nogan}"
 SOFTWARE_STACK_MODULE="${SOFTWARE_STACK_MODULE:-triton/2025.1-gcc}"
 COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
@@ -40,7 +44,7 @@ COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
 mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"
 
 submit_self() {
-  local script_path="$ROOT_DIR/scripts/slurm_semambapp_dnf_nogan.sh"
+  local script_path="$ROOT_DIR/scripts/cluster/slurm_semambapp_dnf_nogan.sh"
   local sbatch_args=(
     "--job-name=$JOB_NAME"
     "--partition=$PARTITION"
@@ -54,6 +58,10 @@ submit_self() {
     sbatch_args+=("--gres=gpu:${GPU_TYPE}:${GPUS}")
   else
     sbatch_args+=("--gres=gpu:${GPUS}")
+  fi
+  if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
+    echo "Refusing to submit without CONFIRM_SLURM_SUBMIT=1" >&2
+    exit 2
   fi
   sbatch "${sbatch_args[@]}" --export=ALL "$script_path"
 }

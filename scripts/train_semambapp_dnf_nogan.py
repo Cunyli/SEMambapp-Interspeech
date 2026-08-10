@@ -16,7 +16,13 @@ from torch.utils.data import DataLoader
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DNF_REPO = Path("/scratch/work/lil14/DNF_USE")
+DNF_REPO = Path(
+    os.environ.get("DNF_USE_ROOT", REPO_ROOT.parent / "DNF_USE")
+).expanduser().resolve()
+if not DNF_REPO.is_dir():
+    raise FileNotFoundError(
+        f"DNF_USE checkout not found at {DNF_REPO}; set DNF_USE_ROOT"
+    )
 for path_entry in (str(DNF_REPO), str(REPO_ROOT)):
     if path_entry in sys.path:
         sys.path.remove(path_entry)
@@ -37,8 +43,14 @@ def parse_args():
         "--split-root",
         default="/scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/splits/hybrid_unise_v1_stream_80_10_10",
     )
-    parser.add_argument("--simulation-config", default="/scratch/work/lil14/DNF_USE/conf/simulation_train_shifted_anechoic.yaml")
-    parser.add_argument("--source-routing-config", default="/scratch/work/lil14/DNF_USE/conf/source_routing_webdataset_v1.json")
+    parser.add_argument(
+        "--simulation-config",
+        default=str(DNF_REPO / "conf/simulation_train_shifted_anechoic.yaml"),
+    )
+    parser.add_argument(
+        "--source-routing-config",
+        default=str(DNF_REPO / "conf/source_routing_webdataset_v1.json"),
+    )
     parser.add_argument("--output-root", default="runs/semambapp_dnf_nogan")
     parser.add_argument("--run-name", default="")
     parser.add_argument("--batch-size", type=int, default=2)

@@ -1,7 +1,10 @@
 #!/bin/bash
+# Historical cluster helper. Submission requires CONFIRM_SLURM_SUBMIT=1.
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/scratch/work/lil14/SEMambapp-Interspeech}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 SPLIT_ROOT="${SPLIT_ROOT:-/scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/splits/hybrid_unise_v1_stream_80_10_10}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/runs/semambapp_dnf_phase_a}"
 MANIFEST_ID="${MANIFEST_ID:-phase-a-paper-v3-seed1234}"
@@ -21,6 +24,10 @@ COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
 mkdir -p "$LOG_DIR"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+  if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
+    echo "Refusing to submit without CONFIRM_SLURM_SUBMIT=1" >&2
+    exit 2
+  fi
   if [[ -e "$MANIFEST_DIR" ]]; then
     echo "Refusing to overwrite immutable manifest directory: $MANIFEST_DIR" >&2
     exit 2
@@ -36,7 +43,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     --output="$LOG_DIR/slurm_%j.out" \
     --error="$LOG_DIR/slurm_%j.err" \
     --export=ALL \
-    "$ROOT_DIR/scripts/slurm_prepare_dnf_phase_a.sh"
+    "$ROOT_DIR/scripts/cluster/slurm_prepare_dnf_phase_a.sh"
   exit 0
 fi
 

@@ -1,7 +1,10 @@
 #!/bin/bash
+# Historical cluster helper. Submission requires CONFIRM_SLURM_SUBMIT=1.
 set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/scratch/work/lil14/SEMambapp-Interspeech}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/runs/semambapp_dnf_paper_noisy}"
 JOB_NAME="${JOB_NAME:-dnf-paper-scratch-pair}"
@@ -21,7 +24,7 @@ NUM_WORKERS="${NUM_WORKERS:-4}"
 CUT_DURATION="${CUT_DURATION:-1.0}"
 SAMPLES_PER_EPOCH="${SAMPLES_PER_EPOCH:-8192}"
 VALIDATION_SAMPLES="${VALIDATION_SAMPLES:-128}"
-LISTENING_SAMPLES="${LISTENING_SAMPLES:-16}"
+LISTENING_SAMPLES="${LISTENING_SAMPLES:-5}"
 CHECKPOINT_STEPS="${CHECKPOINT_STEPS:-250 500 750 1000}"
 LOG_INTERVAL="${LOG_INTERVAL:-10}"
 TINY_MODEL="${TINY_MODEL:-0}"
@@ -34,6 +37,10 @@ COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
 mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+  if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
+    echo "Refusing to submit without CONFIRM_SLURM_SUBMIT=1" >&2
+    exit 2
+  fi
   PAIR_ID="${PAIR_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
   sbatch \
     --job-name="$JOB_NAME" \
@@ -48,7 +55,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     --output="$LOG_DIR/slurm_%A_%a.out" \
     --error="$LOG_DIR/slurm_%A_%a.err" \
     --export="ALL,PAIR_ID=$PAIR_ID" \
-    "$ROOT_DIR/scripts/slurm_semambapp_dnf_paper_noisy_array.sh"
+    "$ROOT_DIR/scripts/cluster/slurm_semambapp_dnf_paper_noisy_array.sh"
   exit 0
 fi
 

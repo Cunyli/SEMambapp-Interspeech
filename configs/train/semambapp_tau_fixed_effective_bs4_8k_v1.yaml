@@ -21,7 +21,7 @@ data_cfg:
   valid_pair_manifest: ${SEMAMBAPP_TAU_FIXED_VALID_CSV:-/path/to/tau/simulated/phone_room/valid/paired.csv}
 
 experiment_cfg:
-  exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-exp}
+  exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-checkpoints}
   experiment_name: train_semambapp_tau_fixed_effective_bs4_from2k_8k_v1
   stdout_interval: 5
   checkpoint_interval_steps: 1000
@@ -36,8 +36,8 @@ experiment_cfg:
 
 fine_tuning_cfg:
   enabled: true
-  pretrained_generator_checkpoint: ${SEMAMBAPP_PRETRAINED_GENERATOR_CKPT:-/scratch/work/lil14/SEMambapp-Interspeech/exp/train_semambapp_tau_fixed_effective_bs16_v1/ln_g_00001999.pth}
-  pretrained_discriminator_checkpoint: ${SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT:-/scratch/work/lil14/SEMambapp-Interspeech/exp/train_semambapp_tau_fixed_effective_bs16_v1/ln_do_00001999.pth}
+  pretrained_generator_checkpoint: ${SEMAMBAPP_PRETRAINED_GENERATOR_CKPT:-/scratch/work/lil14/SEMambapp-Interspeech/checkpoints/train_semambapp_tau_fixed_effective_bs16_v1/ln_g_00001999.pth}
+  pretrained_discriminator_checkpoint: ${SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT:-/scratch/work/lil14/SEMambapp-Interspeech/checkpoints/train_semambapp_tau_fixed_effective_bs16_v1/ln_do_00001999.pth}
 
 training_cfg:
   training_epochs: 110

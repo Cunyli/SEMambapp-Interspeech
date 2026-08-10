@@ -25,18 +25,18 @@ env/
 .vscode/
 
 # Training outputs and local experiment artifacts
-checkpoints/
+checkpoints/**
 ckpt/
-runs/
-logs/
-outputs/
+runs/**
+logs/**
+outputs/**
 results/
 wandb/
 wandb-cache/
 lightning_logs/
 exp/
-pretrained/
-tmp/
+pretrained/**
+tmp/**
 tfevents/
 events.out.tfevents.*
 *.ckpt
@@ -57,12 +57,17 @@ demo_files_normalized/
 *.ogg
 *.scp
 
-# Local agent/project notes
+# Local agent notes
 AGENTS.md
 CLAUDE.md
-docs/
 
 # Generated configs and scratch
 configs/generated/
+!checkpoints/README.md
+!logs/.gitkeep
+!outputs/README.md
+!pretrained/README.md
+!runs/.gitkeep
+!tmp/.gitkeep
 !**/.gitkeep
 !**/.keep

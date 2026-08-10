@@ -16,8 +16,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from model.dnf_paper import dnf_output_eq14, sdr_loss_eq5, si_sdr_loss
-from model.dnf_semambapp import DNFSEMambapp
-from model.semambapp import SEMambapp
 from model.stfts import mag_phase_istft, mag_phase_stft
 
 
@@ -211,6 +209,10 @@ def load_models(
     device: torch.device,
     controlled_comparison_path: Path,
 ):
+    # Mamba is required only when a checkpoint model is actually constructed.
+    from model.dnf_semambapp import DNFSEMambapp
+    from model.semambapp import SEMambapp
+
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     cfg = checkpoint["cfg"]
     state = checkpoint["model"]
