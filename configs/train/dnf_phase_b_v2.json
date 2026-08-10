@@ -1,0 +1,188 @@
+{
+  "schema_version": "dnf_phase_b_v2",
+  "experiment_status": "audit_only_not_training_ready",
+  "formal_submit_allowed": false,
+  "initialization": {
+    "mode": "scratch",
+    "checkpoint": null,
+    "resume": false
+  },
+  "source_audit": {
+    "script": "scripts/audit_dnf_phase_b_sources.py",
+    "seed": 3407,
+    "split_root": "/scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/splits/hybrid_unise_v1_stream_80_10_10",
+    "fsd_ground_truth": null,
+    "output_dir": null,
+    "probes": {
+      "mls_hq_en": {
+        "shards": 256,
+        "items_per_shard": 16,
+        "total_items": 4096
+      },
+      "libritts_augmented": {
+        "items": 2048,
+        "provenance": "data_wav_24k",
+        "require_train_only_content_group": true,
+        "deduplicate_by_content_group": true
+      }
+    },
+    "expected_live_counts": {
+      "dns5_freesound_fan": 989,
+      "fsd50k_metadata_candidates": 304,
+      "fsd50k_noise_only_candidates": 41,
+      "fsd50k_variable_vehicle_event_candidates": 263,
+      "arni_indoor_rir": 101629,
+      "dns5_slr26_indoor_rir": 60000,
+      "dns5_slr28_real_indoor_rir": 248
+    },
+    "unknown_policy": "exclude",
+    "receipts": {
+      "hash": "sha256",
+      "include_inputs": true,
+      "include_outputs": true
+    }
+  },
+  "routes": {
+    "clean_strict": {
+      "definition": "Known clean speech with trusted provenance and no pending score gate",
+      "training_ready": true,
+      "loss_path": "eq15_clean_anchor_full_weight"
+    },
+    "clean_candidate": {
+      "definition": "Train-only, provenance-screened speech pending quality-score calibration and listening review",
+      "required_audit_status": "audit_pending_scores",
+      "training_ready": false,
+      "primary_loss_path_after_promotion": "promote_to_clean_strict_then_eq15_clean_anchor_full_weight",
+      "secondary_loss_path": "paper_extra_lower_weight_pseudo_clean_ablation_only"
+    },
+    "noisy_speech_target": {
+      "definition": "Speech not promoted to a clean route; never reinterpret as noise-only",
+      "training_ready": true,
+      "loss_path": "eq13_noisy_target"
+    },
+    "noise_only": {
+      "definition": "Indoor noise that has passed item-level metadata, acoustic stationarity, and manual no-speech/no-music/no-unpredictable-event review",
+      "training_ready": true,
+      "current_audit_rows_training_ready": false,
+      "current_status": "proposed_noise_only_pending_acoustic_and_manual_review",
+      "failure_route": "exclude_from_noise_stream"
+    },
+    "variable_vehicle_event_candidate": {
+      "definition": "Speech-free road, engine, revving, race-car, or pass-by event metadata candidate; not equivalent to stable indoor or vehicle-cabin noise",
+      "training_ready": false,
+      "audit_status": "audit_pending",
+      "loss_path": null,
+      "allowed_future_use": "domain_matched_secondary_ablation_only",
+      "prohibited_use": "noise_only_or_primary_dnf_noise_component"
+    },
+    "exclude_invalid": {
+      "definition": "Speech probe that failed a technical integrity gate and is excluded rather than reinterpreted as a noisy-speech target",
+      "training_ready": false,
+      "loss_path": null
+    },
+    "rir": {
+      "definition": "Indoor RIR admitted only by dataset, role, and path contract",
+      "training_ready": false,
+      "current_audit_rows_training_ready": false,
+      "current_status": "proposed_rir_pending_decode_and_parameter_review",
+      "operator_scope": "future convolution augmentation only; never use as additive Eq13 n1 or n2"
+    }
+  },
+  "indoor_asset_promotion_gate": {
+    "noise_required_evidence": [
+      "item_level_indoor_metadata",
+      "finite_decode_and_technical_gate",
+      "stationarity_review",
+      "manual_no_speech_no_music_review",
+      "manual_no_unpredictable_event_review"
+    ],
+    "noise_automatic_gate": {
+      "min_sample_rate": 16000,
+      "min_duration_seconds": 1.0,
+      "max_clip_ratio": 0.001,
+      "max_abs_dc_offset": 0.02,
+      "max_frame_log_rms_std_db": 6.0,
+      "max_frame_rms_p95_to_p05_db": 12.0,
+      "max_crest_factor_db": 22.0,
+      "max_spectral_centroid_std_hz": 400.0,
+      "max_spectral_flux_p95": 0.35
+    },
+    "rir_required_evidence": [
+      "dataset_role_path_contract",
+      "finite_nonzero_decode",
+      "rt60_and_peak_timing_parameter_review"
+    ],
+    "rir_automatic_gate": {
+      "min_sample_rate": 16000,
+      "allowed_channels": [
+        1
+      ],
+      "max_peak_time_seconds": 0.1,
+      "min_rt60_seconds": 0.1,
+      "max_rt60_seconds": 3.0,
+      "max_tail_rms_db_relative_peak": -35.0,
+      "multi_channel_policy": "exclude_from_primary_pilot_pending_separate_channel_handling"
+    },
+    "road_and_engine_policy": "variable, road, engine, revving, race-car, and pass-by events route to variable_vehicle_event_candidate and remain excluded from noise_only",
+    "training_must_reject_pending_assets": true
+  },
+  "candidate_promotion_gate": {
+    "required_current_status": "audit_pending_scores",
+    "score_routing_policy": "DNSMOS BAK defines review strata only; it never automatically changes a speech route",
+    "required_next_evidence": [
+      "quality_score_distribution_calibrated_per_source",
+      "technical_audio_gates_pass",
+      "stratified_listening_review_pass",
+      "tau_pathology_preservation_risk_reviewed"
+    ],
+    "promotion_target_status": "approved_clean_strict",
+    "promotion_action": "reclassify_selected_rows_as_clean_strict_with_full_weight_eq15",
+    "mls_provisional_shard_gate": {
+      "probe_items_per_shard": 16,
+      "all_probe_items_must_pass_technical_gate": true,
+      "shard_bak_p50_at_or_above_source_valid_p50": true,
+      "shard_bak_p10_at_or_above_source_valid_p25": true,
+      "status_after_gate": "clean_candidate_independent_holdout_and_manual_review_pending",
+      "training_ready": false
+    },
+    "libri_policy": "item_level_review_only; do not generalize the global probe to unscored shard members",
+    "training_must_reject_pending_candidates": true
+  },
+  "proposed_training_after_promotion": {
+    "enabled": false,
+    "matched_arms": [
+      "standard_scratch",
+      "dnf_scratch"
+    ],
+    "same_seed_data_steps_and_optimizer": true,
+    "batch_route_probabilities": {
+      "clean_strict_including_approved_promotions": 0.25,
+      "noisy_speech_target": 0.75
+    },
+    "ratio_rationale": "hold the paper-aligned 25/75 causal ratio fixed; expanded anchors change diversity and capacity, not the clean fraction",
+    "clean_candidate_primary_policy": "approved rows become clean_strict and use full-weight Eq15",
+    "secondary_paper_extra_ablation": {
+      "enabled": false,
+      "batch_route_probabilities": {
+        "clean_strict": 0.2,
+        "clean_candidate": 0.2,
+        "noisy_speech_target": 0.6
+      },
+      "clean_candidate_eq15_weight": 0.5,
+      "claim_scope": "paper_extra_not_primary_dnf_efficacy"
+    },
+    "secondary_clean_fraction_ablation": {
+      "enabled": false,
+      "fractions_after_primary_gate": [
+        0.1,
+        0.25,
+        0.5
+      ]
+    },
+    "primary_dnf_gate": [
+      "eq14_better_than_dnf_speech_head",
+      "eq14_better_than_matched_standard",
+      "tau_clean_sv_cs_listening_preserved"
+    ]
+  }
+}

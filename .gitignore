@@ -25,28 +25,55 @@ env/
 .vscode/
 
 # Training outputs and local experiment artifacts
-checkpoints/
+checkpoints/**
 ckpt/
-runs/
-logs/
-outputs/
+runs/**
+logs/**
+outputs/**
 results/
 wandb/
+wandb-cache/
 lightning_logs/
+exp/
+pretrained/**
+tmp/**
 tfevents/
 events.out.tfevents.*
 *.ckpt
 *.pt
 *.pth
+*.tar
+*.safetensors
 *.onnx
 
 # Local datasets and generated audio artifacts
 data/*
-!data/train_speech.json
-!data/train_noise.json
-!data/train_rir.json
-!data/val_clean.json
-!data/val_degraded.json
+!data/README.md
+demo_files/
+demo_files_normalized/
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.scp
 
+# Local agent notes
+AGENTS.md
+CLAUDE.md
 
+# Generated configs and scratch
+configs/generated/
+!checkpoints/README.md
+!logs/.gitkeep
+!outputs/README.md
+!pretrained/README.md
+!runs/.gitkeep
+!tmp/.gitkeep
+!**/.gitkeep
+!**/.keep
 
+# Preserved local migration leftovers
+checkpoints/.gitkeep
+outputs/.gitkeep
+scripts/slurm*.sh
+scripts/*.bak*

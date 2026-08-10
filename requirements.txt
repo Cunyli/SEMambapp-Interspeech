@@ -2,7 +2,6 @@ packaging
 librosa
 soundfile
 pyyaml
-argparse
 tensorboard
 pesq
 einops
@@ -11,9 +10,9 @@ torchaudio==2.2.2
 wandb
 auraloss
 torchmetrics
-pesq
 easydict
 matplotlib
 resampy
 joblib
 nnAudio
+pandas

@@ -1,0 +1,101 @@
+repo_name: semambapp
+model_name: semambapp
+experiment: legacy_pretrain_main_v1
+wandb_change: legacy_pretrain_main_v1
+
+env_setting:
+  num_workers: 8
+  seed: 1234
+  dist_cfg:
+    dist_backend: nccl
+    dist_url: tcp://localhost:19427
+    world_size: 1
+
+data_cfg:
+  dataset_type: legacy_online_degradation
+  use_simulation_root: ${USE_SIMULATION_ROOT:-/scratch/work/lil14/USE_simulation}
+  clean_train_json: ${SEMAMBAPP_LEGACY_CLEAN_TRAIN_JSON:-/scratch/work/lil14/USE_simulation/data/main/train/clean.json}
+  noise_train_json: ${SEMAMBAPP_LEGACY_NOISE_TRAIN_JSON:-/scratch/work/lil14/USE_simulation/data/main/train/noise.json}
+  rir_train_json: ${SEMAMBAPP_LEGACY_RIR_TRAIN_JSON:-/scratch/work/lil14/USE_simulation/data/main/train/rir.json}
+  clean_valid_json: ${SEMAMBAPP_LEGACY_CLEAN_VALID_JSON:-/scratch/work/lil14/USE_simulation/data/main/valid/clean.json}
+  degraded_valid_json: ${SEMAMBAPP_LEGACY_DEGRADED_VALID_JSON:-/scratch/work/lil14/USE_simulation/data/main/valid/degraded.json}
+
+target_cfg:
+  type: legacy_clean
+  rir_delay_mode: argmax_abs
+
+experiment_cfg:
+  exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-/scratch/work/lil14/SEMambapp-Interspeech/checkpoints}
+  experiment_name: pretrain_semambapp_main_v1
+  stdout_interval: 50
+  checkpoint_interval_steps: 5000
+  wandb_log_interval_steps: 50
+  validation_interval_steps: 5000
+  avqi_validation_interval_steps: 0
+  max_steps: 180000
+  use_wandb: true
+  wandb_project: semambapp
+  wandb_entity: null
+  wandb_mode: online
+  wandb_tags:
+    - legacy_pretrain
+    - main
+    - online_degradation
+    - fixed_validation
+
+degradation_cfg:
+  snr: [-10, -5, 0, 5, 10, 15, 20]
+  bandwidth_sr: [4000, 6000, 8000, 10000, 12000, 14000]
+  bandwidth_type: ["kaiser_best", "kaiser_fast", "scipy", "polyphase"]
+  lowpass_type: ["butter", "cheby1", "cheby2", "bessel", "ellip"]
+  lowpass_order: [2, 4, 6, 8]
+  clipping_min: [0.0, 0.1]
+  clipping_max: [0.9, 1.0]
+  packet_duration: [10, 20]
+  packet_loss_rate: [0.05, 0.25]
+  noise_prob: 1.0
+  reverb_prob: 0.7
+  bandwidth_prob: 0.7
+  clipping_prob: 0.5
+  packet_loss_prob: 0.2
+
+training_cfg:
+  training_epochs: 1000
+  batch_size: 32
+  learning_rate: 0.0002
+  adam_b1: 0.8
+  adam_b2: 0.99
+  lr_decay: 0.99
+  segment_size: 24000
+  legacy_validation_limit: 100
+  loss:
+    adv_g: 1.0
+    metric: 0.05
+    fm_g: 1.0
+    magnitude: 0.9
+    phase: 0.3
+    complex: 0.1
+    time: 0.05
+    mel: 0.1
+    consistancy: 0.1
+  use_PCS400: false
+
+stft_cfg:
+  sampling_rate: 16000
+  n_fft: 400
+  hop_size: 100
+  win_size: 400
+
+model_cfg:
+  hid_feature: 48
+  unet_expansion: 1
+  compress_factor: 0.3
+  num_tfmamba: 4
+  d_state: 16
+  d_conv: 4
+  expand: 2
+  norm_epsilon: 0.00001
+  beta: 2.0
+  input_channel: 2
+  output_channel: 1
+  dropout: 0.1

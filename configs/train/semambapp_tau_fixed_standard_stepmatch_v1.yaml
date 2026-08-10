@@ -1,0 +1,85 @@
+# TAU fixed USE_simulation pair fine-tuning config for SEMamba++.
+# Standard batch run extended to match the 8k-9k optimizer-step comparison window.
+
+repo_name: semambapp
+model_name: semambapp
+experiment: tau_fixed_standard_stepmatch_v1
+wandb_change: standard_stepmatch_v1
+
+env_setting:
+  num_workers: 8
+  seed: 20260511
+  dist_cfg:
+    dist_backend: nccl
+    dist_url: tcp://localhost:19429
+    world_size: 1
+
+data_cfg:
+  dataset_type: use_simulation_fixed
+  use_simulation_root: ${USE_SIMULATION_ROOT:-../USE_simulation}
+  train_pair_manifest: ${SEMAMBAPP_TAU_FIXED_TRAIN_CSV:-/path/to/tau/simulated/phone_room/train/paired.csv}
+  valid_pair_manifest: ${SEMAMBAPP_TAU_FIXED_VALID_CSV:-/path/to/tau/simulated/phone_room/valid/paired.csv}
+
+experiment_cfg:
+  exp_path: ${SEMAMBAPP_EXPERIMENT_ROOT:-checkpoints}
+  experiment_name: train_semambapp_tau_fixed_standard_stepmatch_v1
+  stdout_interval: 5
+  checkpoint_interval_steps: 1000
+  wandb_log_interval_steps: 50
+  avqi_validation_interval_steps: 1000
+  validation_interval_steps: 300
+  use_wandb: true
+  wandb_project: semambapp
+  wandb_entity: null
+  wandb_mode: online
+  wandb_tags: ["tau", "use_simulation", "fixed", "standard_stepmatch_v1", "wandb_standard_v1"]
+
+fine_tuning_cfg:
+  enabled: true
+  pretrained_generator_checkpoint: ${SEMAMBAPP_PRETRAINED_GENERATOR_CKPT:-}
+  pretrained_discriminator_checkpoint: ${SEMAMBAPP_PRETRAINED_DISCRIMINATOR_CKPT:-}
+
+training_cfg:
+  training_epochs: 180
+  batch_size: 6
+  learning_rate: 0.00002
+  adam_b1: 0.8
+  adam_b2: 0.99
+  lr_decay: 0.99
+  segment_size: 48000
+  validation_segment_seconds: 3.0
+  validation_random_start: false
+  validation_prefer_active: true
+  validation_activity_threshold: 0.01
+  validation_min_active_ratio: 0.05
+  loss:
+    adv_g: 0.1
+    metric: 0.05
+    fm_g: 0.5
+    magnitude: 0.9
+    phase: 0.3
+    complex: 0.1
+    time: 0.0
+    mel: 0.1
+    consistancy: 0.1
+  use_PCS400: False
+
+stft_cfg:
+  sampling_rate: 16000
+  n_fft: 400
+  hop_size: 100
+  win_size: 400
+
+model_cfg:
+  hid_feature: 48
+  unet_expansion: 1
+  compress_factor: 0.3
+  num_tfmamba: 4
+  d_state: 16
+  d_conv: 4
+  expand: 2
+  norm_epsilon: 0.00001
+  beta: 2.0
+  input_channel: 2
+  output_channel: 1
+  dropout: 0.1
