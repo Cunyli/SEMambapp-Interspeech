@@ -7,11 +7,15 @@ import torch
 from model.avqi_components import (
     AVQI_COMPONENT_LOSS_WEIGHTS,
     AVQI_COMPONENT_NAMES,
+    ComponentAffineCalibrator,
+    FrequencyAwareSharedComponentHead,
+    FrequencyAwareWaveformComponentPredictor,
     SharedComponentHead,
     WaveformComponentPredictor,
     avqi_v0301,
     denormalize_components,
     freeze_module,
+    pool_frequency_aware_shared_feature_map,
     standardized_component_loss,
 )
 
@@ -49,6 +53,19 @@ def test_shared_head_has_finite_feature_gradient() -> None:
     assert float(feature_map.grad.norm()) > 0.0
 
 
+def test_frequency_aware_shared_head_retains_frequency_profile() -> None:
+    feature_map = torch.randn(2, 48, 12, 25, requires_grad=True)
+    pooled = pool_frequency_aware_shared_feature_map(feature_map)
+    head = FrequencyAwareSharedComponentHead()
+    prediction = head(feature_map)
+    assert pooled.shape == (2, 48 * 8 * 2)
+    assert prediction.shape == (2, 6)
+    prediction.square().mean().backward()
+    assert feature_map.grad is not None
+    assert torch.isfinite(feature_map.grad).all()
+    assert float(feature_map.grad.norm()) > 0.0
+
+
 def test_waveform_predictor_supports_frozen_input_gradient() -> None:
     waveform = torch.randn(1, 4096, requires_grad=True)
     predictor = WaveformComponentPredictor()
@@ -60,6 +77,32 @@ def test_waveform_predictor_supports_frozen_input_gradient() -> None:
     assert torch.isfinite(waveform.grad).all()
     assert float(waveform.grad.norm()) > 0.0
     assert all(parameter.grad is None for parameter in predictor.parameters())
+
+
+def test_frequency_aware_waveform_predictor_supports_input_gradient() -> None:
+    waveform = torch.randn(1, 4096, requires_grad=True)
+    predictor = FrequencyAwareWaveformComponentPredictor()
+    freeze_module(predictor)
+    prediction = predictor(waveform)
+    assert prediction.shape == (1, 6)
+    prediction.square().mean().backward()
+    assert waveform.grad is not None
+    assert torch.isfinite(waveform.grad).all()
+    assert float(waveform.grad.norm()) > 0.0
+    assert all(parameter.grad is None for parameter in predictor.parameters())
+
+
+def test_component_affine_calibrator_is_fixed_and_differentiable() -> None:
+    prediction = torch.randn(2, 6, requires_grad=True)
+    scale = torch.linspace(0.8, 1.3, 6)
+    bias = torch.linspace(-0.2, 0.3, 6)
+    calibrator = ComponentAffineCalibrator(scale, bias)
+    calibrated = calibrator(prediction)
+    assert torch.allclose(calibrated, prediction * scale + bias)
+    calibrated.square().mean().backward()
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
+    assert not list(calibrator.parameters())
 
 
 def test_normalized_loss_and_inverse_transform() -> None:

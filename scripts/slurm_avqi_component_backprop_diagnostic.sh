@@ -1,5 +1,5 @@
 #!/bin/bash
-# Diagnostic only: no generator optimizer step is implemented by the Python job.
+# V2 diagnostic only: no generator optimizer step is implemented by this job.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,18 +8,18 @@ DEFAULT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 PYTHON_SCRIPT="${PYTHON_SCRIPT:-$SOURCE_ROOT/scripts/evaluate_avqi_component_backprop.py}"
-JOB_NAME="${JOB_NAME:-avqi-component-diagnostic}"
-PARTITION="${PARTITION:-gpu-a100-80g}"
-GPU_TYPE="${GPU_TYPE:-a100}"
+JOB_NAME="${JOB_NAME:-avqi-component-v2}"
+PARTITION="${PARTITION:-gpu-v100-32g}"
+GPU_TYPE="${GPU_TYPE:-v100}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-4}"
 MEMORY="${MEMORY:-48G}"
-TIME_LIMIT="${TIME_LIMIT:-02:00:00}"
+TIME_LIMIT="${TIME_LIMIT:-01:00:00}"
 SOFTWARE_STACK_MODULE="${SOFTWARE_STACK_MODULE:-triton/2025.1-gcc}"
 COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
-RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_backprop_20260811_01}"
+RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_backprop_20260812_02}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_predictors}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_component_backprop_20260812_02}"
 LABEL_BANK="${LABEL_BANK:-$ROOT_DIR/runs/tau_pathology_preservation_eval_phase2_20260809_01/outputs/surrogate/exact_component_label_bank_v1.csv}"
 CONFIG="${CONFIG:-$ROOT_DIR/runs/tau_s1_sv_threshold_ablation_20260719_01/configs/s_fidelity_m3_stage0500.yaml}"
 CHECKPOINT="${CHECKPOINT:-$ROOT_DIR/checkpoints/S3_500/ln_g_00000500.pth}"

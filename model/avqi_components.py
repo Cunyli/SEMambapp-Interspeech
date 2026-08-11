@@ -51,6 +51,25 @@ def pool_shared_feature_map(feature_map: torch.Tensor) -> torch.Tensor:
     return torch.cat((mean, std), dim=-1)
 
 
+def pool_frequency_aware_shared_feature_map(
+    feature_map: torch.Tensor,
+    frequency_bins: int = 8,
+) -> torch.Tensor:
+    """Pool time while retaining a coarse shared-feature frequency profile."""
+    if feature_map.ndim != 4:
+        raise ValueError(
+            "expected a [batch, channels, time, frequency] feature map, "
+            f"got {tuple(feature_map.shape)}"
+        )
+    if frequency_bins < 1:
+        raise ValueError("frequency_bins must be positive")
+    temporal_mean = feature_map.mean(dim=-2)
+    temporal_std = feature_map.std(dim=-2, unbiased=False)
+    pooled_mean = F.adaptive_avg_pool1d(temporal_mean, frequency_bins)
+    pooled_std = F.adaptive_avg_pool1d(temporal_std, frequency_bins)
+    return torch.cat((pooled_mean, pooled_std), dim=-1).flatten(start_dim=1)
+
+
 class SharedComponentHead(nn.Module):
     """A compact head for an encoder or late shared SeMamba++ feature map."""
 
@@ -73,6 +92,41 @@ class SharedComponentHead(nn.Module):
 
     def forward(self, feature_map: torch.Tensor) -> torch.Tensor:
         return self.forward_pooled(pool_shared_feature_map(feature_map))
+
+
+class FrequencyAwareSharedComponentHead(nn.Module):
+    """A compact shared head that preserves coarse frequency structure."""
+
+    def __init__(
+        self,
+        feature_channels: int = 48,
+        frequency_bins: int = 8,
+        hidden_features: int = 128,
+    ):
+        super().__init__()
+        self.frequency_bins = frequency_bins
+        pooled_features = feature_channels * frequency_bins * 2
+        self.regressor = nn.Sequential(
+            nn.LayerNorm(pooled_features),
+            nn.Linear(pooled_features, hidden_features),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_features, len(AVQI_COMPONENT_NAMES)),
+        )
+
+    def forward_pooled(self, pooled_features: torch.Tensor) -> torch.Tensor:
+        if pooled_features.ndim != 2:
+            raise ValueError(
+                f"expected a [batch, features] tensor, got {pooled_features.shape}"
+            )
+        return self.regressor(pooled_features)
+
+    def forward(self, feature_map: torch.Tensor) -> torch.Tensor:
+        pooled = pool_frequency_aware_shared_feature_map(
+            feature_map,
+            frequency_bins=self.frequency_bins,
+        )
+        return self.forward_pooled(pooled)
 
 
 class WaveformComponentPredictor(nn.Module):
@@ -139,6 +193,71 @@ class WaveformComponentPredictor(nn.Module):
         mean = encoded.mean(dim=(-2, -1))
         std = encoded.std(dim=(-2, -1), unbiased=False)
         return self.regressor(torch.cat((mean, std), dim=-1))
+
+
+class FrequencyAwareWaveformComponentPredictor(WaveformComponentPredictor):
+    """A waveform predictor that keeps an eight-bin LTAS-like profile."""
+
+    def __init__(
+        self,
+        n_fft: int = 512,
+        hop_length: int = 160,
+        frequency_bins: int = 8,
+        hidden_features: int = 128,
+    ):
+        super().__init__(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            hidden_features=hidden_features,
+        )
+        self.frequency_bins = frequency_bins
+        pooled_features = 32 * frequency_bins * 2
+        self.regressor = nn.Sequential(
+            nn.LayerNorm(pooled_features),
+            nn.Linear(pooled_features, hidden_features),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_features, len(AVQI_COMPONENT_NAMES)),
+        )
+
+    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        encoded = self.encoder(self.log_spectrogram(waveform))
+        temporal_mean = encoded.mean(dim=-1)
+        temporal_std = encoded.std(dim=-1, unbiased=False)
+        pooled_mean = F.adaptive_avg_pool1d(
+            temporal_mean,
+            self.frequency_bins,
+        )
+        pooled_std = F.adaptive_avg_pool1d(
+            temporal_std,
+            self.frequency_bins,
+        )
+        pooled = torch.cat((pooled_mean, pooled_std), dim=-1).flatten(start_dim=1)
+        return self.regressor(pooled)
+
+
+class ComponentAffineCalibrator(nn.Module):
+    """A fixed per-component affine calibration fitted outside this module."""
+
+    def __init__(self, scale: torch.Tensor, bias: torch.Tensor):
+        super().__init__()
+        expected = (len(AVQI_COMPONENT_NAMES),)
+        if tuple(scale.shape) != expected or tuple(bias.shape) != expected:
+            raise ValueError(
+                f"expected scale and bias with shape {expected}, "
+                f"got {tuple(scale.shape)} and {tuple(bias.shape)}"
+            )
+        if not torch.isfinite(scale).all() or not torch.isfinite(bias).all():
+            raise ValueError("calibration parameters must be finite")
+        self.register_buffer("scale", scale.detach().clone())
+        self.register_buffer("bias", bias.detach().clone())
+
+    def forward(self, raw_components: torch.Tensor) -> torch.Tensor:
+        if raw_components.shape[-1] != len(AVQI_COMPONENT_NAMES):
+            raise ValueError(
+                f"expected six components, got {tuple(raw_components.shape)}"
+            )
+        return raw_components * self.scale + self.bias
 
 
 def standardized_component_loss(
