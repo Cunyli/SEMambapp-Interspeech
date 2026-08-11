@@ -36,6 +36,8 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '--checkpoint-dir "$CHECKPOINT_DIR"' in launcher
     assert '--config-sha256 "$CONFIG_SHA256"' in launcher
     assert '--source-commit "$SOURCE_COMMIT"' in launcher
+    assert "export ROOT_DIR SOURCE_ROOT PYTHON_SCRIPT" in launcher
+    assert "export RUN_ROOT LOG_DIR OUTPUT_DIR CHECKPOINT_DIR" in launcher
 
 
 def test_avqi_diagnostic_entry_point_runs_from_repository_root() -> None:

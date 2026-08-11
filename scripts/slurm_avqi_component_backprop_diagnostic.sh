@@ -35,6 +35,17 @@ if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
 fi
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}"
 
+# Slurm executes a copied spool script, so BASH_SOURCE no longer points into the
+# repository inside the allocation. Preserve every resolved path and contract
+# value explicitly across the submit boundary.
+export ROOT_DIR SOURCE_ROOT PYTHON_SCRIPT
+export JOB_NAME PARTITION GPU_TYPE CPUS_PER_TASK MEMORY TIME_LIMIT
+export SOFTWARE_STACK_MODULE COMPILER_MODULE
+export RUN_ROOT LOG_DIR OUTPUT_DIR CHECKPOINT_DIR
+export LABEL_BANK CONFIG CHECKPOINT EXTERNAL_EXACT_CSV
+export LABEL_BANK_SHA256 CONFIG_SHA256 CHECKPOINT_SHA256
+export EXTERNAL_EXACT_CSV_SHA256 SOURCE_COMMIT
+
 mkdir -p "$LOG_DIR"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
