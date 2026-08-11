@@ -5,7 +5,7 @@
 The project builds on the public
 [SEMamba](https://github.com/RoyChao19477/SEMamba) implementation and retains
 ideas or components associated with BigVGAN and MP-SENet. The current tree also
-contains independent SeMamba++ research extensions and advisor-review
+contains independent SeMamba++ research extensions and their research
 documentation.
 
 Git history is the source of truth for the exact development lineage. This
@@ -38,3 +38,10 @@ Before sharing any dataset excerpt, pretrained asset, or generated listening
 sample beyond internal review, verify its source terms and record its provenance
 and generating checkpoint. Source code organization alone does not grant reuse
 rights for external assets.
+
+The public repository uses an explicit allowlist for audio: at most 3--5
+deterministic sample IDs, each with source terms and SHA-256 metadata. Full
+evaluation sets remain external. Pathological recordings stay out of public
+branches until their redistribution and participant-data conditions are
+confirmed; a separately authorized private listening bundle can use the same
+manifest contract.

@@ -1,32 +1,53 @@
 # Research status
 
-This page separates repository facts from research conclusions. The project is
-still active, so this is a review boundary rather than a final result report.
+This page separates completed evidence from open hypotheses. Repository
+structure and passing unit tests are not treated as model-quality results.
 
-## Verified repository facts
+| Workstream | Verified evidence | Decision boundary |
+|---|---|---|
+| Direct differentiable HNR+slope formula | Slurm `19643154` completed; HNR failed calibration/gradient and slope passed 1/8 anti-shortcut cases | `NO_GO` for this direct formula |
+| Shared dual head | Job `19684821`: late feature selected; anti-shortcut and gradient pass, but HNR and slope gates fail | `NO_GO_GENERATOR_TRAINING` |
+| Frozen independent predictor | Job `19684821`: stronger held-out rank accuracy and valid frozen-input gradient, but HNR/slope calibration and external slope fail | `NO_GO_GENERATOR_TRAINING`; better candidate for calibration work |
+| CS/SV preservation | Exact six-component, gain, and residual panels run separately for CS and SV | `B0_250 / S3_500 / S3_2000` remain a Pareto shortlist |
+| Controlled SNR ladder | Jobs `19640413`, `19640420`, and `19640638` completed | No universal SNR knee; use all six levels |
 
-- The main SeMamba++ training and inference implementation is present.
-- Fixed-pair USE simulation adapters and metric helpers are present.
-- Identity and speaker-verification guardrail code and configurations are
-  present.
-- Unit and contract tests cover many deterministic data and objective rules.
+## AVQI backpropagation contract
 
-## Claims not established by the tree
+- Six targets: CPPS, HNR, shimmer %, shimmer dB, LTAS slope, and LTAS tilt.
+- Jitter is excluded from the AVQI task.
+- One six-output model uses a standardized, concept-balanced loss; each member
+  of the correlated shimmer and LTAS pairs receives half weight.
+- HNR and LTAS slope are the pre-registered primary promotion gates.
+- Split: 70 train, 14 calibration, and 14 holdout speakers.
+- Promotion requires held-out accuracy, calibration, anti-shortcut behavior,
+  finite intended gradients, and exact Praat scoring of generated waveforms.
+- No generator optimizer step is part of the diagnostic.
 
-- A saved experiment configuration does not prove that the experiment ran.
-- A checkpoint path does not prove that the checkpoint exists in a shared copy.
-- A passing engineering test does not prove convergence or perceptual quality.
-- A single metric or gate does not select a final model.
-- The guardrail variants are not presented here as successful final methods.
+The completed diagnostic used all 390 expected rows and exited `0:0` after
+4 minutes 31 seconds on a V100. See the
+[compact result](avqi-backprop-diagnostic.md).
 
-## Current review boundary
+## Pathology-preservation contract
 
-The repository is organized to preserve active research and make its boundaries
-visible. No normalization step launches training, submits Slurm work, performs
-GPU validation, or reproduces paper results. Future research conclusions should
-point to immutable run IDs, checkpoint hashes, data manifests, complete metric
-panels, and a fixed listening protocol.
+The same speaker's clean CS or SV recording is the target. Healthy, mild, and
+severe pathology are reported separately. A candidate is rejected if it loses
+clean identity or severe SV, even when average AVQI or denoising improves.
 
-The closed DNF reproduction is maintained separately in
-`DNF-SeMambaPP-Reproduction`; its conclusions must not be inferred from this
-repository's test or checkpoint state.
+The controlled SNR panel fixes the source, RIR, noise, offset, and random seed,
+then evaluates clean, RIR-only, 30, 20, 15, and 10 dB. It contains 1,440
+enhanced waveforms and 2,664 exact-component rows.
+
+## Evidence location
+
+Large artifacts remain on Triton and are not GitHub links:
+
+- `runs/tau_s1_sv_threshold_ablation_20260719_01/`
+- `runs/tau_pathology_three_tracks_20260810_01/`
+- `runs/avqi_component_backprop_20260811_01/`
+
+A result is complete only when its run ID, source/checkpoint hashes, metrics,
+completion receipt, and fixed listening protocol agree.
+
+The closed DNF reproduction is independently versioned in the local
+`DNF-SeMambaPP-Reproduction` repository; its code and claims are outside this
+repository's test boundary.

@@ -20,6 +20,20 @@ degraded waveform
 Training can also use discriminator and loss components in
 `model/discriminator.py` and `model/loss.py`.
 
+## AVQI-component routes
+
+The diagnostic compares two small mechanisms without updating the generator:
+
+```text
+shared route:      encoder or late shared feature -> six-component head
+independent route: enhanced waveform -> log-STFT CNN -> six components
+```
+
+The shared route sends component gradients only through the selected shared
+backbone and its head. The independent predictor is trained separately, then
+frozen; gradients can still pass through its input waveform into the complete
+generator. Both routes are checked against speaker-disjoint exact Praat labels.
+
 ## Data paths
 
 | Path | Role | Boundary |
@@ -42,3 +56,7 @@ DNF data routes are maintained in `DNF-SeMambaPP-Reproduction`, not here.
 gate tooling. A metric pass, a saved configuration, or a checkpoint filename is
 not treated as a final research conclusion without the corresponding data
 provenance, complete evaluation panel, and listening evidence.
+
+Project-trained weights are stored under `checkpoints/`. Run-specific reports,
+manifests and generated outputs live under `runs/`; new training code does not
+nest checkpoints inside a run directory.
