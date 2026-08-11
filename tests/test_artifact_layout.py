@@ -41,5 +41,9 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
         "scripts/cluster/slurm_avqi_component_backprop_diagnostic.sh"
     )
     assert 'parser.add_argument("--checkpoint-dir"' in source
+    assert 'parser.add_argument("--config-sha256"' in source
+    assert 'parser.add_argument("--source-commit"' in source
     assert 'args.output_dir / "checkpoints"' not in source
     assert '--checkpoint-dir "$CHECKPOINT_DIR"' in launcher
+    assert '--config-sha256 "$CONFIG_SHA256"' in launcher
+    assert '--source-commit "$SOURCE_COMMIT"' in launcher

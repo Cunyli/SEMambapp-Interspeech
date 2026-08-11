@@ -25,8 +25,15 @@ CONFIG="${CONFIG:-$ROOT_DIR/runs/tau_s1_sv_threshold_ablation_20260719_01/config
 CHECKPOINT="${CHECKPOINT:-$ROOT_DIR/runs/tau_s1_sv_threshold_ablation_20260719_01/milestone_checkpoints/S_fidelity_-3/ln_g_00000500.pth}"
 EXTERNAL_EXACT_CSV="${EXTERNAL_EXACT_CSV:-$ROOT_DIR/runs/tau_pathology_three_tracks_20260810_01/outputs/intensity_eval/exact_components_all.csv}"
 LABEL_BANK_SHA256="${LABEL_BANK_SHA256:?LABEL_BANK_SHA256 is required}"
+CONFIG_SHA256="${CONFIG_SHA256:?CONFIG_SHA256 is required}"
 CHECKPOINT_SHA256="${CHECKPOINT_SHA256:?CHECKPOINT_SHA256 is required}"
 EXTERNAL_EXACT_CSV_SHA256="${EXTERNAL_EXACT_CSV_SHA256:?EXTERNAL_EXACT_CSV_SHA256 is required}"
+
+if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
+  echo "Refusing to run from a dirty source tree: $SOURCE_ROOT" >&2
+  exit 2
+fi
+SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}"
 
 mkdir -p "$LOG_DIR"
 
@@ -78,12 +85,14 @@ python "$PYTHON_SCRIPT" \
   --label-bank "$LABEL_BANK" \
   --label-bank-sha256 "$LABEL_BANK_SHA256" \
   --config "$CONFIG" \
+  --config-sha256 "$CONFIG_SHA256" \
   --checkpoint "$CHECKPOINT" \
   --checkpoint-sha256 "$CHECKPOINT_SHA256" \
   --external-exact-csv "$EXTERNAL_EXACT_CSV" \
   --external-exact-csv-sha256 "$EXTERNAL_EXACT_CSV_SHA256" \
   --output-dir "$OUTPUT_DIR" \
   --checkpoint-dir "$CHECKPOINT_DIR" \
+  --source-commit "$SOURCE_COMMIT" \
   --device cuda \
   2>&1 | tee -a "$LIVE_LOG"
 

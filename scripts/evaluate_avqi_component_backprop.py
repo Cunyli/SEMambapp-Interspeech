@@ -77,12 +77,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-bank", type=Path, required=True)
     parser.add_argument("--label-bank-sha256", required=True)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config-sha256", required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument("--external-exact-csv", type=Path, required=True)
     parser.add_argument("--external-exact-csv-sha256", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
+    parser.add_argument("--source-commit", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=20260811)
     parser.add_argument("--shared-head-epochs", type=int, default=250)
@@ -891,6 +893,7 @@ def external_stress_test(
                 "view": row["view"],
                 "label": row["label"],
                 "audio_path": str(path),
+                "audio_sha256": sha256_file(path),
             }
             for component_index, component in enumerate(AVQI_COMPONENT_NAMES):
                 item[f"exact_{component}"] = float(reference[component_index])
@@ -1019,6 +1022,7 @@ def main() -> None:
         )
     for path, expected_hash in (
         (args.label_bank, args.label_bank_sha256),
+        (args.config, args.config_sha256),
         (args.checkpoint, args.checkpoint_sha256),
         (args.external_exact_csv, args.external_exact_csv_sha256),
     ):
@@ -1060,9 +1064,11 @@ def main() -> None:
         },
         "source_sha256": {
             "label_bank": args.label_bank_sha256,
+            "config": args.config_sha256,
             "generator_checkpoint": args.checkpoint_sha256,
             "external_exact_csv": args.external_exact_csv_sha256,
         },
+        "source_commit": args.source_commit,
         "artifact_layout": {
             "run_output_dir": str(args.output_dir.resolve()),
             "checkpoint_dir": str(args.checkpoint_dir.resolve()),
