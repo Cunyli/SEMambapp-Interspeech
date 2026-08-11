@@ -81,11 +81,9 @@ stress condition, not a universal SNR boundary.
 
 AVQI v03.01 uses six terms:
 
-$$
-\mathrm{AVQI}=2.8902\,(4.152-0.177\,\mathrm{CPPS}-0.006\,\mathrm{HNR}
--0.037\,\mathrm{Shimmer}_{\%}+0.941\,\mathrm{Shimmer}_{dB}
-+0.01\,\mathrm{LTAS\ slope}+0.093\,\mathrm{LTAS\ tilt}).
-$$
+```math
+\operatorname{AVQI}=2.8902\left(4.152-0.177\,\operatorname{CPPS}-0.006\,\operatorname{HNR}-0.037\,\operatorname{Shimmer}_{\%}+0.941\,\operatorname{Shimmer}_{\mathrm{dB}}+0.01\,\operatorname{LTAS}_{\mathrm{slope}}+0.093\,\operatorname{LTAS}_{\mathrm{tilt}}\right).
+```
 
 Jitter is diagnostic only. We do not minimize this scalar. Both routes predict
 the six components and match them bidirectionally to the same speaker's clean
