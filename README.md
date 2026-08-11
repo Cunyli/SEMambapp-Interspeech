@@ -9,7 +9,7 @@
 
 | Workstream | How the experiment is controlled | Current conclusion |
 |---|---|---|
-| AVQI-component backpropagation | Same speaker-disjoint data and budget for a shared dual head and a frozen waveform predictor | The earlier hand-written surrogate failed. The two learned routes are implemented but are not declared successful before the held-out diagnostic finishes |
+| AVQI-component backpropagation | Same speaker-disjoint data and budget for a shared dual head and a frozen waveform predictor | Job `19684821` completed: both gradient paths work, but neither route is accurate and calibrated enough for generator training |
 | CS and SV preservation | Continuous speech (CS) and sustained vowels (SV) are scored separately against the same speaker's clean recording | The full CS/SV test path is supported. Current checkpoints form a Pareto shortlist; there is no universal winner |
 | Noise severity | The utterance, RIR, noise, offset and seed are fixed while SNR alone changes | The complete clean/RIR-only/30/20/15/10 dB ladder must be used; 10 dB is a stress slice, not a universal breakpoint |
 
@@ -59,8 +59,18 @@ receive half weight. HNR and LTAS slope are the pre-registered primary gates.
 Both routes use 390 valid CS/SV rows from 98 speakers with a 70/14/14
 train/calibration/holdout speaker split. A route must pass held-out rank
 correlation, normalized error, calibration, anti-shortcut and finite-gradient
-checks before any small generator pilot is justified. Exact Praat measurements
-of final output waveforms remain the deciding evidence.
+checks before any small generator pilot is justified.
+
+| Diagnostic result | Useful signal | Blocking evidence | Decision |
+|---|---|---|---|
+| Shared dual head, late feature | All six anti-shortcut checks and the intended backbone gradient pass | HNR calibration slope `0.630`; LTAS-slope rank/calibration/error `0.654 / 0.403 / 0.552` | `NO_GO` |
+| Frozen log-STFT CNN | All six anti-shortcut checks and waveform-to-generator gradient pass; HNR and LTAS-slope rank correlations are `0.910 / 0.821` | HNR calibration slope `0.748 < 0.75`; LTAS-slope calibration is `0.645` and only `0.515` on external enhanced audio | `NO_GO` |
+
+The independent predictor is the more promising route, but it currently
+compresses component changes and is not safe as a generator loss. Exact Praat
+measurements of final output waveforms remain the deciding evidence. The full
+six-term result and evidence hashes are in
+[the AVQI diagnostic note](docs/avqi-backprop-diagnostic.md).
 
 The direct soft-HNR + soft-slope prototype (Slurm job `19643154`) was a
 **NO-GO**: HNR failed calibration/gradient checks and slope passed only 1/8
@@ -88,7 +98,7 @@ remains `INCONCLUSIVE_NON_PARETO`.
 ## Artifact and sharing policy
 
 ```text
-checkpoints/<run_id>/        project-trained weights
+checkpoints/<experiment>/<run_id>/  project-trained weights
 pretrained/<source>/         external weights
 runs/<run_id>/               config snapshots, manifests, metrics, reports, outputs
 outputs/examples/            3–5 allowlisted advisor-listening sample IDs
