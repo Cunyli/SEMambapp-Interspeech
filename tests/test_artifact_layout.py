@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -30,3 +32,18 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '--checkpoint-dir "$CHECKPOINT_DIR"' in launcher
     assert '--config-sha256 "$CONFIG_SHA256"' in launcher
     assert '--source-commit "$SOURCE_COMMIT"' in launcher
+
+
+def test_avqi_diagnostic_entry_point_runs_from_repository_root() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/evaluate_avqi_component_backprop.py",
+            "--help",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "Speaker-disjoint diagnostic" in result.stdout

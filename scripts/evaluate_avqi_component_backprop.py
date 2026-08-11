@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import random
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -26,6 +27,11 @@ import numpy as np
 import soundfile as sf
 import torch
 from scipy import stats
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from model.avqi_components import (
     AVQI_COMPONENT_LOSS_WEIGHTS,
