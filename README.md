@@ -85,24 +85,30 @@ AVQI v03.01 uses six terms:
 \mathrm{AVQI}=2.8902\left(4.152-0.177\,\mathrm{CPPS}-0.006\,\mathrm{HNR}-0.037\,\mathrm{Shimmer}_{\%}+0.941\,\mathrm{Shimmer}_{\mathrm{dB}}+0.01\,\mathrm{LTAS}_{\mathrm{slope}}+0.093\,\mathrm{LTAS}_{\mathrm{tilt}}\right).
 ```
 
-Jitter is diagnostic only. We do not minimize this scalar. Both routes predict
-the six components and match them bidirectionally to the same speaker's clean
-pathological target.
+Jitter is diagnostic only, and the AVQI scalar itself is never minimized. Both
+routes predict all six terms. The small pilot gates CPPS and HNR first, using
+the same speaker's clean CS/SV recording, with its original pathology, as the
+target.
 
-| Route | Path | Holdout result | Decision |
-|---|---|---|---|
-| Shared dual head | late shared feature -> six outputs | HNR `rho=.769, slope=.630`; LTAS slope `rho=.654, slope=.403` | no generator training |
-| Frozen predictor | enhanced waveform -> log-STFT CNN -> six outputs | HNR `rho=.910, slope=.748`; LTAS slope `rho=.821, slope=.645` | better route, still no generator training |
+| Route | Forms compared | Speaker-disjoint holdout | External 24-speaker stress | Decision |
+|---|---|---|---|---|
+| Shared dual head | global late, frequency-aware late, enhanced spectrum | frequency-aware late wins; CPPS passes (`rho=.969`, slope `.927`), HNR calibration fails (slope `.720`) | CPPS/HNR do not both pass CS, SV, patient, and 10 dB slices | no generator training |
+| Frozen predictor | global-stat and frequency-aware log-STFT CNNs | frequency-aware wins; CPPS (`rho=.941`, slope `.832`) and HNR (`rho=.903`, slope `.864`) both pass | overall CPPS/HNR pass, but SV CPPS slope is `.731` and CS HNR slope is `.619` | no generator training |
 
-The diagnostic used 390 valid CS/SV rows from 98 speakers with a
-speaker-disjoint 70/14/14 split. Both gradient paths and anti-shortcut checks
-worked, but calibration failed; external enhanced audio reduced the independent
-predictor's LTAS-slope calibration to `0.515`. Job `19684821` completed with
-zero generator optimizer steps.
+The diagnostic used 390 valid CS/SV rows from 98 speakers with a disjoint
+70/14/14 train/calibration/holdout split. The external panel used 24 unseen
+speakers, all six degradation levels, and 864 enhanced waveforms. The
+independent route also passed CPPS/HNR anti-shortcut and frozen-gradient checks;
+the shared route passed its gradient check but failed HNR calibration and
+anti-shortcut gates. Across all six terms, the independent holdout passed CPPS,
+HNR, and LTAS tilt; shimmer and LTAS slope still missed calibration or
+paired-change gates.
 
-**Plain conclusion:** the independent predictor is the more promising compact
-surrogate, but neither route is accurate and calibrated enough to use as a
-formal enhancement loss yet.
+**Plain conclusion:** the frozen frequency-aware predictor is the better of the
+two compact routes, but its CS/SV calibration is not yet reliable enough for a
+safe enhancement loss. Job `19688534` therefore stopped at zero generator
+optimizer steps; no formal pathology training was submitted. The hashed report
+is under `runs/avqi_component_backprop_20260812_02/outputs/` on Triton.
 
 ## Repository and retained artifacts
 
