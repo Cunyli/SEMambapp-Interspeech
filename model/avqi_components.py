@@ -20,6 +20,11 @@ AVQI_COMPONENT_NAMES = (
     "tilt",
 )
 
+# CPPS and HNR each represent one concept. The two shimmer terms and the two
+# LTAS terms are correlated representations, so each member receives half
+# weight instead of counting the same concept twice.
+AVQI_COMPONENT_LOSS_WEIGHTS = (1.0, 1.0, 0.5, 0.5, 0.5, 0.5)
+
 
 def avqi_v0301(components: torch.Tensor) -> torch.Tensor:
     """Compute the verified AVQI v03.01 scalar from six ordered components."""
@@ -142,14 +147,25 @@ def standardized_component_loss(
     target_mean: torch.Tensor,
     target_scale: torch.Tensor,
 ) -> torch.Tensor:
-    """Balanced Huber loss in training-split standard-deviation units."""
+    """Concept-balanced Huber loss in training-split deviation units."""
     if normalized_prediction.shape != raw_target.shape:
         raise ValueError(
             "prediction and target shapes differ: "
             f"{normalized_prediction.shape} != {raw_target.shape}"
         )
+    if normalized_prediction.shape[-1] != len(AVQI_COMPONENT_NAMES):
+        raise ValueError(
+            f"expected {len(AVQI_COMPONENT_NAMES)} AVQI components, "
+            f"got shape {tuple(normalized_prediction.shape)}"
+        )
     normalized_target = (raw_target - target_mean) / target_scale.clamp_min(1e-8)
-    return F.smooth_l1_loss(normalized_prediction, normalized_target)
+    element_loss = F.smooth_l1_loss(
+        normalized_prediction,
+        normalized_target,
+        reduction="none",
+    )
+    weights = element_loss.new_tensor(AVQI_COMPONENT_LOSS_WEIGHTS)
+    return (element_loss * weights).sum(dim=-1).div(weights.sum()).mean()
 
 
 def denormalize_components(

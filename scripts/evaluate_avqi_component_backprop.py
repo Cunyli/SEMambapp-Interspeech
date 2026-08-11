@@ -28,6 +28,7 @@ import torch
 from scipy import stats
 
 from model.avqi_components import (
+    AVQI_COMPONENT_LOSS_WEIGHTS,
     AVQI_COMPONENT_NAMES,
     SharedComponentHead,
     WaveformComponentPredictor,
@@ -48,7 +49,7 @@ EXPECTED_SPLIT_SPEAKERS = {
     "surrogate_calibration": 14,
     "surrogate_holdout": 14,
 }
-PILOT_COMPONENTS = ("hnr", "slope")
+PRIMARY_GATE_COMPONENTS = ("hnr", "slope")
 LEVEL_SPEARMAN_GATE = 0.70
 DELTA_SPEARMAN_GATE = 0.60
 NORMALIZED_MAE_GATE = 0.50
@@ -963,14 +964,16 @@ def route_decision(
     anti_shortcut: dict[str, Any],
     gradient: dict[str, Any],
 ) -> str:
-    pilot_metrics = all(component_passes(metrics, name) for name in PILOT_COMPONENTS)
-    pilot_anti = all(
+    primary_metrics = all(
+        component_passes(metrics, name) for name in PRIMARY_GATE_COMPONENTS
+    )
+    primary_anti = all(
         anti_shortcut["components"][name]["decision"] == "PASS"
-        for name in PILOT_COMPONENTS
+        for name in PRIMARY_GATE_COMPONENTS
     )
     return (
         "ELIGIBLE_FOR_BOUNDED_PILOT"
-        if pilot_metrics and pilot_anti and gradient["decision"] == "PASS"
+        if primary_metrics and primary_anti and gradient["decision"] == "PASS"
         else "NO_GO_GENERATOR_TRAINING"
     )
 
@@ -1043,7 +1046,10 @@ def main() -> None:
         "schema_version": "avqi-component-backprop-v1",
         "purpose": "diagnostic_only_no_generator_update",
         "components": list(AVQI_COMPONENT_NAMES),
-        "pilot_components": list(PILOT_COMPONENTS),
+        "component_loss_weights": dict(
+            zip(AVQI_COMPONENT_NAMES, AVQI_COMPONENT_LOSS_WEIGHTS, strict=True)
+        ),
+        "primary_gate_components": list(PRIMARY_GATE_COMPONENTS),
         "jitter_in_primary_task": False,
         "speaker_split": EXPECTED_SPLIT_SPEAKERS,
         "routes": {
@@ -1218,13 +1224,13 @@ def main() -> None:
         independent_anti,
         gradients["frozen_independent_predictor"],
     )
-    external_pilot_pass = all(
+    external_primary_pass = all(
         external_report["overall"][component]["decision"] == "PASS"
-        for component in PILOT_COMPONENTS
+        for component in PRIMARY_GATE_COMPONENTS
     )
     if (
         independent_decision == "ELIGIBLE_FOR_BOUNDED_PILOT"
-        and not external_pilot_pass
+        and not external_primary_pass
     ):
         independent_decision = "NO_GO_GENERATOR_TRAINING"
     if (
@@ -1278,7 +1284,7 @@ def main() -> None:
                 "anti_shortcut": independent_anti,
                 "gradient": gradients["frozen_independent_predictor"],
                 "external_enhancement_stress": external_report,
-                "external_pilot_gate_passed": external_pilot_pass,
+                "external_primary_gate_passed": external_primary_pass,
                 "decision": independent_decision,
             },
         },

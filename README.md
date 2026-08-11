@@ -42,13 +42,14 @@ speaker's clean pathological target:
 
 $$
 \mathcal L_{\mathrm{comp}}=
-\frac{1}{|\mathcal C|}\sum_{k\in\mathcal C}
+\frac{1}{\sum_k w_k}\sum_k w_k
 \operatorname{SmoothL1}\!\left(
 \frac{\hat c_k-c_k^{\mathrm{clean}}}{\sigma_k}\right).
 $$
 
-The first pilot uses HNR and LTAS slope in the loss, while all six components
-are reported.
+One six-output model keeps the comparison small. All six terms are trained and
+reported; the two correlated shimmer terms and two correlated LTAS terms each
+receive half weight. HNR and LTAS slope are the pre-registered primary gates.
 
 | Route | Predictor input | Training label | Backpropagation path |
 |---|---|---|---|

@@ -15,7 +15,9 @@ structure and passing unit tests are not treated as model-quality results.
 
 - Six targets: CPPS, HNR, shimmer %, shimmer dB, LTAS slope and LTAS tilt.
 - Jitter is excluded from the AVQI task.
-- Pilot loss: HNR + LTAS slope; all six terms are still evaluated.
+- One six-output model uses a standardized, concept-balanced loss for all six
+  terms; each member of the shimmer and LTAS pairs receives half weight.
+- HNR and LTAS slope are the pre-registered primary promotion gates.
 - Split: 70 train, 14 calibration and 14 holdout speakers.
 - Promotion evidence: held-out accuracy, calibration, anti-shortcut behavior,
   finite intended gradients, and exact Praat scoring of generated waveforms.

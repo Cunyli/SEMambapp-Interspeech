@@ -5,6 +5,7 @@ import math
 import torch
 
 from model.avqi_components import (
+    AVQI_COMPONENT_LOSS_WEIGHTS,
     AVQI_COMPONENT_NAMES,
     SharedComponentHead,
     WaveformComponentPredictor,
@@ -79,3 +80,23 @@ def test_normalized_loss_and_inverse_transform() -> None:
     )
     assert float(loss) == 0.0
     assert torch.equal(restored, target.unsqueeze(0))
+
+
+def test_component_loss_balances_correlated_pairs() -> None:
+    assert AVQI_COMPONENT_LOSS_WEIGHTS == (1.0, 1.0, 0.5, 0.5, 0.5, 0.5)
+    target = torch.zeros(1, 6)
+    target_mean = torch.zeros(6)
+    target_scale = torch.ones(6)
+    hnr_error = torch.zeros(1, 6)
+    hnr_error[0, 1] = 1.0
+    shimmer_pair_error = torch.zeros(1, 6)
+    shimmer_pair_error[0, 2:4] = 1.0
+
+    hnr_loss = standardized_component_loss(
+        hnr_error, target, target_mean, target_scale
+    )
+    shimmer_pair_loss = standardized_component_loss(
+        shimmer_pair_error, target, target_mean, target_scale
+    )
+
+    assert torch.isclose(hnr_loss, shimmer_pair_loss)
