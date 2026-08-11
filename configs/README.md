@@ -32,13 +32,10 @@ together. New runs should use `checkpoints/`.
 `semambapp_legacy_pretrain_main_v1.yaml` is retained for historical comparison
 and is not the recommended starting point.
 
-## DNF contracts
-
-The `dnf_*.json` files freeze controlled DNF data, routing, audit, and
-evaluation contracts. They are research specifications used by the matching
-scripts and tests. Some execution paths require a separate `DNF_USE` checkout;
-set `DNF_USE_ROOT` explicitly in that case.
-
 Generated configurations belong in `configs/generated/` and are ignored by
 Git. Datasets, checkpoints, and pretrained weights are not bundled with any
 configuration in this directory.
+
+DNF reproduction contracts are maintained in the separate
+`DNF-SeMambaPP-Reproduction` repository and are intentionally not duplicated
+here.

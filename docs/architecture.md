@@ -26,16 +26,15 @@ Training can also use discriminator and loss components in
 |---|---|---|
 | `dataloaders/use_simulation.py` | Fixed noisy/clean pairs | Manifests and audio remain external |
 | `dataloaders/legacy_online_degradation.py` | Preserved online degradation route | Historical compatibility path |
-| `dataloaders/dnf_controlled_webdataset.py` | Controlled additive noisy-target stream | External `DNF_USE` support is loaded only for the streaming route |
-| `dataloaders/dnf_controlled_phase_a.py` | Frozen-manifest Phase A route | Contract-focused research path |
 
 ## Experimental extensions
 
-The repository includes DNF objectives, controlled routing, active-RMS
-variants, identity losses, and speaker-verification guardrails. These modules
-are retained as research engineering work. Their implementation does not by
-itself establish that the mechanism improves speech quality or pathology
-preservation.
+The repository includes identity losses and speaker-verification guardrails as
+research extensions. Their implementation does not by itself establish improved
+speech quality or pathology preservation.
+
+The DNF two-head model, paper objectives, waveform contracts, and controlled
+DNF data routes are maintained in `DNF-SeMambaPP-Reproduction`, not here.
 
 ## Evaluation boundary
 

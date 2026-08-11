@@ -5,9 +5,9 @@
 > every saved configuration was run or that a final model has been selected.
 
 This repository contains the SeMamba++ speech-enhancement implementation,
-fixed-pair and controlled-DNF data paths, experiment configurations, evaluation
-tools, and contract tests. The goal of this tree is to make the research easy
-to inspect while preserving the full Git history.
+fixed-pair data paths, experiment configurations, evaluation tools, and
+contract tests. The goal of this tree is to make the general SeMamba++ research
+easy to inspect while preserving the full Git history.
 
 ## Project at a glance
 
@@ -16,7 +16,7 @@ to inspect while preserving the full Git history.
 | SeMamba++ model and training path | Implemented |
 | Fixed-pair USE simulation adapter | Implemented; data remains external |
 | Identity and speaker-verification guardrails | Active research code and configs |
-| Controlled DNF paths | Experimental; external DNF data tooling is required by some routes |
+| DNF reproduction | Maintained in the separate `DNF-SeMambaPP-Reproduction` repository |
 | Project-trained checkpoints | Stored locally under `checkpoints/`; not tracked |
 | Downloaded model weights | Stored locally under `pretrained/`; not tracked |
 | Final model or paper-level result | Not established by repository structure alone |
@@ -82,13 +82,17 @@ data_cfg:
   valid_pair_manifest: ${SEMAMBAPP_TAU_FIXED_VALID_CSV:-/path/to/valid/paired.csv}
 ```
 
-Some historical controlled-DNF routes reuse loaders from a separate `DNF_USE`
-checkout. Set `DNF_USE_ROOT` to that repository when running those paths. Pure
-controlled-mixture utilities and their unit tests remain usable without it.
-
 The original experiments used VCTK and EARS speech, DNS/WHAM-style noise, and
 external room-response resources. See [Provenance](docs/provenance.md) before
 reusing any external asset.
+
+## Related repository boundary
+
+The closed DNF-on-SeMamba++ reproduction is maintained separately in
+`DNF-SeMambaPP-Reproduction`. Its DNF objectives, checkpoints, metrics, and
+listening samples are not part of this repository. The earlier `DNF_USE`
+experiment is also a separate project. Shared SeMamba++ backbone ancestry does
+not make these repositories the same study.
 
 ## Checkpoint and output policy
 

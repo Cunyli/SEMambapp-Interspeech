@@ -7,7 +7,6 @@ still active, so this is a review boundary rather than a final result report.
 
 - The main SeMamba++ training and inference implementation is present.
 - Fixed-pair USE simulation adapters and metric helpers are present.
-- Controlled DNF data, objective, audit, and comparison code is present.
 - Identity and speaker-verification guardrail code and configurations are
   present.
 - Unit and contract tests cover many deterministic data and objective rules.
@@ -18,8 +17,7 @@ still active, so this is a review boundary rather than a final result report.
 - A checkpoint path does not prove that the checkpoint exists in a shared copy.
 - A passing engineering test does not prove convergence or perceptual quality.
 - A single metric or gate does not select a final model.
-- The DNF and guardrail variants are not presented here as successful final
-  methods.
+- The guardrail variants are not presented here as successful final methods.
 
 ## Current review boundary
 
@@ -28,3 +26,7 @@ visible. No normalization step launches training, submits Slurm work, performs
 GPU validation, or reproduces paper results. Future research conclusions should
 point to immutable run IDs, checkpoint hashes, data manifests, complete metric
 panels, and a fixed listening protocol.
+
+The closed DNF reproduction is maintained separately in
+`DNF-SeMambaPP-Reproduction`; its conclusions must not be inferred from this
+repository's test or checkpoint state.

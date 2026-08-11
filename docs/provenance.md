@@ -5,12 +5,16 @@
 The project builds on the public
 [SEMamba](https://github.com/RoyChao19477/SEMamba) implementation and retains
 ideas or components associated with BigVGAN and MP-SENet. The current tree also
-contains independent SeMamba++ research extensions, controlled DNF experiments,
-and advisor-review documentation.
+contains independent SeMamba++ research extensions and advisor-review
+documentation.
 
 Git history is the source of truth for the exact development lineage. This
 repository should not be described as an official implementation of external
 projects.
+
+The DNF-on-SeMamba++ study is preserved in the independently versioned
+`DNF-SeMambaPP-Reproduction` repository. Its code, checkpoints, samples, and
+result claims are intentionally not duplicated in this tree.
 
 ## External assets
 
