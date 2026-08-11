@@ -40,8 +40,8 @@ experiment_cfg:
 
 fine_tuning_cfg:
   enabled: true
-  pretrained_generator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/exp/semambapp_shifted_anechoic_online_v1/ln_g_00180000.pth
-  pretrained_discriminator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/exp/semambapp_shifted_anechoic_online_v1/ln_do_00180000.pth
+  pretrained_generator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/checkpoints/pretrain_180k/ln_g_00180000.pth
+  pretrained_discriminator_checkpoint: /scratch/work/lil14/SEMambapp-Interspeech/checkpoints/pretrain_180k/ln_do_00180000.pth
 
 training_cfg:
   training_epochs: 20

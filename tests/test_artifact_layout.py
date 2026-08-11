@@ -12,19 +12,23 @@ def read(relative_path: str) -> str:
     return (REPO_ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_repository_documents_separate_checkpoint_and_run_roots() -> None:
-    checkpoint_policy = read("checkpoints/README.md")
-    run_policy = read("runs/README.md")
-    assert "checkpoints/<experiment>/<run_id>/" in checkpoint_policy
-    assert "New model weights do not belong here" in run_policy
-    assert "checkpoints/<experiment>/<run_id>/" in run_policy
+def test_repository_documents_compact_artifact_contract() -> None:
+    readme = read("README.md")
+    checkpoint_manifest = read("checkpoints/manifest.csv")
+    assert (
+        "runs/              logs, manifests, metrics, and reports; no model weights"
+        in readme
+    )
+    assert "pretrain_180k/ln_g_00180000.pth" in checkpoint_manifest
+    assert "B0_250/ln_g_00000250.pth" in checkpoint_manifest
+    assert "S6_500/ln_g_00000500.pth" in checkpoint_manifest
+    assert "S3_2000/ln_g_00002000.pth" in checkpoint_manifest
+    assert not (REPO_ROOT / "scripts" / "cluster").exists()
 
 
 def test_avqi_diagnostic_separates_models_from_reports() -> None:
     source = read("scripts/evaluate_avqi_component_backprop.py")
-    launcher = read(
-        "scripts/cluster/slurm_avqi_component_backprop_diagnostic.sh"
-    )
+    launcher = read("scripts/slurm_avqi_component_backprop_diagnostic.sh")
     assert 'parser.add_argument("--checkpoint-dir"' in source
     assert 'parser.add_argument("--config-sha256"' in source
     assert 'parser.add_argument("--source-commit"' in source

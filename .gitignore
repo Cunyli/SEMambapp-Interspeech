@@ -26,6 +26,7 @@ env/
 
 # Training outputs and local experiment artifacts
 checkpoints/**
+!checkpoints/manifest.csv
 ckpt/
 runs/**
 logs/**
@@ -36,6 +37,7 @@ wandb-cache/
 lightning_logs/
 exp/
 pretrained/**
+!pretrained/manifest.csv
 tmp/**
 tfevents/
 events.out.tfevents.*
@@ -48,7 +50,6 @@ events.out.tfevents.*
 
 # Local datasets and generated audio artifacts
 data/*
-!data/README.md
 demo_files/
 demo_files_normalized/
 *.wav
@@ -63,15 +64,11 @@ CLAUDE.md
 
 # Generated configs and scratch
 configs/generated/
-!checkpoints/README.md
 !logs/.gitkeep
-!outputs/README.md
-!pretrained/README.md
 !runs/.gitkeep
-!runs/README.md
 !outputs/examples/
-!outputs/examples/README.md
 !outputs/examples/manifest.csv
+!outputs/examples/SHA256SUMS
 !tmp/.gitkeep
 !**/.gitkeep
 !**/.keep
@@ -79,5 +76,5 @@ configs/generated/
 # Preserved local migration leftovers
 checkpoints/.gitkeep
 outputs/.gitkeep
-scripts/slurm*.sh
+scripts/slurm_*.sh
 scripts/*.bak*
