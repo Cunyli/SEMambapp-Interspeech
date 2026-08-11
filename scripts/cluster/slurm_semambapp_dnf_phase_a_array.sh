@@ -7,6 +7,7 @@ DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/runs/semambapp_dnf_phase_a}"
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-$ROOT_DIR/checkpoints/semambapp_dnf_phase_a}"
 JOB_NAME="${JOB_NAME:-dnf-phase-a-pair}"
 PARTITION="${PARTITION:-gpu-v100-32g}"
 GPU_TYPE="${GPU_TYPE:-v100}"
@@ -58,7 +59,7 @@ if [[ -z "$TRAIN_MANIFEST" || -z "$VALID_MANIFEST" ]]; then
   exit 2
 fi
 
-mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"
+mkdir -p "$LOG_DIR" "$OUTPUT_ROOT" "$CHECKPOINT_ROOT"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
@@ -126,6 +127,7 @@ args=(
   --train-manifest "$TRAIN_MANIFEST"
   --valid-manifest "$VALID_MANIFEST"
   --output-root "$OUTPUT_ROOT"
+  --checkpoint-root "$CHECKPOINT_ROOT"
   --pair-contract-dir "$PAIR_CONTRACT_DIR"
   --run-name "$RUN_NAME"
   --seed "$SEED"

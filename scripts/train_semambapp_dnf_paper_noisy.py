@@ -68,6 +68,10 @@ def parse_args():
         "--output-root",
         default="runs/semambapp_dnf_paper_noisy",
     )
+    parser.add_argument(
+        "--checkpoint-root",
+        default="checkpoints/semambapp_dnf_paper_noisy",
+    )
     parser.add_argument("--run-name", default="")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -602,8 +606,13 @@ def main():
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}__{args.mode}__scratch"
     )
     output_dir = Path(args.output_root) / run_name
-    checkpoint_dir = output_dir / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=False)
+    checkpoint_dir = Path(args.checkpoint_root) / run_name
+    if output_dir.exists():
+        raise FileExistsError(f"refusing to overwrite run output: {output_dir}")
+    if checkpoint_dir.exists():
+        raise FileExistsError(f"refusing to overwrite checkpoints: {checkpoint_dir}")
+    output_dir.mkdir(parents=True)
+    checkpoint_dir.mkdir(parents=True)
 
     loader = build_loader(
         args,
@@ -643,6 +652,7 @@ def main():
         "init_checkpoint": None,
         "resume": None,
         "output_dir": str(output_dir.resolve()),
+        "checkpoint_dir": str(checkpoint_dir.resolve()),
         "script": str(script_path),
         "script_sha256": sha256_file(script_path),
         "config": str(Path(args.config).resolve()),

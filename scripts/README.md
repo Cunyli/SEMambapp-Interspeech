@@ -25,10 +25,16 @@ small advisor-facing example set.
 - `train_semambapp_dnf_*.py` contains experimental DNF training entry points.
 - `eval_semambapp_dnf_*.py` evaluates an explicitly supplied checkpoint.
 - `compare_dnf_phase_a_*.py` compares prepared experiment artifacts.
+- `evaluate_avqi_component_backprop.py` compares the shared dual head and
+  frozen waveform predictor without taking a generator optimizer step.
 
 Training scripts require external data and may require a separate `DNF_USE`
 checkout. Set `DNF_USE_ROOT` instead of relying on a hard-coded repository
 location.
+
+New training entry points take separate `--output-root` and
+`--checkpoint-root` arguments. Reports and generated audio go to `runs/`;
+project-trained weights go to `checkpoints/`.
 
 ## Cluster-specific helpers
 

@@ -7,6 +7,7 @@ DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/logs}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/runs/semambapp_dnf_paper_noisy}"
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-$ROOT_DIR/checkpoints/semambapp_dnf_paper_noisy}"
 JOB_NAME="${JOB_NAME:-dnf-paper-scratch-pair}"
 PARTITION="${PARTITION:-gpu-debug}"
 GPU_TYPE="${GPU_TYPE:-a100}"
@@ -34,7 +35,7 @@ SPLIT_ROOT="${SPLIT_ROOT:-/scratch/elec/t412-speechcom/Triton - Symptonic/lijie/
 SOFTWARE_STACK_MODULE="${SOFTWARE_STACK_MODULE:-triton/2025.1-gcc}"
 COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
 
-mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"
+mkdir -p "$LOG_DIR" "$OUTPUT_ROOT" "$CHECKPOINT_ROOT"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
@@ -86,6 +87,7 @@ args=(
   --config "$CONFIG_PATH"
   --split-root "$SPLIT_ROOT"
   --output-root "$OUTPUT_ROOT"
+  --checkpoint-root "$CHECKPOINT_ROOT"
   --run-name "$RUN_NAME"
   --seed "$SEED"
   --max-steps "$MAX_STEPS"

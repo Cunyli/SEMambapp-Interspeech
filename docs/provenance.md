@@ -34,3 +34,10 @@ Before sharing any dataset excerpt, pretrained asset, or generated listening
 sample beyond internal review, verify its source terms and record its provenance
 and generating checkpoint. Source code organization alone does not grant reuse
 rights for external assets.
+
+The public repository uses an explicit allowlist for audio: at most 3--5
+deterministic sample IDs, each with source terms and SHA-256 metadata. Full
+evaluation sets remain external. Pathological recordings stay out of public
+branches until their redistribution and participant-data conditions are
+confirmed; a separately authorized private advisor bundle can use the same
+manifest contract.

@@ -38,10 +38,11 @@ DNF_USE_ROOT="${DNF_USE_ROOT:-$ROOT_DIR/../DNF_USE}"
 SIMULATION_CONFIG="${SIMULATION_CONFIG:-$DNF_USE_ROOT/conf/simulation_train_shifted_anechoic.yaml}"
 SOURCE_ROUTING_CONFIG="${SOURCE_ROUTING_CONFIG:-$DNF_USE_ROOT/conf/source_routing_webdataset_v1.json}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/runs/semambapp_dnf_nogan}"
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-$ROOT_DIR/checkpoints/semambapp_dnf_nogan}"
 SOFTWARE_STACK_MODULE="${SOFTWARE_STACK_MODULE:-triton/2025.1-gcc}"
 COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
 
-mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"
+mkdir -p "$LOG_DIR" "$OUTPUT_ROOT" "$CHECKPOINT_ROOT"
 
 submit_self() {
   local script_path="$ROOT_DIR/scripts/cluster/slurm_semambapp_dnf_nogan.sh"
@@ -82,6 +83,7 @@ echo "Config: $CONFIG_PATH" | tee -a "$LIVE_LOG"
 echo "Split root: $SPLIT_ROOT" | tee -a "$LIVE_LOG"
 echo "Source routing config: $SOURCE_ROUTING_CONFIG" | tee -a "$LIVE_LOG"
 echo "Output root: $OUTPUT_ROOT" | tee -a "$LIVE_LOG"
+echo "Checkpoint root: $CHECKPOINT_ROOT" | tee -a "$LIVE_LOG"
 
 module load "$SOFTWARE_STACK_MODULE"
 module load "$COMPILER_MODULE"
@@ -112,6 +114,7 @@ args=(
   --simulation-config "$SIMULATION_CONFIG"
   --source-routing-config "$SOURCE_ROUTING_CONFIG"
   --output-root "$OUTPUT_ROOT"
+  --checkpoint-root "$CHECKPOINT_ROOT"
   --max-steps "$MAX_STEPS"
   --gradient-accumulation-steps "$GRADIENT_ACCUMULATION_STEPS"
   --batch-size "$BATCH_SIZE"

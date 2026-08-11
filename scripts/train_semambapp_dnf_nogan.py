@@ -52,6 +52,9 @@ def parse_args():
         default=str(DNF_REPO / "conf/source_routing_webdataset_v1.json"),
     )
     parser.add_argument("--output-root", default="runs/semambapp_dnf_nogan")
+    parser.add_argument(
+        "--checkpoint-root", default="checkpoints/semambapp_dnf_nogan"
+    )
     parser.add_argument("--run-name", default="")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -284,8 +287,13 @@ def main():
     cfg = load_cfg(args.config, args)
     run_name = args.run_name or f"{datetime.now().strftime('%Y%m%d-%H%M%S')}__semambapp__{args.mode}__dnf-nogan"
     output_dir = Path(args.output_root) / run_name
-    checkpoint_dir = output_dir / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=False)
+    checkpoint_dir = Path(args.checkpoint_root) / run_name
+    if output_dir.exists():
+        raise FileExistsError(f"refusing to overwrite run output: {output_dir}")
+    if checkpoint_dir.exists():
+        raise FileExistsError(f"refusing to overwrite checkpoints: {checkpoint_dir}")
+    output_dir.mkdir(parents=True)
+    checkpoint_dir.mkdir(parents=True)
 
     loader = build_loader(args, cfg)
     model = SEMambapp(cfg).to(device) if args.mode == "standard" else DNFSEMambappNoGAN(cfg).to(device)
@@ -314,6 +322,7 @@ def main():
         "run_name": run_name,
         "mode": args.mode,
         "output_dir": str(output_dir.resolve()),
+        "checkpoint_dir": str(checkpoint_dir.resolve()),
         "config": args.config,
         "split_root": args.split_root,
         "simulation_config": args.simulation_config,

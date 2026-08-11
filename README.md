@@ -1,115 +1,141 @@
-# SeMamba++ Research Repository
+# SeMamba++: pathological-voice-preserving speech enhancement
 
-> **Status:** active research code organized for advisor review. The repository
-> records implemented systems and experiment intent; it does not claim that
-> every saved configuration was run or that a final model has been selected.
+> **Advisor-review snapshot.** The project asks whether room noise can be
+> removed without erasing the pathological voice characteristics of the same
+> speaker. Pathology preservation is the primary objective; denoising is
+> evaluated only after that constraint is checked.
 
-This repository contains the SeMamba++ speech-enhancement implementation,
-fixed-pair and controlled-DNF data paths, experiment configurations, evaluation
-tools, and contract tests. The goal of this tree is to make the research easy
-to inspect while preserving the full Git history.
+## What this repository tests
 
-## Project at a glance
+| Workstream | How the experiment is controlled | Current conclusion |
+|---|---|---|
+| AVQI-component backpropagation | Same speaker-disjoint data and budget for a shared dual head and a frozen waveform predictor | The earlier hand-written surrogate failed. The two learned routes are implemented but are not declared successful before the held-out diagnostic finishes |
+| CS and SV preservation | Continuous speech (CS) and sustained vowels (SV) are scored separately against the same speaker's clean recording | The full CS/SV test path is supported. Current checkpoints form a Pareto shortlist; there is no universal winner |
+| Noise severity | The utterance, RIR, noise, offset and seed are fixed while SNR alone changes | The complete clean/RIR-only/30/20/15/10 dB ladder must be used; 10 dB is a stress slice, not a universal breakpoint |
 
-| Area | Current boundary |
-|---|---|
-| SeMamba++ model and training path | Implemented |
-| Fixed-pair USE simulation adapter | Implemented; data remains external |
-| Identity and speaker-verification guardrails | Active research code and configs |
-| Controlled DNF paths | Experimental; external DNF data tooling is required by some routes |
-| Project-trained checkpoints | Stored locally under `checkpoints/`; not tracked |
-| Downloaded model weights | Stored locally under `pretrained/`; not tracked |
-| Final model or paper-level result | Not established by repository structure alone |
-
-## Start here
-
-For a structured review, read:
-
-1. [Architecture](docs/architecture.md)
-2. [Research status](docs/research-status.md)
-3. [Provenance and asset boundaries](docs/provenance.md)
-4. [Configuration guide](configs/README.md)
-5. [Script guide](scripts/README.md)
-
-## Repository layout
+The evaluation order is deliberately strict:
 
 ```text
-configs/train/              # maintained baselines, experiment configs, and contracts
-dataloaders/                # fixed-pair and controlled research data routes
-docs/                       # architecture, status, and provenance
-metrics/                    # validation metric helpers
-model/                      # SeMamba++ and experimental model components
-scripts/                    # data preparation, evaluation, and training entry points
-scripts/cluster/            # cluster-specific helpers; may submit Slurm jobs
-tests/                      # CPU/static engineering contract tests
-checkpoints/                # project-trained checkpoints; ignored except README
-pretrained/                 # externally obtained weights; ignored except README
-logs/ outputs/ runs/ tmp/   # ignored runtime artifacts
-train.py / infer.py         # baseline training and single-file inference entry points
+same-speaker clean identity
+    -> severe pathological SV survival
+    -> CS and SV component fidelity
+    -> denoising and residual distortion
+    -> fixed listening panel
 ```
 
-## Local setup
+A lower AVQI score is **not automatically better**. It may mean that a
+pathological voice was made artificially healthier.
 
-Python 3.10 is the original project baseline. Install runtime dependencies with:
+## 1. AVQI-component backpropagation
+
+The verified AVQI v03.01 implementation contains six terms:
+
+$$
+\mathrm{AVQI}=2.8902\,(4.152-0.177\,\mathrm{CPPS}-0.006\,\mathrm{HNR}
+-0.037\,\mathrm{Shimmer}_{\%}+0.941\,\mathrm{Shimmer}_{dB}
++0.01\,\mathrm{Slope}+0.093\,\mathrm{Tilt}).
+$$
+
+Jitter is diagnostic-only and is not part of this formula. We do not minimize
+the AVQI scalar. Instead, predicted components are matched to the same
+speaker's clean pathological target:
+
+$$
+\mathcal L_{\mathrm{comp}}=
+\frac{1}{|\mathcal C|}\sum_{k\in\mathcal C}
+\operatorname{SmoothL1}\!\left(
+\frac{\hat c_k-c_k^{\mathrm{clean}}}{\sigma_k}\right).
+$$
+
+The first pilot uses HNR and LTAS slope in the loss, while all six components
+are reported.
+
+| Route | Predictor input | Training label | Backpropagation path |
+|---|---|---|---|
+| Shared dual head | Encoder or late shared SeMamba++ feature | Same-speaker clean exact Praat components | Component loss updates the head and shared backbone |
+| Frozen independent predictor | Enhanced waveform → log-STFT → small CNN | Exact Praat components of the predictor's input waveform | Predictor weights stay frozen; gradients pass through it to the enhanced waveform and generator |
+
+Both routes use 390 valid CS/SV rows from 98 speakers with a 70/14/14
+train/calibration/holdout speaker split. A route must pass held-out rank
+correlation, normalized error, calibration, anti-shortcut and finite-gradient
+checks before any small generator pilot is justified. Exact Praat measurements
+of final output waveforms remain the deciding evidence.
+
+The direct soft-HNR + soft-slope prototype (Slurm job `19643154`) was a
+**NO-GO**: HNR failed calibration/gradient checks and slope passed only 1/8
+anti-shortcut cases. This rejects that formula, not the two learned routes.
+
+## 2. CS/SV preservation and SNR ladder
+
+Every candidate is evaluated by task (CS/SV), health group
+(healthy/mild/severe pathology), and degradation level. The panel reports all
+six exact AVQI components, coherent and RMS gain, residual distortion, and
+ordinary denoising metrics.
+
+The controlled severity audit contains:
+
+- 24 speakers × CS/SV × 6 degradation levels × 5 models;
+- 1,440 enhanced waveforms and 2,664 exact-component rows;
+- 15 pathological speakers: 7 mild and 8 severe;
+- completed jobs `19640413`, `19640420`, and `19640638`.
+
+The current shortlist is `B0_250`, `S3_500`, and `S3_2000`. It is a
+Pareto shortlist, not a winner: longer training improves some SV-survival
+measures but not every phone-room component. The matched-budget CS+SV result
+remains `INCONCLUSIVE_NON_PARETO`.
+
+## Artifact and sharing policy
+
+```text
+checkpoints/<run_id>/        project-trained weights
+pretrained/<source>/         external weights
+runs/<run_id>/               config snapshots, manifests, metrics, reports, outputs
+outputs/examples/            3–5 allowlisted advisor-listening sample IDs
+logs/                        runtime logs
+tmp/                         disposable scratch files
+```
+
+New code writes checkpoints only under `checkpoints/`; `runs/` does not own
+model weights. Historical `exp/` and `runs/.../checkpoints` paths remain
+read-only until their hashes, manifests and resume references can be migrated
+together.
+
+The repository does not expose every generated waveform. A small listening set
+must include a manifest recording sample ID, task, severity, condition,
+checkpoint and file hash. Pathological recordings are not placed in a public
+GitHub branch until their sharing terms are confirmed.
+
+## Repository map
+
+```text
+model/             SeMamba++ and AVQI-component models
+dataloaders/       fixed-pair and controlled data routes
+configs/train/     frozen experiment contracts
+scripts/           training, evaluation and report entry points
+scripts/cluster/   guarded Triton/Slurm launchers
+tests/             CPU/static contract tests
+docs/              architecture, provenance and research status
+```
+
+Implementation entry points for the AVQI diagnostic are
+`model/avqi_components.py`,
+`scripts/evaluate_avqi_component_backprop.py`, and
+`scripts/cluster/slurm_avqi_component_backprop_diagnostic.sh`. The launcher
+contains no generator optimizer step and refuses Slurm submission unless
+`CONFIRM_SLURM_SUBMIT=1` is explicitly set.
+
+## Local checks
+
+Python 3.10 is the project baseline:
 
 ```bash
 python -m pip install -r requirements.txt
-```
-
-Install the test dependency and run the CPU/static suite with:
-
-```bash
 python -m pip install -r requirements-dev.txt
 CUDA_VISIBLE_DEVICES='' python -m pytest -q
 ```
 
-Mamba-specific installation may require the environment guidance from the
-[SEMamba project](https://github.com/RoyChao19477/SEMamba). A passing unit test
-suite establishes engineering contracts only; it does not establish training
-convergence or speech quality.
-
-## Data boundary
-
-Datasets and generated manifests are not stored in Git. The main fixed-pair
-training route expects manifests exported by the separate `USE_simulation`
-project. Configure their locations in YAML or with environment variables:
-
-```yaml
-data_cfg:
-  dataset_type: use_simulation_fixed
-  use_simulation_root: ${USE_SIMULATION_ROOT:-../USE_simulation}
-  train_pair_manifest: ${SEMAMBAPP_TAU_FIXED_TRAIN_CSV:-/path/to/train/paired.csv}
-  valid_pair_manifest: ${SEMAMBAPP_TAU_FIXED_VALID_CSV:-/path/to/valid/paired.csv}
-```
-
-Some historical controlled-DNF routes reuse loaders from a separate `DNF_USE`
-checkout. Set `DNF_USE_ROOT` to that repository when running those paths. Pure
-controlled-mixture utilities and their unit tests remain usable without it.
-
-The original experiments used VCTK and EARS speech, DNS/WHAM-style noise, and
-external room-response resources. See [Provenance](docs/provenance.md) before
-reusing any external asset.
-
-## Checkpoint and output policy
-
-- Put checkpoints trained by this project in `checkpoints/<run_id>/`.
-- Put downloaded or upstream weights in `pretrained/<source>/`.
-- Put run records in `runs/<run_id>/` and generated audio in
-  `runs/<run_id>/outputs/` or `outputs/`.
-- A shareable listening set should contain 3--5 deterministic sample IDs and a
-  manifest that records the config and checkpoint used to create them.
-- Legacy configs may retain absolute Triton paths as experiment history. Their
-  presence is not evidence that a run completed successfully.
-
-## Operational safety
-
-Cluster helpers are isolated under `scripts/cluster/`. A helper that can call
-`sbatch` refuses submission unless `CONFIRM_SLURM_SUBMIT=1` is set explicitly.
-Review all paths, resources, and output locations before enabling that gate.
-No root documentation command submits a job or starts training.
-
-## Reference implementations
-
-- [SEMamba](https://github.com/RoyChao19477/SEMamba)
-- [BigVGAN](https://github.com/NVIDIA/BigVGAN)
-- [MP-SENet](https://github.com/yxlu-0102/MP-SENet)
+Mamba installation follows the upstream
+[SEMamba repository](https://github.com/RoyChao19477/SEMamba). A passing code
+test proves an engineering contract, not model quality. See
+[research status](docs/research-status.md) and
+[provenance](docs/provenance.md) for the evidence boundary.

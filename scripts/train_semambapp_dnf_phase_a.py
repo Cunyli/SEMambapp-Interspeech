@@ -74,6 +74,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--valid-manifest", type=Path, required=True)
     parser.add_argument("--split-root", type=Path, default=None)
     parser.add_argument("--output-root", type=Path, default=Path("runs/semambapp_dnf_phase_a"))
+    parser.add_argument(
+        "--checkpoint-root",
+        type=Path,
+        default=Path("checkpoints/semambapp_dnf_phase_a"),
+    )
     parser.add_argument("--pair-contract-dir", type=Path, required=True)
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--seed", type=int, default=1234)
@@ -1284,8 +1289,13 @@ def main() -> None:
     scale_weight = active_log_rms_weight(contract, args.loss_variant)
     device = torch.device(args.device)
     output_dir = args.output_root / args.run_name
-    checkpoint_dir = output_dir / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=False)
+    checkpoint_dir = args.checkpoint_root / args.run_name
+    if output_dir.exists():
+        raise FileExistsError(f"refusing to overwrite run output: {output_dir}")
+    if checkpoint_dir.exists():
+        raise FileExistsError(f"refusing to overwrite checkpoints: {checkpoint_dir}")
+    output_dir.mkdir(parents=True)
+    checkpoint_dir.mkdir(parents=True)
     train_loader = build_loader(args.train_manifest, "train", args, cfg, False)
     valid_loader = build_loader(args.valid_manifest, "valid", args, cfg, True)
     validate_manifest_speech_sources(
@@ -1396,6 +1406,7 @@ def main() -> None:
         "code_surface_sha256": code_surface_hashes,
         "canonical_speech_init_sha256": canonical_hash,
         "pair_contract_dir": str(args.pair_contract_dir.resolve()),
+        "checkpoint_dir": str(checkpoint_dir.resolve()),
         "model_parameter_count": sum(
             parameter.numel() for parameter in model.parameters()
         ),

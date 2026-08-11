@@ -68,6 +68,10 @@ configs/generated/
 !outputs/README.md
 !pretrained/README.md
 !runs/.gitkeep
+!runs/README.md
+!outputs/examples/
+!outputs/examples/README.md
+!outputs/examples/manifest.csv
 !tmp/.gitkeep
 !**/.gitkeep
 !**/.keep
