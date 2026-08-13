@@ -1,5 +1,5 @@
 #!/bin/bash
-# V2 diagnostic only: no generator optimizer step is implemented by this job.
+# V3 predictor screen only: no generator optimizer step is implemented by this job.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,18 +8,21 @@ DEFAULT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 PYTHON_SCRIPT="${PYTHON_SCRIPT:-$SOURCE_ROOT/scripts/evaluate_avqi_component_backprop.py}"
-JOB_NAME="${JOB_NAME:-avqi-component-v2}"
+JOB_NAME="${JOB_NAME:-avqi-predictor-screen}"
 PARTITION="${PARTITION:-gpu-v100-32g}"
 GPU_TYPE="${GPU_TYPE:-v100}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-4}"
 MEMORY="${MEMORY:-48G}"
-TIME_LIMIT="${TIME_LIMIT:-01:00:00}"
+TIME_LIMIT="${TIME_LIMIT:-02:00:00}"
 SOFTWARE_STACK_MODULE="${SOFTWARE_STACK_MODULE:-triton/2025.1-gcc}"
 COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
-RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_backprop_20260812_02}"
+RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_predictor_screen_20260813_01}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_component_backprop_20260812_02}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_component_predictor_screen_20260813_01}"
+SEED="${SEED:-20260813}"
+SHARED_CANDIDATES="${SHARED_CANDIDATES:-late_global,late_frequency,late_tfgrid}"
+WAVEFORM_ARCHITECTURES="${WAVEFORM_ARCHITECTURES:-global_stats,frequency_aware,compact_tfgrid}"
 LABEL_BANK="${LABEL_BANK:-$ROOT_DIR/runs/tau_pathology_preservation_eval_phase2_20260809_01/outputs/surrogate/exact_component_label_bank_v1.csv}"
 CONFIG="${CONFIG:-$ROOT_DIR/runs/tau_s1_sv_threshold_ablation_20260719_01/configs/s_fidelity_m3_stage0500.yaml}"
 CHECKPOINT="${CHECKPOINT:-$ROOT_DIR/checkpoints/S3_500/ln_g_00000500.pth}"
@@ -42,6 +45,7 @@ export ROOT_DIR SOURCE_ROOT PYTHON_SCRIPT
 export JOB_NAME PARTITION GPU_TYPE CPUS_PER_TASK MEMORY TIME_LIMIT
 export SOFTWARE_STACK_MODULE COMPILER_MODULE
 export RUN_ROOT LOG_DIR OUTPUT_DIR CHECKPOINT_DIR
+export SEED SHARED_CANDIDATES WAVEFORM_ARCHITECTURES
 export LABEL_BANK CONFIG CHECKPOINT EXTERNAL_EXACT_CSV
 export LABEL_BANK_SHA256 CONFIG_SHA256 CHECKPOINT_SHA256
 export EXTERNAL_EXACT_CSV_SHA256 SOURCE_COMMIT
@@ -104,6 +108,9 @@ python "$PYTHON_SCRIPT" \
   --output-dir "$OUTPUT_DIR" \
   --checkpoint-dir "$CHECKPOINT_DIR" \
   --source-commit "$SOURCE_COMMIT" \
+  --seed "$SEED" \
+  --shared-candidates "$SHARED_CANDIDATES" \
+  --waveform-architectures "$WAVEFORM_ARCHITECTURES" \
   --device cuda \
   2>&1 | tee -a "$LIVE_LOG"
 

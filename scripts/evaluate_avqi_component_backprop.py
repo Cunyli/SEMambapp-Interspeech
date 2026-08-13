@@ -39,13 +39,17 @@ if str(REPO_ROOT) not in sys.path:
 from model.avqi_components import (
     AVQI_COMPONENT_LOSS_WEIGHTS,
     AVQI_COMPONENT_NAMES,
+    CompactTFGridSharedComponentHead,
+    CompactTFGridWaveformComponentPredictor,
     ComponentAffineCalibrator,
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
     SharedComponentHead,
     WaveformComponentPredictor,
     denormalize_components,
+    enable_recurrent_input_gradients,
     freeze_module,
+    freeze_module_for_input_gradient,
     pool_frequency_aware_shared_feature_map,
     pool_shared_feature_map,
     standardized_component_loss,
@@ -56,18 +60,37 @@ from utils import load_config
 
 
 SAMPLE_RATE = 16_000
-EXPECTED_ROWS = 390
+EXPECTED_TOTAL_ROWS = 392
+EXPECTED_USABLE_ROWS = 390
 EXPECTED_SPLIT_SPEAKERS = {
     "surrogate_train": 70,
     "surrogate_calibration": 14,
     "surrogate_holdout": 14,
 }
 PRIMARY_GATE_COMPONENTS = ("cpps", "hnr")
+COMPONENT_FAMILIES = {
+    "cpps": "periodicity_noise",
+    "hnr": "periodicity_noise",
+    "shimmer_percent": "amplitude_modulation",
+    "shimmer_db": "amplitude_modulation",
+    "slope": "spectral_shape",
+    "tilt": "spectral_shape",
+}
 LEVEL_SPEARMAN_GATE = 0.70
 DELTA_SPEARMAN_GATE = 0.60
+PAIRED_STABILITY_NMAE_GATE = 0.25
 NORMALIZED_MAE_GATE = 0.50
 CALIBRATION_SLOPE_RANGE = (0.75, 1.25)
+COMPONENT_INPUT_GRADIENT_MAX = 1e4
+EXTERNAL_COVERAGE_GATE = 0.99
+SCREEN_BATCH_SIZE = 16
+SCREEN_LEARNING_RATE = 3e-4
+SCREEN_MIN_EPOCHS = 15
+SCREEN_GRADIENT_CLIP_NORM = 5.0
+TRAINING_SEGMENT_SAMPLES = 48_000
+SEGMENT_TRANSFER_NMAE_GATE = NORMALIZED_MAE_GATE
 EXTERNAL_CANDIDATES = ("B0_250", "S3_500", "S3_2000")
+EXTERNAL_PRIMARY_CANDIDATE = "S3_500"
 EXTERNAL_CONDITIONS = (
     "clean",
     "rir_only",
@@ -77,11 +100,14 @@ EXTERNAL_CONDITIONS = (
     "snr10",
 )
 FREQUENCY_BINS = 8
+TFGRID_FREQUENCY_BINS = 32
+TFGRID_TIME_BINS = 64
 EXPECTED_EXTERNAL_SPEAKERS = 24
 EXTERNAL_REQUIRED_SLICES = (
     "view=cs",
     "view=sv",
     "label=patient",
+    "view=sv&sample_group=pathological_severe",
     "condition=snr10",
 )
 
@@ -116,10 +142,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=20260811)
-    parser.add_argument("--shared-head-epochs", type=int, default=250)
-    parser.add_argument("--waveform-epochs", type=int, default=30)
-    parser.add_argument("--patience", type=int, default=6)
+    parser.add_argument("--shared-head-epochs", type=int, default=60)
+    parser.add_argument("--waveform-epochs", type=int, default=60)
+    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument(
+        "--shared-candidates",
+        default="late_global,late_frequency,late_tfgrid",
+        help="comma-separated shared-head candidates selected using calibration only",
+    )
+    parser.add_argument(
+        "--waveform-architectures",
+        default="global_stats,frequency_aware,compact_tfgrid",
+        help="comma-separated independent predictors selected using calibration only",
+    )
     return parser.parse_args()
+
+
+def comma_separated_values(raw: str) -> tuple[str, ...]:
+    values = tuple(value.strip() for value in raw.split(",") if value.strip())
+    if not values:
+        raise ValueError("candidate list must not be empty")
+    if len(values) != len(set(values)):
+        raise ValueError(f"duplicate candidates are not allowed: {values}")
+    return values
 
 
 def sha256_file(path: Path) -> str:
@@ -155,16 +200,36 @@ def load_waveform(path: Path) -> torch.Tensor:
     return waveform
 
 
-def load_examples(label_bank: Path) -> list[Example]:
+def load_examples(label_bank: Path) -> tuple[list[Example], dict[str, Any]]:
     with label_bank.open(newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
+    all_task_rows = [row for row in rows if row["view"] in {"cs", "sv"}]
+    if len(all_task_rows) != EXPECTED_TOTAL_ROWS:
+        raise ValueError(
+            f"expected {EXPECTED_TOTAL_ROWS} task rows, found {len(all_task_rows)}"
+        )
     task_rows = [
         row
-        for row in rows
-        if row["view"] in {"cs", "sv"} and row["scoring_status"] == "ok"
+        for row in all_task_rows
+        if row["scoring_status"] == "ok"
     ]
-    if len(task_rows) != EXPECTED_ROWS:
-        raise ValueError(f"expected {EXPECTED_ROWS} usable rows, found {len(task_rows)}")
+    if len(task_rows) != EXPECTED_USABLE_ROWS:
+        raise ValueError(
+            f"expected {EXPECTED_USABLE_ROWS} usable rows, found {len(task_rows)}"
+        )
+    invalid_rows = [
+        {
+            "speaker_id": row.get("speaker_id", ""),
+            "split": row.get("split", ""),
+            "condition": row.get("condition_id", ""),
+            "view": row.get("view", ""),
+            "scoring_status": row.get("scoring_status", ""),
+            "error_type": row.get("error_type", ""),
+            "error_message": row.get("error_message", ""),
+        }
+        for row in all_task_rows
+        if row["scoring_status"] != "ok"
+    ]
     split_speakers = {
         split: len({row["speaker_id"] for row in task_rows if row["split"] == split})
         for split in EXPECTED_SPLIT_SPEAKERS
@@ -211,7 +276,14 @@ def load_examples(label_bank: Path) -> list[Example]:
         )
         if index % 50 == 0 or index == len(task_rows):
             print(f"loaded_examples={index}/{len(task_rows)}", flush=True)
-    return examples
+    coverage = {
+        "total_rows": len(all_task_rows),
+        "usable_rows": len(task_rows),
+        "invalid_rows": len(invalid_rows),
+        "fraction": len(task_rows) / len(all_task_rows),
+        "invalid_cases": invalid_rows,
+    }
+    return examples, coverage
 
 
 def target_stats(
@@ -227,6 +299,12 @@ def target_stats(
     mean = targets.mean(dim=0).to(device)
     scale = targets.std(dim=0, unbiased=False).clamp_min(1e-6).to(device)
     return mean, scale
+
+
+def set_model_seed(seed: int) -> None:
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def load_generator(
@@ -298,12 +376,31 @@ def pool_shared_candidate(
             feature_maps["late"],
             frequency_bins=FREQUENCY_BINS,
         )
+    if candidate == "late_tfgrid":
+        # Store a bounded grid for repeatable head training. The live gradient
+        # path uses the same adaptive grid inside CompactTFGridSharedComponentHead.
+        frequency_time = feature_maps["late"].transpose(-2, -1)
+        bounded = torch.nn.functional.adaptive_avg_pool2d(
+            frequency_time,
+            (TFGRID_FREQUENCY_BINS, TFGRID_TIME_BINS),
+        )
+        return bounded.transpose(-2, -1)
     if candidate == "enhanced_spectral":
         return pool_frequency_aware_shared_feature_map(
             feature_maps["enhanced_spectral"],
             frequency_bins=FREQUENCY_BINS,
         )
     raise ValueError(f"unknown shared candidate: {candidate}")
+
+
+def shared_head_forward(
+    head: torch.nn.Module,
+    features: torch.Tensor,
+    candidate: str,
+) -> torch.Tensor:
+    if candidate == "late_tfgrid":
+        return head(features)
+    return head.forward_pooled(features)
 
 
 def enhance_waveform(
@@ -330,12 +427,9 @@ def extract_shared_features(
     examples: list[Example],
     config: dict[str, Any],
     device: torch.device,
+    candidates: tuple[str, ...],
 ) -> dict[str, torch.Tensor]:
-    rows: dict[str, list[torch.Tensor]] = {
-        "late_global": [],
-        "late_frequency": [],
-        "enhanced_spectral": [],
-    }
+    rows: dict[str, list[torch.Tensor]] = {candidate: [] for candidate in candidates}
     with torch.no_grad():
         for index, example in enumerate(examples, start=1):
             maps = shared_feature_maps(model, example.waveform.to(device), config)
@@ -380,25 +474,36 @@ def train_shared_head(
     seed: int,
     candidate: str,
 ) -> tuple[
-    SharedComponentHead | FrequencyAwareSharedComponentHead,
+    torch.nn.Module,
     dict[str, Any],
     torch.Tensor,
     torch.Tensor,
 ]:
+    set_model_seed(seed)
     target_mean, target_scale = target_stats(examples, "clean_target", device)
     features = pooled_features.to(device)
     if candidate == "late_global":
-        head: SharedComponentHead | FrequencyAwareSharedComponentHead = (
-            SharedComponentHead(feature_channels=pooled_features.shape[1] // 2)
+        head: torch.nn.Module = SharedComponentHead(
+            feature_channels=pooled_features.shape[1] // 2
         )
-    else:
+    elif candidate in {"late_frequency", "enhanced_spectral"}:
         feature_channels = pooled_features.shape[1] // (FREQUENCY_BINS * 2)
         head = FrequencyAwareSharedComponentHead(
             feature_channels=feature_channels,
             frequency_bins=FREQUENCY_BINS,
         )
+    elif candidate == "late_tfgrid":
+        head = CompactTFGridSharedComponentHead(
+            feature_channels=pooled_features.shape[1]
+        )
+    else:
+        raise ValueError(f"unknown shared candidate: {candidate}")
     head = head.to(device)
-    optimizer = torch.optim.AdamW(head.parameters(), lr=1e-3, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(
+        head.parameters(),
+        lr=SCREEN_LEARNING_RATE,
+        weight_decay=1e-4,
+    )
     train_indices = [
         index
         for index, example in enumerate(examples)
@@ -412,16 +517,17 @@ def train_shared_head(
     best_state: dict[str, torch.Tensor] | None = None
     best_epoch = 0
     stale = 0
+    optimizer_steps = 0
     history: list[dict[str, float]] = []
     for epoch in range(1, epochs + 1):
         head.train()
         order = torch.randperm(len(train_indices), generator=generator).tolist()
-        for start in range(0, len(order), 32):
-            stop = min(start + 32, len(order))
+        for start in range(0, len(order), SCREEN_BATCH_SIZE):
+            stop = min(start + SCREEN_BATCH_SIZE, len(order))
             batch = [
                 train_indices[order[position]] for position in range(start, stop)
             ]
-            prediction = head.forward_pooled(features[batch])
+            prediction = shared_head_forward(head, features[batch], candidate)
             loss = standardized_component_loss(
                 prediction,
                 train_targets[batch],
@@ -430,11 +536,20 @@ def train_shared_head(
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                head.parameters(),
+                SCREEN_GRADIENT_CLIP_NORM,
+            )
             optimizer.step()
+            optimizer_steps += 1
         head.eval()
         value = calibration_loss(
             head,
-            lambda current, index: current.forward_pooled(features[index : index + 1]),
+            lambda current, index: shared_head_forward(
+                current,
+                features[index : index + 1],
+                candidate,
+            ),
             examples,
             "clean_target",
             target_mean,
@@ -448,7 +563,7 @@ def train_shared_head(
             stale = 0
         else:
             stale += 1
-        if epoch >= 20 and stale >= patience:
+        if epoch >= SCREEN_MIN_EPOCHS and stale >= patience:
             break
     if best_state is None:
         raise RuntimeError("shared head did not produce a checkpoint")
@@ -460,6 +575,7 @@ def train_shared_head(
             "best_epoch": best_epoch,
             "best_calibration_loss": best_loss,
             "epochs_ran": len(history),
+            "optimizer_steps": optimizer_steps,
             "history": history,
         },
         target_mean,
@@ -474,25 +590,31 @@ def train_waveform_predictor(
     patience: int,
     seed: int,
     architecture: str,
+    cached_spectrograms: torch.Tensor | None = None,
 ) -> tuple[
-    WaveformComponentPredictor | FrequencyAwareWaveformComponentPredictor,
+    torch.nn.Module,
     dict[str, Any],
     torch.Tensor,
     torch.Tensor,
 ]:
+    set_model_seed(seed)
     target_mean, target_scale = target_stats(examples, "own_target", device)
     if architecture == "global_stats":
-        predictor: WaveformComponentPredictor | FrequencyAwareWaveformComponentPredictor = (
-            WaveformComponentPredictor()
-        )
+        predictor: torch.nn.Module = WaveformComponentPredictor()
     elif architecture == "frequency_aware":
         predictor = FrequencyAwareWaveformComponentPredictor(
             frequency_bins=FREQUENCY_BINS
         )
+    elif architecture == "compact_tfgrid":
+        predictor = CompactTFGridWaveformComponentPredictor()
     else:
         raise ValueError(f"unknown waveform architecture: {architecture}")
     predictor = predictor.to(device)
-    optimizer = torch.optim.AdamW(predictor.parameters(), lr=3e-4, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(
+        predictor.parameters(),
+        lr=SCREEN_LEARNING_RATE,
+        weight_decay=1e-4,
+    )
     train_indices = [
         index
         for index, example in enumerate(examples)
@@ -503,26 +625,58 @@ def train_waveform_predictor(
     best_state: dict[str, torch.Tensor] | None = None
     best_epoch = 0
     stale = 0
+    optimizer_steps = 0
     history: list[dict[str, float]] = []
 
     def predict(current: torch.nn.Module, index: int) -> torch.Tensor:
-        return current(examples[index].waveform.to(device))
+        if cached_spectrograms is None:
+            return current(examples[index].waveform.to(device))
+        return current.forward_spectrogram(
+            cached_spectrograms[index : index + 1].to(device)
+        )
 
     for epoch in range(1, epochs + 1):
         predictor.train()
         order = list(train_indices)
         generator.shuffle(order)
         epoch_losses = []
-        for index in order:
-            prediction = predictor(examples[index].waveform.to(device))
-            target = examples[index].own_target.to(device).unsqueeze(0)
-            loss = standardized_component_loss(
-                prediction, target, target_mean, target_scale
-            )
+        for start in range(0, len(order), SCREEN_BATCH_SIZE):
+            batch = order[start : start + SCREEN_BATCH_SIZE]
+            if cached_spectrograms is None:
+                batch_losses = []
+                for index in batch:
+                    prediction = predict(predictor, index)
+                    target = examples[index].own_target.to(device).unsqueeze(0)
+                    batch_losses.append(
+                        standardized_component_loss(
+                            prediction,
+                            target,
+                            target_mean,
+                            target_scale,
+                        )
+                    )
+                loss = torch.stack(batch_losses).mean()
+            else:
+                prediction = predictor.forward_spectrogram(
+                    cached_spectrograms[batch].to(device)
+                )
+                target = torch.stack(
+                    [examples[index].own_target for index in batch]
+                ).to(device)
+                loss = standardized_component_loss(
+                    prediction,
+                    target,
+                    target_mean,
+                    target_scale,
+                )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(predictor.parameters(), 5.0)
+            torch.nn.utils.clip_grad_norm_(
+                predictor.parameters(),
+                SCREEN_GRADIENT_CLIP_NORM,
+            )
             optimizer.step()
+            optimizer_steps += 1
             epoch_losses.append(float(loss.detach().cpu()))
         predictor.eval()
         value = calibration_loss(
@@ -552,7 +706,7 @@ def train_waveform_predictor(
             stale = 0
         else:
             stale += 1
-        if epoch >= 10 and stale >= patience:
+        if epoch >= SCREEN_MIN_EPOCHS and stale >= patience:
             break
     if best_state is None:
         raise RuntimeError("waveform predictor did not produce a checkpoint")
@@ -564,6 +718,7 @@ def train_waveform_predictor(
             "best_epoch": best_epoch,
             "best_calibration_loss": best_loss,
             "epochs_ran": len(history),
+            "optimizer_steps": optimizer_steps,
             "history": history,
         },
         target_mean,
@@ -572,33 +727,60 @@ def train_waveform_predictor(
 
 
 def predict_shared(
-    head: SharedComponentHead | FrequencyAwareSharedComponentHead,
+    head: torch.nn.Module,
     pooled_features: torch.Tensor,
     target_mean: torch.Tensor,
     target_scale: torch.Tensor,
     device: torch.device,
+    candidate: str,
 ) -> torch.Tensor:
     with torch.inference_mode():
-        normalized = head.forward_pooled(pooled_features.to(device))
+        normalized = shared_head_forward(
+            head,
+            pooled_features.to(device),
+            candidate,
+        )
         return denormalize_components(normalized, target_mean, target_scale).cpu()
 
 
 def predict_waveforms(
-    predictor: WaveformComponentPredictor | FrequencyAwareWaveformComponentPredictor,
+    predictor: torch.nn.Module,
     examples: list[Example],
     target_mean: torch.Tensor,
     target_scale: torch.Tensor,
     device: torch.device,
+    cached_spectrograms: torch.Tensor | None = None,
 ) -> torch.Tensor:
     predictions = []
     predictor.eval()
     with torch.inference_mode():
-        for example in examples:
-            normalized = predictor(example.waveform.to(device))
+        for index, example in enumerate(examples):
+            if cached_spectrograms is None:
+                normalized = predictor(example.waveform.to(device))
+            else:
+                normalized = predictor.forward_spectrogram(
+                    cached_spectrograms[index : index + 1].to(device)
+                )
             predictions.append(
                 denormalize_components(normalized, target_mean, target_scale).cpu()[0]
             )
     return torch.stack(predictions)
+
+
+def cache_waveform_spectrograms(
+    predictor: torch.nn.Module,
+    examples: list[Example],
+) -> torch.Tensor:
+    spectrograms = []
+    with torch.inference_mode():
+        for index, example in enumerate(examples, start=1):
+            spectrograms.append(predictor.log_spectrogram(example.waveform).cpu()[0])
+            if index % 50 == 0 or index == len(examples):
+                print(f"waveform_spectrogram_rows={index}/{len(examples)}", flush=True)
+    shapes = {tuple(spectrogram.shape) for spectrogram in spectrograms}
+    if len(shapes) != 1:
+        raise ValueError(f"waveform spectrogram shapes differ: {sorted(shapes)}")
+    return torch.stack(spectrograms)
 
 
 def fit_component_calibrator(
@@ -619,7 +801,9 @@ def fit_component_calibrator(
     estimate_centered = estimate - estimate.mean(dim=0)
     target_centered = target - target.mean(dim=0)
     variance = estimate_centered.square().mean(dim=0).clamp_min(1e-8)
-    scale = (estimate_centered * target_centered).mean(dim=0) / variance
+    scale = (
+        (estimate_centered * target_centered).mean(dim=0) / variance
+    ).clamp_min(1e-4)
     bias = target.mean(dim=0) - scale * estimate.mean(dim=0)
     return ComponentAffineCalibrator(scale, bias).to(device)
 
@@ -659,6 +843,8 @@ def component_metrics(
     train_scale: torch.Tensor,
     include_delta_gate: bool = False,
     delta_spearman: dict[str, float] | None = None,
+    include_stability_gate: bool = False,
+    paired_stability_nmae: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     output: dict[str, Any] = {}
     reference_np = reference.numpy()
@@ -689,6 +875,12 @@ def component_metrics(
                 raise ValueError("delta metrics are required by this gate")
             gates["delta_spearman_ge_0_60"] = (
                 delta_spearman[name] >= DELTA_SPEARMAN_GATE
+            )
+        if include_stability_gate:
+            if paired_stability_nmae is None:
+                raise ValueError("paired stability metrics are required by this gate")
+            gates["paired_clean_target_stability_nmae_le_0_25"] = (
+                paired_stability_nmae[name] <= PAIRED_STABILITY_NMAE_GATE
             )
         output[name] = {
             "rows": len(truth),
@@ -732,6 +924,36 @@ def paired_delta_spearman(
     }
 
 
+def paired_clean_target_stability(
+    examples: list[Example],
+    predictions: torch.Tensor,
+    train_scale: torch.Tensor,
+) -> dict[str, float]:
+    holdout = [
+        (index, example)
+        for index, example in enumerate(examples)
+        if example.split == "surrogate_holdout"
+    ]
+    grouped: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
+    for index, example in holdout:
+        grouped.setdefault((example.speaker_id, example.view), {})[
+            example.condition
+        ] = predictions[index]
+    deltas = []
+    for conditions in grouped.values():
+        if set(conditions) != {"clean", "aug16k_phone"}:
+            raise ValueError("holdout clean/phone pairing failed")
+        deltas.append(
+            (conditions["aug16k_phone"] - conditions["clean"]).abs()
+            / train_scale.cpu().clamp_min(1e-8)
+        )
+    mean_delta = torch.stack(deltas).mean(dim=0)
+    return {
+        name: float(mean_delta[index])
+        for index, name in enumerate(AVQI_COMPONENT_NAMES)
+    }
+
+
 def route_metrics(
     examples: list[Example],
     predictions: torch.Tensor,
@@ -739,6 +961,7 @@ def route_metrics(
     train_scale: torch.Tensor,
     primary_filter: Callable[[Example], bool],
     include_delta_gate: bool,
+    include_stability_gate: bool = False,
 ) -> dict[str, Any]:
     indices = [
         index
@@ -747,12 +970,19 @@ def route_metrics(
     ]
     reference = torch.stack([getattr(examples[index], target_attribute) for index in indices])
     delta = paired_delta_spearman(examples, predictions) if include_delta_gate else None
+    stability = (
+        paired_clean_target_stability(examples, predictions, train_scale)
+        if include_stability_gate
+        else None
+    )
     primary = component_metrics(
         reference,
         predictions[indices],
         train_scale,
         include_delta_gate=include_delta_gate,
         delta_spearman=delta,
+        include_stability_gate=include_stability_gate,
+        paired_stability_nmae=stability,
     )
     slices: dict[str, Any] = {}
     for key, predicate in {
@@ -777,7 +1007,12 @@ def route_metrics(
                 predictions[selected],
                 train_scale,
             )
-    return {"primary": primary, "paired_delta_spearman": delta, "slices": slices}
+    return {
+        "primary": primary,
+        "paired_delta_spearman": delta,
+        "paired_clean_target_stability_nmae": stability,
+        "slices": slices,
+    }
 
 
 def perturbations(waveform: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -799,15 +1034,26 @@ def perturbations(waveform: torch.Tensor) -> dict[str, torch.Tensor]:
         spectrum * (frequencies <= 3_000.0), n=waveform.numel()
     )
     shift = int(0.1 * SAMPLE_RATE)
-    shifted = torch.nn.functional.pad(waveform[:-shift], (shift, 0))
+    # A circular shift tests time-position invariance without introducing a
+    # silent prefix, which previously confounded the anti-shortcut gate.
+    shifted = torch.roll(waveform, shifts=shift)
     time = torch.arange(waveform.numel(), device=waveform.device) / SAMPLE_RATE
+    amplitude_modulated = waveform * (
+        1.0 + 0.5 * torch.sin(2.0 * math.pi * 5.0 * time)
+    )
+    amplitude_modulated = (
+        amplitude_modulated
+        * rms
+        / amplitude_modulated.square().mean().sqrt().clamp_min(1e-8)
+    )
     tone = torch.sin(2.0 * math.pi * 150.0 * time)
     tone = tone * rms / tone.square().mean().sqrt().clamp_min(1e-8)
     return {
         "clean": waveform,
         "gain_minus12db": waveform * 0.25,
-        "time_shift_100ms": shifted,
+        "circular_shift_100ms": shifted,
         "noise_10db": waveform + noise,
+        "rms_matched_am_5hz": amplitude_modulated,
         "lowpass_3khz": lowpass,
         "rms_matched_150hz_tone": tone,
         "silence": torch.zeros_like(waveform),
@@ -848,27 +1094,57 @@ def anti_shortcut_report(
         gates: dict[str, bool] = {
             "silence_moves_away": values["silence"] >= 0.25,
             "tone_moves_away": values["rms_matched_150hz_tone"] >= 0.25,
+            "gain_nearly_invariant": values["gain_minus12db"] <= 0.10,
+            "circular_shift_nearly_invariant": (
+                values["circular_shift_100ms"] <= 0.10
+            ),
         }
         if expect_degradation_sensitivity:
-            gates.update(
-                {
-                    "noise_moves_away": values["noise_10db"] >= 0.10,
-                    "lowpass_moves_away": values["lowpass_3khz"] >= 0.10,
-                    "gain_less_than_noise": (
-                        values["gain_minus12db"] < values["noise_10db"]
-                    ),
-                    "shift_less_than_noise": (
-                        values["time_shift_100ms"] < values["noise_10db"]
-                    ),
-                }
-            )
-        else:
-            gates.update(
-                {
-                    "gain_nearly_invariant": values["gain_minus12db"] <= 0.10,
-                    "shift_nearly_invariant": values["time_shift_100ms"] <= 0.10,
-                }
-            )
+            family = COMPONENT_FAMILIES[component]
+            if family == "periodicity_noise":
+                gates.update(
+                    {
+                        "noise_moves_away": values["noise_10db"] >= 0.10,
+                        "gain_less_than_noise": (
+                            values["gain_minus12db"] < values["noise_10db"]
+                        ),
+                        "circular_shift_less_than_noise": (
+                            values["circular_shift_100ms"]
+                            < values["noise_10db"]
+                        ),
+                    }
+                )
+            elif family == "amplitude_modulation":
+                gates.update(
+                    {
+                        "amplitude_modulation_moves_away": (
+                            values["rms_matched_am_5hz"] >= 0.10
+                        ),
+                        "gain_less_than_amplitude_modulation": (
+                            values["gain_minus12db"]
+                            < values["rms_matched_am_5hz"]
+                        ),
+                        "circular_shift_less_than_amplitude_modulation": (
+                            values["circular_shift_100ms"]
+                            < values["rms_matched_am_5hz"]
+                        ),
+                    }
+                )
+            elif family == "spectral_shape":
+                gates.update(
+                    {
+                        "lowpass_moves_away": values["lowpass_3khz"] >= 0.10,
+                        "gain_less_than_lowpass": (
+                            values["gain_minus12db"] < values["lowpass_3khz"]
+                        ),
+                        "circular_shift_less_than_lowpass": (
+                            values["circular_shift_100ms"]
+                            < values["lowpass_3khz"]
+                        ),
+                    }
+                )
+            else:
+                raise ValueError(f"unknown component family: {family}")
         components[component] = {
             "mean_standardized_distance": values,
             "gates": gates,
@@ -888,21 +1164,107 @@ def gradient_norm(parameters: list[torch.nn.Parameter]) -> float:
     return float(torch.linalg.vector_norm(torch.cat(gradients)).cpu())
 
 
+def component_input_gradient_report(
+    input_tensor: torch.Tensor,
+    predict: Callable[[torch.Tensor], torch.Tensor],
+) -> dict[str, Any]:
+    report: dict[str, Any] = {}
+    for index, component in enumerate(AVQI_COMPONENT_NAMES):
+        current_input = input_tensor.detach().clone().requires_grad_(True)
+        prediction = predict(current_input)
+        gradient = torch.autograd.grad(
+            prediction[:, index].sum(),
+            current_input,
+            retain_graph=False,
+            create_graph=False,
+        )[0]
+        norm = float(torch.linalg.vector_norm(gradient.detach()).cpu())
+        finite = bool(torch.isfinite(gradient).all()) and math.isfinite(norm)
+        gates = {
+            "finite": finite,
+            "nonzero": norm > 1e-10,
+            "bounded": norm <= COMPONENT_INPUT_GRADIENT_MAX,
+        }
+        report[component] = {
+            "gradient_norm": norm,
+            "gates": gates,
+            "decision": "PASS" if all(gates.values()) else "FAIL",
+        }
+    return report
+
+
 def fixed_segment(waveform: torch.Tensor, samples: int = 48_000) -> torch.Tensor:
     if waveform.numel() >= samples:
         return waveform[:samples]
     return torch.nn.functional.pad(waveform, (0, samples - waveform.numel()))
 
 
+def deterministic_training_segments(
+    waveform: torch.Tensor,
+    samples: int = TRAINING_SEGMENT_SAMPLES,
+) -> list[torch.Tensor]:
+    """Return start/middle/end crops matching the generator training length."""
+    waveform = waveform.reshape(-1)
+    if waveform.numel() <= samples:
+        return [fixed_segment(waveform, samples)]
+    last_start = waveform.numel() - samples
+    starts = sorted({0, last_start // 2, last_start})
+    return [waveform[start : start + samples] for start in starts]
+
+
+def training_segment_transfer_report(
+    examples: list[Example],
+    predict: Callable[[torch.Tensor], torch.Tensor],
+    train_scale: torch.Tensor,
+    target_attribute: str,
+) -> dict[str, Any]:
+    """Check full-utterance exact targets on the 3 s deployment input domain."""
+    normalized_errors: list[torch.Tensor] = []
+    example_count = 0
+    segment_count = 0
+    for example in examples:
+        if example.split != "surrogate_holdout":
+            continue
+        target = getattr(example, target_attribute).cpu()
+        example_count += 1
+        for segment in deterministic_training_segments(example.waveform):
+            prediction = predict(segment)
+            normalized_errors.append(
+                (prediction - target).abs()
+                / train_scale.cpu().clamp_min(1e-8)
+            )
+            segment_count += 1
+    if not normalized_errors:
+        raise ValueError("no holdout examples for training-segment transfer gate")
+    mean_error = torch.stack(normalized_errors).mean(dim=0)
+    components: dict[str, Any] = {}
+    for index, component in enumerate(AVQI_COMPONENT_NAMES):
+        nmae = float(mean_error[index])
+        passed = math.isfinite(nmae) and nmae <= SEGMENT_TRANSFER_NMAE_GATE
+        components[component] = {
+            "normalized_mae": nmae,
+            "gate": SEGMENT_TRANSFER_NMAE_GATE,
+            "decision": "PASS" if passed else "FAIL",
+        }
+    return {
+        "training_segment_samples": TRAINING_SEGMENT_SAMPLES,
+        "crop_positions": ["start", "middle", "end"],
+        "example_count": example_count,
+        "segment_count": segment_count,
+        "target_attribute": target_attribute,
+        "components": components,
+    }
+
+
 def gradient_smokes(
     generator: SEMambapp,
     config: dict[str, Any],
-    selected_head: SharedComponentHead | FrequencyAwareSharedComponentHead,
+    selected_head: torch.nn.Module,
     selected_candidate: str,
     shared_mean: torch.Tensor,
     shared_scale: torch.Tensor,
     shared_calibrator: ComponentAffineCalibrator,
-    waveform_predictor: WaveformComponentPredictor | FrequencyAwareWaveformComponentPredictor,
+    waveform_predictor: torch.nn.Module,
     waveform_mean: torch.Tensor,
     waveform_scale: torch.Tensor,
     waveform_calibrator: ComponentAffineCalibrator,
@@ -922,9 +1284,15 @@ def gradient_smokes(
 
     generator.zero_grad(set_to_none=True)
     selected_head.zero_grad(set_to_none=True)
+    selected_head.eval()
+    enable_recurrent_input_gradients(selected_head)
     maps = shared_feature_maps(generator, waveform, config)
     shared_pooled = pool_shared_candidate(maps, selected_candidate)
-    shared_prediction = selected_head.forward_pooled(shared_pooled)
+    shared_prediction = shared_head_forward(
+        selected_head,
+        shared_pooled,
+        selected_candidate,
+    )
     shared_prediction = calibrated_normalized_prediction(
         shared_prediction,
         shared_mean,
@@ -961,9 +1329,36 @@ def gradient_smokes(
         for value in (shared_backbone_norm, shared_head_norm, shared_decoder_norm)
     )
 
+    freeze_module_for_input_gradient(selected_head)
+    generator.zero_grad(set_to_none=True)
+    with torch.no_grad():
+        shared_maps = shared_feature_maps(generator, waveform, config)
+        shared_head_input = pool_shared_candidate(
+            shared_maps,
+            selected_candidate,
+        )
+
+    def shared_component_prediction(head_input: torch.Tensor) -> torch.Tensor:
+        normalized = shared_head_forward(
+            selected_head,
+            head_input,
+            selected_candidate,
+        )
+        return calibrated_normalized_prediction(
+            normalized,
+            shared_mean,
+            shared_scale,
+            shared_calibrator,
+        )
+
+    shared_component_gradients = component_input_gradient_report(
+        shared_head_input,
+        shared_component_prediction,
+    )
+
     generator.zero_grad(set_to_none=True)
     waveform_predictor.zero_grad(set_to_none=True)
-    freeze_module(waveform_predictor)
+    freeze_module_for_input_gradient(waveform_predictor)
     enhanced = enhance_waveform(generator, waveform, config)
     normalized_prediction = waveform_predictor(enhanced)
     normalized_prediction = calibrated_normalized_prediction(
@@ -988,6 +1383,23 @@ def gradient_smokes(
         math.isfinite(value)
         for value in (independent_backbone_norm, independent_decoder_norm)
     )
+
+    with torch.no_grad():
+        independent_input = enhance_waveform(generator, waveform, config)
+
+    def independent_component_prediction(output_waveform: torch.Tensor) -> torch.Tensor:
+        normalized = waveform_predictor(output_waveform)
+        return calibrated_normalized_prediction(
+            normalized,
+            waveform_mean,
+            waveform_scale,
+            waveform_calibrator,
+        )
+
+    independent_component_gradients = component_input_gradient_report(
+        independent_input,
+        independent_component_prediction,
+    )
     return {
         "shared_dual_head": {
             "loss": float(shared_loss.detach().cpu()),
@@ -998,6 +1410,10 @@ def gradient_smokes(
                 "nonzero"
                 if selected_candidate == "enhanced_spectral"
                 else "zero"
+            ),
+            "component_input_gradients": shared_component_gradients,
+            "input_gradient_execution_mode": (
+                "eval_except_zero_dropout_recurrent_modules"
             ),
             "decision": (
                 "PASS"
@@ -1013,6 +1429,10 @@ def gradient_smokes(
             "backbone_gradient_norm": independent_backbone_norm,
             "decoder_gradient_norm": independent_decoder_norm,
             "predictor_gradients_absent": predictor_gradients_absent,
+            "component_input_gradients": independent_component_gradients,
+            "input_gradient_execution_mode": (
+                "eval_except_zero_dropout_recurrent_modules"
+            ),
             "decision": (
                 "PASS"
                 if independent_finite
@@ -1025,9 +1445,45 @@ def gradient_smokes(
     }
 
 
+def external_coverage_report(
+    eligible_rows: list[dict[str, str]],
+    usable_rows: list[dict[str, str]],
+    expected_rows: int,
+) -> dict[str, Any]:
+    if len(eligible_rows) != expected_rows:
+        raise ValueError(
+            f"expected {expected_rows} external rows, found {len(eligible_rows)}"
+        )
+    invalid_rows = [row for row in eligible_rows if row["scoring_status"] != "ok"]
+    return {
+        "total_rows": len(eligible_rows),
+        "usable_rows": len(usable_rows),
+        "invalid_rows": len(invalid_rows),
+        "fraction": len(usable_rows) / len(eligible_rows),
+        "gate": EXTERNAL_COVERAGE_GATE,
+        "decision": (
+            "PASS"
+            if len(usable_rows) / len(eligible_rows) >= EXTERNAL_COVERAGE_GATE
+            else "FAIL"
+        ),
+        "invalid_cases": [
+            {
+                "candidate": row.get("candidate", ""),
+                "condition": row.get("condition", ""),
+                "speaker_id": row.get("speaker_id", ""),
+                "view": row.get("view", ""),
+                "scoring_status": row.get("scoring_status", ""),
+                "error_type": row.get("error_type", ""),
+                "error_message": row.get("error_message", ""),
+            }
+            for row in invalid_rows
+        ],
+    }
+
+
 def external_stress_test(
     csv_path: Path,
-    predictor: WaveformComponentPredictor | FrequencyAwareWaveformComponentPredictor,
+    predictor: torch.nn.Module,
     target_mean: torch.Tensor,
     target_scale: torch.Tensor,
     calibrator: ComponentAffineCalibrator,
@@ -1036,16 +1492,23 @@ def external_stress_test(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     with csv_path.open(newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
-    selected = [
+    eligible = [
         row
         for row in rows
         if row["source_type"] == "enhanced"
         and row["candidate"] in EXTERNAL_CANDIDATES
         and row["condition"] in EXTERNAL_CONDITIONS
         and row["view"] in {"cs", "sv"}
-        and row["scoring_status"] == "ok"
     ]
-    speaker_ids = {row["speaker_id"] for row in selected}
+    selected = [row for row in eligible if row["scoring_status"] == "ok"]
+    expected_rows = (
+        EXPECTED_EXTERNAL_SPEAKERS
+        * 2
+        * len(EXTERNAL_CONDITIONS)
+        * len(EXTERNAL_CANDIDATES)
+    )
+    coverage = external_coverage_report(eligible, selected, expected_rows)
+    speaker_ids = {row["speaker_id"] for row in eligible}
     overlap = speaker_ids & forbidden_speaker_ids
     if overlap:
         raise ValueError(f"external speaker leakage: {sorted(overlap)}")
@@ -1053,16 +1516,6 @@ def external_stress_test(
         raise ValueError(
             f"expected {EXPECTED_EXTERNAL_SPEAKERS} external speakers, "
             f"found {len(speaker_ids)}"
-        )
-    expected_rows = (
-        EXPECTED_EXTERNAL_SPEAKERS
-        * 2
-        * len(EXTERNAL_CONDITIONS)
-        * len(EXTERNAL_CANDIDATES)
-    )
-    if len(selected) != expected_rows:
-        raise ValueError(
-            f"expected {expected_rows} external enhanced rows, found {len(selected)}"
         )
     predictions = []
     references = []
@@ -1099,26 +1552,127 @@ def external_stress_test(
                 print(f"external_rows={index}/{len(selected)}", flush=True)
     reference_tensor = torch.stack(references)
     prediction_tensor = torch.stack(predictions)
-    overall = component_metrics(reference_tensor, prediction_tensor, target_scale)
+    primary_indices = [
+        index
+        for index, row in enumerate(selected)
+        if row["candidate"] == EXTERNAL_PRIMARY_CANDIDATE
+    ]
+    expected_primary_rows = (
+        EXPECTED_EXTERNAL_SPEAKERS * 2 * len(EXTERNAL_CONDITIONS)
+    )
+    primary_eligible = [
+        row for row in eligible if row["candidate"] == EXTERNAL_PRIMARY_CANDIDATE
+    ]
+    primary_selected = [
+        row for row in selected if row["candidate"] == EXTERNAL_PRIMARY_CANDIDATE
+    ]
+    primary_coverage = external_coverage_report(
+        primary_eligible,
+        primary_selected,
+        expected_primary_rows,
+    )
+    if not primary_indices:
+        raise ValueError("no usable primary external rows")
+    primary = component_metrics(
+        reference_tensor[primary_indices],
+        prediction_tensor[primary_indices],
+        target_scale,
+    )
+    stress_overall = component_metrics(
+        reference_tensor,
+        prediction_tensor,
+        target_scale,
+    )
     slices: dict[str, Any] = {}
+    slice_coverage: dict[str, Any] = {}
     for field, values in {
-        "candidate": EXTERNAL_CANDIDATES,
         "condition": EXTERNAL_CONDITIONS,
         "view": ("cs", "sv"),
         "label": ("healthy", "patient"),
     }.items():
         for value in values:
-            indices = [i for i, row in enumerate(selected) if row[field] == value]
+            eligible_slice = [
+                row
+                for row in primary_eligible
+                if row[field] == value
+            ]
+            selected_slice = [
+                row
+                for row in primary_selected
+                if row[field] == value
+            ]
+            if eligible_slice:
+                slice_coverage[f"{field}={value}"] = external_coverage_report(
+                    eligible_slice,
+                    selected_slice,
+                    len(eligible_slice),
+                )
+            indices = [
+                i
+                for i, row in enumerate(selected)
+                if row["candidate"] == EXTERNAL_PRIMARY_CANDIDATE
+                and row[field] == value
+            ]
             if len(indices) >= 4:
                 slices[f"{field}={value}"] = component_metrics(
                     reference_tensor[indices], prediction_tensor[indices], target_scale
                 )
+    severe_sv_key = "view=sv&sample_group=pathological_severe"
+    severe_sv_eligible = [
+        row
+        for row in primary_eligible
+        if row["view"] == "sv"
+        and row["sample_group"] == "pathological_severe"
+    ]
+    severe_sv_selected = [
+        row
+        for row in primary_selected
+        if row["view"] == "sv"
+        and row["sample_group"] == "pathological_severe"
+    ]
+    if severe_sv_eligible:
+        slice_coverage[severe_sv_key] = external_coverage_report(
+            severe_sv_eligible,
+            severe_sv_selected,
+            len(severe_sv_eligible),
+        )
+    severe_sv_indices = [
+        index
+        for index, row in enumerate(selected)
+        if row["candidate"] == EXTERNAL_PRIMARY_CANDIDATE
+        and row["view"] == "sv"
+        and row["sample_group"] == "pathological_severe"
+    ]
+    if len(severe_sv_indices) >= 4:
+        slices[severe_sv_key] = component_metrics(
+            reference_tensor[severe_sv_indices],
+            prediction_tensor[severe_sv_indices],
+            target_scale,
+        )
+    stress_candidate_slices = {}
+    for candidate in EXTERNAL_CANDIDATES:
+        indices = [
+            index
+            for index, row in enumerate(selected)
+            if row["candidate"] == candidate
+        ]
+        stress_candidate_slices[candidate] = component_metrics(
+            reference_tensor[indices],
+            prediction_tensor[indices],
+            target_scale,
+        )
     report = {
         "rows": len(selected),
         "speaker_count": len(speaker_ids),
         "speaker_overlap_with_surrogate": 0,
-        "overall": overall,
+        "coverage": coverage,
+        "primary_coverage": primary_coverage,
+        "primary_candidate": EXTERNAL_PRIMARY_CANDIDATE,
+        "primary": primary,
         "slices": slices,
+        "slice_coverage": slice_coverage,
+        "stress_overall": stress_overall,
+        "stress_candidate_slices": stress_candidate_slices,
     }
     return report, output_rows
 
@@ -1127,7 +1681,7 @@ def shared_external_stress_test(
     csv_path: Path,
     generator: SEMambapp,
     config: dict[str, Any],
-    head: SharedComponentHead | FrequencyAwareSharedComponentHead,
+    head: torch.nn.Module,
     candidate: str,
     target_mean: torch.Tensor,
     target_scale: torch.Tensor,
@@ -1137,15 +1691,17 @@ def shared_external_stress_test(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     with csv_path.open(newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
-    selected = [
+    eligible = [
         row
         for row in rows
         if row["source_type"] == "input"
         and row["condition"] in EXTERNAL_CONDITIONS
         and row["view"] in {"cs", "sv"}
-        and row["scoring_status"] == "ok"
     ]
-    speaker_ids = {row["speaker_id"] for row in selected}
+    selected = [row for row in eligible if row["scoring_status"] == "ok"]
+    expected_rows = EXPECTED_EXTERNAL_SPEAKERS * 2 * len(EXTERNAL_CONDITIONS)
+    coverage = external_coverage_report(eligible, selected, expected_rows)
+    speaker_ids = {row["speaker_id"] for row in eligible}
     overlap = speaker_ids & forbidden_speaker_ids
     if overlap:
         raise ValueError(f"external speaker leakage: {sorted(overlap)}")
@@ -1154,11 +1710,8 @@ def shared_external_stress_test(
             f"expected {EXPECTED_EXTERNAL_SPEAKERS} external speakers, "
             f"found {len(speaker_ids)}"
         )
-    expected_rows = EXPECTED_EXTERNAL_SPEAKERS * 2 * len(EXTERNAL_CONDITIONS)
-    if len(selected) != expected_rows:
-        raise ValueError(
-            f"expected {expected_rows} shared external rows, found {len(selected)}"
-        )
+    if not selected:
+        raise ValueError("no usable shared external rows")
     predictions = []
     references = []
     output_rows: list[dict[str, Any]] = []
@@ -1170,7 +1723,7 @@ def shared_external_stress_test(
             waveform = load_waveform(path).to(device)
             maps = shared_feature_maps(generator, waveform, config)
             pooled = pool_shared_candidate(maps, candidate)
-            normalized = head.forward_pooled(pooled)
+            normalized = shared_head_forward(head, pooled, candidate)
             raw_prediction = denormalize_components(
                 normalized,
                 target_mean,
@@ -1198,14 +1751,23 @@ def shared_external_stress_test(
                 print(f"shared_external_rows={index}/{len(selected)}", flush=True)
     reference_tensor = torch.stack(references)
     prediction_tensor = torch.stack(predictions)
-    overall = component_metrics(reference_tensor, prediction_tensor, target_scale)
+    primary = component_metrics(reference_tensor, prediction_tensor, target_scale)
     slices: dict[str, Any] = {}
+    slice_coverage: dict[str, Any] = {}
     for field, values in {
         "condition": EXTERNAL_CONDITIONS,
         "view": ("cs", "sv"),
         "label": ("healthy", "patient"),
     }.items():
         for value in values:
+            eligible_slice = [row for row in eligible if row[field] == value]
+            selected_slice = [row for row in selected if row[field] == value]
+            if eligible_slice:
+                slice_coverage[f"{field}={value}"] = external_coverage_report(
+                    eligible_slice,
+                    selected_slice,
+                    len(eligible_slice),
+                )
             indices = [i for i, row in enumerate(selected) if row[field] == value]
             if len(indices) >= 4:
                 slices[f"{field}={value}"] = component_metrics(
@@ -1213,12 +1775,48 @@ def shared_external_stress_test(
                     prediction_tensor[indices],
                     target_scale,
                 )
+    severe_sv_key = "view=sv&sample_group=pathological_severe"
+    severe_sv_eligible = [
+        row
+        for row in eligible
+        if row["view"] == "sv"
+        and row["sample_group"] == "pathological_severe"
+    ]
+    severe_sv_selected = [
+        row
+        for row in selected
+        if row["view"] == "sv"
+        and row["sample_group"] == "pathological_severe"
+    ]
+    if severe_sv_eligible:
+        slice_coverage[severe_sv_key] = external_coverage_report(
+            severe_sv_eligible,
+            severe_sv_selected,
+            len(severe_sv_eligible),
+        )
+    severe_sv_indices = [
+        index
+        for index, row in enumerate(selected)
+        if row["view"] == "sv"
+        and row["sample_group"] == "pathological_severe"
+    ]
+    if len(severe_sv_indices) >= 4:
+        slices[severe_sv_key] = component_metrics(
+            reference_tensor[severe_sv_indices],
+            prediction_tensor[severe_sv_indices],
+            target_scale,
+        )
     report = {
         "rows": len(selected),
         "speaker_count": len(speaker_ids),
         "speaker_overlap_with_surrogate": 0,
-        "overall": overall,
+        "coverage": coverage,
+        "primary_coverage": coverage,
+        "primary_candidate": EXTERNAL_PRIMARY_CANDIDATE,
+        "primary": primary,
         "slices": slices,
+        "slice_coverage": slice_coverage,
+        "stress_overall": primary,
     }
     return report, output_rows
 
@@ -1262,19 +1860,42 @@ def component_passes(report: dict[str, Any], component: str) -> bool:
 
 
 def external_component_passes(report: dict[str, Any], component: str) -> bool:
-    if report["overall"][component]["decision"] != "PASS":
+    if report["primary_coverage"]["decision"] != "PASS":
+        return False
+    if report["primary"][component]["decision"] != "PASS":
         return False
     return all(
-        report["slices"][slice_name][component]["decision"] == "PASS"
+        slice_name in report["slices"]
+        and slice_name in report["slice_coverage"]
+        and report["slice_coverage"][slice_name]["decision"] == "PASS"
+        and report["slices"][slice_name][component]["decision"] == "PASS"
         for slice_name in EXTERNAL_REQUIRED_SLICES
     )
 
 
-def external_primary_gate_passed(report: dict[str, Any]) -> bool:
-    return all(
-        external_component_passes(report, component)
-        for component in PRIMARY_GATE_COMPONENTS
-    )
+def eligible_components(
+    metrics: dict[str, Any],
+    external_metrics: dict[str, Any],
+    anti_shortcut: dict[str, Any],
+    gradient: dict[str, Any],
+    segment_transfer: dict[str, Any],
+) -> list[str]:
+    if gradient["decision"] != "PASS":
+        return []
+    return [
+        component
+        for component in AVQI_COMPONENT_NAMES
+        if component_passes(metrics, component)
+        and external_component_passes(external_metrics, component)
+        and anti_shortcut["components"][component]["decision"] == "PASS"
+        and gradient["component_input_gradients"][component]["decision"] == "PASS"
+        and segment_transfer["components"][component]["decision"] == "PASS"
+    ]
+
+
+def route_has_minimum_component_coverage(components: list[str]) -> bool:
+    families = {COMPONENT_FAMILIES[component] for component in components}
+    return "periodicity_noise" in families and len(families) >= 2
 
 
 def route_decision(
@@ -1282,21 +1903,18 @@ def route_decision(
     external_metrics: dict[str, Any],
     anti_shortcut: dict[str, Any],
     gradient: dict[str, Any],
+    segment_transfer: dict[str, Any],
 ) -> str:
-    primary_metrics = all(
-        component_passes(metrics, name) for name in PRIMARY_GATE_COMPONENTS
-    )
-    primary_external = external_primary_gate_passed(external_metrics)
-    primary_anti = all(
-        anti_shortcut["components"][name]["decision"] == "PASS"
-        for name in PRIMARY_GATE_COMPONENTS
+    components = eligible_components(
+        metrics,
+        external_metrics,
+        anti_shortcut,
+        gradient,
+        segment_transfer,
     )
     return (
-        "ELIGIBLE_FOR_BOUNDED_PILOT"
-        if primary_metrics
-        and primary_external
-        and primary_anti
-        and gradient["decision"] == "PASS"
+        "ELIGIBLE_FOR_MULTISEED_CONFIRMATION"
+        if route_has_minimum_component_coverage(components)
         else "NO_GO_GENERATOR_TRAINING"
     )
 
@@ -1313,20 +1931,16 @@ def human_summary(report: dict[str, Any]) -> str:
         "",
         "## Minimal comparison",
         "",
-        "| Route | Chosen form | CPPS gate | HNR gate | External | Gradient | Decision |",
-        "|---|---|---:|---:|---:|---:|---|",
+        "| Route | Chosen form | Eligible components | Gradient | Decision |",
+        "|---|---|---|---:|---|",
         (
             f"| Shared dual head | {shared['selected_candidate']} | "
-            f"{shared['metrics']['primary']['cpps']['decision']} | "
-            f"{shared['metrics']['primary']['hnr']['decision']} | "
-            f"{shared['external_primary_gate_passed']} | "
+            f"{', '.join(shared['eligible_components']) or 'none'} | "
             f"{shared['gradient']['decision']} | {shared['decision']} |"
         ),
         (
             f"| Frozen independent predictor | {independent['selected_architecture']} | "
-            f"{independent['metrics']['primary']['cpps']['decision']} | "
-            f"{independent['metrics']['primary']['hnr']['decision']} | "
-            f"{independent['external_primary_gate_passed']} | "
+            f"{', '.join(independent['eligible_components']) or 'none'} | "
             f"{independent['gradient']['decision']} | {independent['decision']} |"
         ),
         "",
@@ -1342,6 +1956,37 @@ def human_summary(report: dict[str, Any]) -> str:
 
 def main() -> None:
     args = parse_args()
+    shared_candidates = comma_separated_values(args.shared_candidates)
+    waveform_architectures = comma_separated_values(args.waveform_architectures)
+    allowed_shared = {
+        "late_global",
+        "late_frequency",
+        "late_tfgrid",
+        "enhanced_spectral",
+    }
+    allowed_waveform = {
+        "global_stats",
+        "frequency_aware",
+        "compact_tfgrid",
+    }
+    if not set(shared_candidates) <= allowed_shared:
+        raise ValueError(
+            f"unknown shared candidates: {sorted(set(shared_candidates) - allowed_shared)}"
+        )
+    if not set(waveform_architectures) <= allowed_waveform:
+        raise ValueError(
+            "unknown waveform architectures: "
+            f"{sorted(set(waveform_architectures) - allowed_waveform)}"
+        )
+    if args.shared_head_epochs != args.waveform_epochs:
+        raise ValueError(
+            "matched architecture screen requires equal shared and waveform epochs"
+        )
+    if args.checkpoint.parent.name != EXTERNAL_PRIMARY_CANDIDATE:
+        raise ValueError(
+            "external comparison is locked to checkpoint directory "
+            f"{EXTERNAL_PRIMARY_CANDIDATE}, got {args.checkpoint.parent.name}"
+        )
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite output: {args.output_dir}")
     if args.checkpoint_dir.exists():
@@ -1368,40 +2013,78 @@ def main() -> None:
     args.output_dir.mkdir(parents=True)
     args.checkpoint_dir.mkdir(parents=True)
     contract = {
-        "schema_version": "avqi-component-backprop-v2",
-        "purpose": "diagnostic_only_no_generator_update",
+        "schema_version": "avqi-component-predictor-screen-v3",
+        "purpose": "single_seed_architecture_screen_no_generator_update",
         "components": list(AVQI_COMPONENT_NAMES),
         "component_loss_weights": dict(
             zip(AVQI_COMPONENT_NAMES, AVQI_COMPONENT_LOSS_WEIGHTS, strict=True)
         ),
-        "primary_gate_components": list(PRIMARY_GATE_COMPONENTS),
+        "periodicity_anchor_components": list(PRIMARY_GATE_COMPONENTS),
+        "minimum_route_coverage": (
+            "at least one CPPS/HNR component and one component from shimmer or LTAS"
+        ),
         "jitter_in_primary_task": False,
         "speaker_split": EXPECTED_SPLIT_SPEAKERS,
         "routes": {
             "shared_dual_head": {
-                "candidates": [
-                    "late_global",
-                    "late_frequency",
-                    "enhanced_spectral",
-                ],
+                "candidates": list(shared_candidates),
                 "target": "same-speaker clean exact Praat components",
             },
             "frozen_independent_predictor": {
-                "architectures": ["global_stats", "frequency_aware"],
+                "architectures": list(waveform_architectures),
                 "target": "input waveform exact Praat components",
             },
         },
         "calibration": {
-            "method": "per-component affine",
+            "method": "per-component positive-scale affine",
             "fit_split": "surrogate_calibration",
             "holdout_used_for_fit_or_selection": False,
+        },
+        "architecture_screen_seed": args.seed,
+        "matched_training_budget": {
+            "batch_size": SCREEN_BATCH_SIZE,
+            "learning_rate": SCREEN_LEARNING_RATE,
+            "gradient_clip_norm": SCREEN_GRADIENT_CLIP_NORM,
+            "shared_max_epochs": args.shared_head_epochs,
+            "independent_max_epochs": args.waveform_epochs,
+            "minimum_epochs": SCREEN_MIN_EPOCHS,
+            "early_stop_patience": args.patience,
+        },
+        "multiseed_confirmation": {
+            "seeds": [args.seed + 1, args.seed + 2, args.seed + 3],
+            "architecture_locked_from": "screen calibration loss only",
+            "component_rule": (
+                "full component gate in at least two of three locked seeds; "
+                "no post-hoc threshold changes"
+            ),
+            "generator_updates_allowed": False,
+        },
+        "matched_external_primary_candidate": EXTERNAL_PRIMARY_CANDIDATE,
+        "additional_external_stress_candidates": [
+            candidate
+            for candidate in EXTERNAL_CANDIDATES
+            if candidate != EXTERNAL_PRIMARY_CANDIDATE
+        ],
+        "anti_shortcut": {
+            "common_invariance": ["gain_minus12db", "circular_shift_100ms"],
+            "common_ood": ["silence", "rms_matched_150hz_tone"],
+            "periodicity_noise": "noise_10db",
+            "amplitude_modulation": "rms_matched_am_5hz",
+            "spectral_shape": "lowpass_3khz",
         },
         "gates": {
             "level_spearman": LEVEL_SPEARMAN_GATE,
             "paired_delta_spearman": DELTA_SPEARMAN_GATE,
+            "paired_clean_target_stability_nmae": PAIRED_STABILITY_NMAE_GATE,
             "normalized_mae": NORMALIZED_MAE_GATE,
             "calibration_slope": list(CALIBRATION_SLOPE_RANGE),
+            "component_input_gradient_norm": [1e-10, COMPONENT_INPUT_GRADIENT_MAX],
+            "external_coverage": EXTERNAL_COVERAGE_GATE,
             "required_external_slices": list(EXTERNAL_REQUIRED_SLICES),
+            "training_segment_samples": TRAINING_SEGMENT_SAMPLES,
+            "training_segment_transfer_normalized_mae": (
+                SEGMENT_TRANSFER_NMAE_GATE
+            ),
         },
         "source_sha256": {
             "label_bank": args.label_bank_sha256,
@@ -1417,31 +2100,38 @@ def main() -> None:
     }
     write_json(args.output_dir / "experiment_contract.json", contract)
 
-    examples = load_examples(args.label_bank)
+    examples, label_bank_coverage = load_examples(args.label_bank)
     config = load_config(args.config)
     generator = load_generator(config, args.checkpoint, device)
-    pooled = extract_shared_features(generator, examples, config, device)
+    pooled = extract_shared_features(
+        generator,
+        examples,
+        config,
+        device,
+        shared_candidates,
+    )
     torch.save(pooled, args.output_dir / "shared_features.pt")
 
-    shared_models: dict[
-        str, SharedComponentHead | FrequencyAwareSharedComponentHead
-    ] = {}
+    shared_models: dict[str, torch.nn.Module] = {}
     shared_training: dict[str, Any] = {}
     shared_raw_predictions: dict[str, torch.Tensor] = {}
     shared_predictions: dict[str, torch.Tensor] = {}
     shared_calibrators: dict[str, ComponentAffineCalibrator] = {}
     shared_stats: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    for candidate_index, candidate in enumerate(pooled):
+    for candidate in pooled:
         head, training, mean, scale = train_shared_head(
             pooled[candidate],
             examples,
             device,
             args.shared_head_epochs,
             args.patience,
-            args.seed + candidate_index,
+            args.seed,
             candidate,
         )
         shared_models[candidate] = head
+        training["parameter_count"] = sum(
+            parameter.numel() for parameter in head.parameters()
+        )
         shared_training[candidate] = training
         shared_stats[candidate] = (mean, scale)
         raw_predictions = predict_shared(
@@ -1450,6 +2140,7 @@ def main() -> None:
             mean,
             scale,
             device,
+            candidate,
         )
         calibrator = fit_component_calibrator(
             examples,
@@ -1471,6 +2162,9 @@ def main() -> None:
                 "calibration_scale": calibrator.scale.cpu(),
                 "calibration_bias": calibrator.bias.cpu(),
                 "candidate": candidate,
+                "parameter_count": sum(
+                    parameter.numel() for parameter in head.parameters()
+                ),
             },
             args.checkpoint_dir / f"shared_{candidate}_head.pt",
         )
@@ -1479,24 +2173,26 @@ def main() -> None:
         key=lambda name: shared_training[name]["best_calibration_loss"],
     )
 
-    waveform_models: dict[
-        str, WaveformComponentPredictor | FrequencyAwareWaveformComponentPredictor
-    ] = {}
+    waveform_models: dict[str, torch.nn.Module] = {}
     waveform_training: dict[str, Any] = {}
     waveform_raw_predictions: dict[str, torch.Tensor] = {}
     waveform_predictions: dict[str, torch.Tensor] = {}
     waveform_calibrators: dict[str, ComponentAffineCalibrator] = {}
     waveform_stats: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    for architecture_index, architecture in enumerate(
-        ("global_stats", "frequency_aware")
-    ):
+    spectrogram_template = WaveformComponentPredictor()
+    cached_spectrograms = cache_waveform_spectrograms(
+        spectrogram_template,
+        examples,
+    )
+    for architecture in waveform_architectures:
         predictor, training, mean, scale = train_waveform_predictor(
             examples,
             device,
             args.waveform_epochs,
             args.patience,
-            args.seed + architecture_index,
+            args.seed,
             architecture,
+            cached_spectrograms,
         )
         raw_predictions = predict_waveforms(
             predictor,
@@ -1504,6 +2200,7 @@ def main() -> None:
             mean,
             scale,
             device,
+            cached_spectrograms,
         )
         calibrator = fit_component_calibrator(
             examples,
@@ -1512,6 +2209,9 @@ def main() -> None:
             device,
         )
         waveform_models[architecture] = predictor
+        training["parameter_count"] = sum(
+            parameter.numel() for parameter in predictor.parameters()
+        )
         waveform_training[architecture] = training
         waveform_stats[architecture] = (mean, scale)
         waveform_raw_predictions[architecture] = raw_predictions
@@ -1529,6 +2229,9 @@ def main() -> None:
                 "calibration_bias": calibrator.bias.cpu(),
                 "components": AVQI_COMPONENT_NAMES,
                 "architecture": architecture,
+                "parameter_count": sum(
+                    parameter.numel() for parameter in predictor.parameters()
+                ),
             },
             args.checkpoint_dir / f"waveform_{architecture}_predictor.pt",
         )
@@ -1548,6 +2251,7 @@ def main() -> None:
                 scale,
                 primary_filter=lambda example: example.condition == "aug16k_phone",
                 include_delta_gate=False,
+                include_stability_gate=True,
             ),
             "calibrated": route_metrics(
                 examples,
@@ -1556,6 +2260,7 @@ def main() -> None:
                 scale,
                 primary_filter=lambda example: example.condition == "aug16k_phone",
                 include_delta_gate=False,
+                include_stability_gate=True,
             ),
         }
     waveform_architecture_reports: dict[str, Any] = {}
@@ -1602,7 +2307,11 @@ def main() -> None:
         with torch.inference_mode():
             maps = shared_feature_maps(generator, waveform.to(device), config)
             pooled_features = pool_shared_candidate(maps, selected_candidate)
-            normalized = selected_head.forward_pooled(pooled_features)
+            normalized = shared_head_forward(
+                selected_head,
+                pooled_features,
+                selected_candidate,
+            )
             raw = denormalize_components(
                 normalized,
                 shared_mean,
@@ -1637,6 +2346,18 @@ def main() -> None:
         examples,
         device,
     )
+    shared_segment_transfer = training_segment_transfer_report(
+        examples,
+        shared_predict,
+        shared_scale,
+        "clean_target",
+    )
+    independent_segment_transfer = training_segment_transfer_report(
+        examples,
+        independent_predict,
+        waveform_scale,
+        "own_target",
+    )
     surrogate_speaker_ids = {example.speaker_id for example in examples}
     independent_external, independent_external_rows = external_stress_test(
         args.external_exact_csv,
@@ -1669,46 +2390,66 @@ def main() -> None:
         shared_external,
         shared_anti,
         gradients["shared_dual_head"],
+        shared_segment_transfer,
     )
     independent_decision = route_decision(
         independent_metrics,
         independent_external,
         independent_anti,
         gradients["frozen_independent_predictor"],
+        independent_segment_transfer,
     )
-    shared_external_primary_pass = external_primary_gate_passed(shared_external)
-    independent_external_primary_pass = external_primary_gate_passed(
-        independent_external
+    shared_eligible_components = eligible_components(
+        shared_metrics,
+        shared_external,
+        shared_anti,
+        gradients["shared_dual_head"],
+        shared_segment_transfer,
+    )
+    independent_eligible_components = eligible_components(
+        independent_metrics,
+        independent_external,
+        independent_anti,
+        gradients["frozen_independent_predictor"],
+        independent_segment_transfer,
     )
     if (
-        independent_decision == "ELIGIBLE_FOR_BOUNDED_PILOT"
+        independent_decision == "ELIGIBLE_FOR_MULTISEED_CONFIRMATION"
         and shared_decision != independent_decision
     ):
         conclusion = (
-            "The frozen independent predictor passed the pre-registered "
-            "CPPS+HNR gates; the shared dual head remains ineligible."
+            "The frozen independent predictor met the six-component coverage "
+            "rule and advances to multi-seed confirmation; the shared dual "
+            "head remains ineligible."
         )
     elif (
-        shared_decision == "ELIGIBLE_FOR_BOUNDED_PILOT"
+        shared_decision == "ELIGIBLE_FOR_MULTISEED_CONFIRMATION"
         and independent_decision != shared_decision
     ):
         conclusion = (
-            "The shared dual head passed the pre-registered CPPS+HNR gates; "
-            "the independent predictor remains ineligible."
+            "The shared dual head met the six-component coverage rule and "
+            "advances to multi-seed confirmation; the independent predictor "
+            "remains ineligible."
         )
-    elif shared_decision == independent_decision == "ELIGIBLE_FOR_BOUNDED_PILOT":
+    elif (
+        shared_decision
+        == independent_decision
+        == "ELIGIBLE_FOR_MULTISEED_CONFIRMATION"
+    ):
         conclusion = (
-            "Both routes passed the CPPS+HNR diagnostic and may enter one "
-            "small, matched-budget generator comparison."
+            "Both routes met the six-component coverage rule and advance to "
+            "multi-seed confirmation; no generator training starts yet."
         )
     else:
         conclusion = (
-            "Neither route passed every CPPS+HNR accuracy, external-domain, "
-            "anti-shortcut, and gradient gate; generator training remains blocked."
+            "Neither route produced enough individually qualified AVQI "
+            "components across two concept families; generator training remains blocked."
         )
 
     report = {
-        "decision": "COMPLETED_DIAGNOSTIC_NO_GENERATOR_UPDATE",
+        "decision": "COMPLETED_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE",
+        "generator_optimizer_steps": 0,
+        "formal_pathology_training_submitted": False,
         "plain_language_conclusion": conclusion,
         "contract": contract,
         "routes": {
@@ -1723,9 +2464,10 @@ def main() -> None:
                     "bias": shared_calibrator.bias.detach().cpu().tolist(),
                 },
                 "anti_shortcut": shared_anti,
+                "training_segment_transfer": shared_segment_transfer,
                 "gradient": gradients["shared_dual_head"],
                 "external_clean_target_stress": shared_external,
-                "external_primary_gate_passed": shared_external_primary_pass,
+                "eligible_components": shared_eligible_components,
                 "decision": shared_decision,
                 "interpretation_limit": (
                     "head accuracy does not prove exact components of the final waveform improve"
@@ -1742,17 +2484,14 @@ def main() -> None:
                     "bias": waveform_calibrator.bias.detach().cpu().tolist(),
                 },
                 "anti_shortcut": independent_anti,
+                "training_segment_transfer": independent_segment_transfer,
                 "gradient": gradients["frozen_independent_predictor"],
                 "external_enhancement_stress": independent_external,
-                "external_primary_gate_passed": independent_external_primary_pass,
+                "eligible_components": independent_eligible_components,
                 "decision": independent_decision,
             },
         },
-        "coverage": {
-            "usable_rows": len(examples),
-            "expected_rows": EXPECTED_ROWS,
-            "fraction": len(examples) / EXPECTED_ROWS,
-        },
+        "coverage": label_bank_coverage,
         "runtime": {
             "device": str(device),
             "torch_version": torch.__version__,

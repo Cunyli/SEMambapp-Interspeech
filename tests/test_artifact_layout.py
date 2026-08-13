@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ def test_repository_documents_compact_artifact_contract() -> None:
 def test_avqi_diagnostic_separates_models_from_reports() -> None:
     source = read("scripts/evaluate_avqi_component_backprop.py")
     launcher = read("scripts/slurm_avqi_component_backprop_diagnostic.sh")
+    multiseed = read("scripts/summarize_avqi_component_multiseed.py")
     assert 'parser.add_argument("--checkpoint-dir"' in source
     assert 'parser.add_argument("--config-sha256"' in source
     assert 'parser.add_argument("--source-commit"' in source
@@ -38,6 +40,31 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '--source-commit "$SOURCE_COMMIT"' in launcher
     assert "export ROOT_DIR SOURCE_ROOT PYTHON_SCRIPT" in launcher
     assert "export RUN_ROOT LOG_DIR OUTPUT_DIR CHECKPOINT_DIR" in launcher
+    assert '"late_tfgrid"' in source
+    assert '"compact_tfgrid"' in source
+    assert "circular_shift_100ms" in source
+    assert "ELIGIBLE_FOR_MULTISEED_CONFIRMATION" in source
+    assert ").clamp_min(1e-4)" in source
+    assert "set_model_seed(seed)" in source
+    assert 'EXTERNAL_PRIMARY_CANDIDATE = "S3_500"' in source
+    assert '"view=sv&sample_group=pathological_severe"' in source
+    assert "args.checkpoint.parent.name != EXTERNAL_PRIMARY_CANDIDATE" in source
+    assert "component_input_gradient_report" in source
+    assert 'gradient["component_input_gradients"]' in source
+    assert "SCREEN_BATCH_SIZE = 16" in source
+    assert "SCREEN_GRADIENT_CLIP_NORM = 5.0" in source
+    assert '"gradient_clip_norm": SCREEN_GRADIENT_CLIP_NORM' in source
+    assert "equal shared and waveform epochs" in source
+    assert "EXPECTED_TOTAL_ROWS = 392" in source
+    assert "EXPECTED_USABLE_ROWS = 390" in source
+    assert "external_coverage_report" in source
+    assert "training_segment_transfer_report" in source
+    assert "TRAINING_SEGMENT_SAMPLES = 48_000" in source
+    assert 'segment_transfer["components"][component]["decision"]' in source
+    assert "CONSENSUS_PASS_COUNT = 2" in multiseed
+    assert '"generator_optimizer_steps": 0' in multiseed
+    assert '"source_report_sha256"' in multiseed
+    assert "refusing to overwrite output" in multiseed
 
 
 def test_avqi_diagnostic_entry_point_runs_from_repository_root() -> None:
@@ -53,3 +80,65 @@ def test_avqi_diagnostic_entry_point_runs_from_repository_root() -> None:
         text=True,
     )
     assert "Speaker-disjoint diagnostic" in result.stdout
+
+
+def test_avqi_multiseed_entry_point_runs_from_repository_root() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/summarize_avqi_component_multiseed.py",
+            "--help",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "three locked AVQI-component predictor confirmations" in result.stdout
+
+
+def test_avqi_multiseed_consensus_uses_two_of_three_complete_passes() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
+    )
+    confirmations = [
+        {
+            "routes": {
+                "shared_dual_head": {
+                    "selected_candidate": "late_tfgrid",
+                    "eligible_components": components,
+                },
+                "frozen_independent_predictor": {
+                    "selected_architecture": "compact_tfgrid",
+                    "eligible_components": ["cpps", "tilt"],
+                },
+            }
+        }
+        for components in (
+            ["cpps", "slope"],
+            ["cpps", "slope"],
+            ["hnr", "tilt"],
+        )
+    ]
+    route = namespace["route_consensus"](confirmations, "shared_dual_head")
+    assert route["consensus_components"] == ["cpps", "slope"]
+    assert route["decision"] == "RELIABLE"
+
+
+def test_avqi_multiseed_promotion_uses_common_components_for_two_routes() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
+    )
+    routes = {
+        "shared_dual_head": {
+            "decision": "RELIABLE",
+            "consensus_components": ["cpps", "slope", "tilt"],
+        },
+        "frozen_independent_predictor": {
+            "decision": "RELIABLE",
+            "consensus_components": ["cpps", "shimmer_db", "tilt"],
+        },
+    }
+    promotion = namespace["promotion_decision"](routes)
+    assert promotion["decision"] == "GO_MATCHED_DUAL_ROUTE_BACKPROP"
+    assert promotion["components"] == ["cpps", "tilt"]

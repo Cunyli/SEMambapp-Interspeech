@@ -7,6 +7,9 @@ import torch
 from model.avqi_components import (
     AVQI_COMPONENT_LOSS_WEIGHTS,
     AVQI_COMPONENT_NAMES,
+    CompactTFGridComponentEncoder,
+    CompactTFGridSharedComponentHead,
+    CompactTFGridWaveformComponentPredictor,
     ComponentAffineCalibrator,
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
@@ -15,6 +18,7 @@ from model.avqi_components import (
     avqi_v0301,
     denormalize_components,
     freeze_module,
+    freeze_module_for_input_gradient,
     pool_frequency_aware_shared_feature_map,
     standardized_component_loss,
 )
@@ -66,6 +70,30 @@ def test_frequency_aware_shared_head_retains_frequency_profile() -> None:
     assert float(feature_map.grad.norm()) > 0.0
 
 
+def test_compact_tfgrid_shared_head_has_feature_gradient() -> None:
+    feature_map = torch.randn(2, 48, 24, 33, requires_grad=True)
+    head = CompactTFGridSharedComponentHead()
+    prediction = head(feature_map)
+    assert prediction.shape == (2, 6)
+    prediction.square().mean().backward()
+    assert feature_map.grad is not None
+    assert torch.isfinite(feature_map.grad).all()
+    assert float(feature_map.grad.norm()) > 0.0
+
+
+def test_compact_tfgrid_encoder_rejects_invalid_shape_config() -> None:
+    for kwargs in (
+        {"input_channels": 1, "embedding": 22},
+        {"input_channels": 1, "num_blocks": 0},
+        {"input_channels": 1, "frequency_bins": 0},
+    ):
+        try:
+            CompactTFGridComponentEncoder(**kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f"invalid TF-GridNet config was accepted: {kwargs}")
+
+
 def test_waveform_predictor_supports_frozen_input_gradient() -> None:
     waveform = torch.randn(1, 4096, requires_grad=True)
     predictor = WaveformComponentPredictor()
@@ -90,6 +118,50 @@ def test_frequency_aware_waveform_predictor_supports_input_gradient() -> None:
     assert torch.isfinite(waveform.grad).all()
     assert float(waveform.grad.norm()) > 0.0
     assert all(parameter.grad is None for parameter in predictor.parameters())
+
+
+def test_waveform_predictors_accept_cached_spectrograms() -> None:
+    waveform = torch.randn(1, 4096)
+    for predictor in (
+        WaveformComponentPredictor(),
+        FrequencyAwareWaveformComponentPredictor(),
+        CompactTFGridWaveformComponentPredictor(),
+    ):
+        predictor.eval()
+        spectrogram = predictor.log_spectrogram(waveform)
+        direct = predictor(waveform)
+        cached = predictor.forward_spectrogram(spectrogram)
+        assert torch.allclose(direct, cached)
+
+
+def test_waveform_frontend_uses_fixed_time_grid_for_variable_lengths() -> None:
+    predictor = WaveformComponentPredictor()
+    short = predictor.log_spectrogram(torch.randn(1, 4096))
+    long = predictor.log_spectrogram(torch.randn(1, 8192))
+    assert short.shape == long.shape
+    assert short.shape[-1] == predictor.time_bins
+
+
+def test_compact_tfgrid_waveform_predictor_supports_frozen_input_gradient() -> None:
+    waveform = torch.randn(1, 4096, requires_grad=True)
+    predictor = CompactTFGridWaveformComponentPredictor()
+    predictor.eval()
+    with torch.no_grad():
+        eval_prediction = predictor(waveform.detach())
+    freeze_module_for_input_gradient(predictor)
+    prediction = predictor(waveform)
+    assert prediction.shape == (1, 6)
+    assert torch.allclose(prediction.detach(), eval_prediction)
+    prediction.square().mean().backward()
+    assert waveform.grad is not None
+    assert torch.isfinite(waveform.grad).all()
+    assert float(waveform.grad.norm()) > 0.0
+    assert all(parameter.grad is None for parameter in predictor.parameters())
+    assert all(
+        child.training
+        for child in predictor.modules()
+        if isinstance(child, torch.nn.LSTM)
+    )
 
 
 def test_component_affine_calibrator_is_fixed_and_differentiable() -> None:
