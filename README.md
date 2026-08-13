@@ -89,13 +89,14 @@ Jitter is diagnostic only, and the AVQI scalar itself is never minimized. The
 loss candidate is always the two-sided gap to the same speaker's clean
 pathological CS/SV target; “healthier-looking” output is not rewarded.
 
-Three backpropagation mechanisms were tested:
+Three backpropagation mechanisms were tested on the same speaker-disjoint
+train/calibration/holdout split:
 
 | Route | Gradient path | Forms tested |
 |---|---|---|
 | Shared dual head | SeMamba++ shared features -> six-parameter head | global, frequency-aware, and compact TF-GridNet heads |
 | Frozen predictor | enhanced waveform -> frozen predictor -> SeMamba++ | global CNN, frequency-aware CNN, compact TF-GridNet, and an 8-block pretrained full TF-GridNet |
-| Direct formulas | enhanced waveform -> differentiable component formulas -> SeMamba++ | soft CPPS/HNR, shimmer percent/dB, LTAS slope/tilt; no neural predictor |
+| Direct frozen estimator | enhanced waveform -> differentiable PyTorch formulas -> SeMamba++ | soft/hard Praat-aligned six-term estimators; no trainable predictor weights |
 
 The original bank had 390 usable CS/SV rows; only 278 belonged to training. We
 added 55 speaker-disjoint pairs (30 healthy, 25 pathological) with independent
@@ -103,26 +104,40 @@ noise and RIR draws at 10/15/20 dB. This increased usable training rows to 498
 (`+79%`) and the full bank to 610, while calibration, holdout, and the 24-speaker
 external panel remained unchanged.
 
-| Experiment | Main observation | Complete-gate result |
+| Experiment | Main observation | Result |
 |---|---|---|
 | Shared dual head after expansion | calibration loss `0.141 -> 0.119`; CPPS/HNR improved, but clean-target stability and required external slices still fail | `0/6`, no-go |
 | Frequency-aware CNN after expansion | best learned predictor, `0.083 -> 0.073`; HNR is strongest, but CS and severe-SV coverage is incomplete | `0/6`, no-go |
 | Pretrained full TF-GridNet | internal CPPS/HNR/tilt pass, but calibration loss is worse (`0.095`) and all six outputs are too sensitive to a 100 ms circular shift | `0/6`, no-go |
-| Direct differentiable formulas | LTAS slope passes internal, all `5/5` external slices, segment transfer, and gradient checks; it still fails the locked low-pass anti-shortcut gate, while no periodicity term qualifies | `0/6`, no-go |
+| Shared late TF-Grid head, final locked test | gradients reach the shared backbone, but prediction accuracy and required external slices fail in all three seeds | `0/6` in `3/3` seeds |
+| Direct frozen estimator v2 | the hard peak form beats the soft form on calibration (`0.0508` vs `0.1316`); HNR, Shimmer %, and LTAS tilt pass every component gate in all three seeds | `3/6`, bounded backprop candidate |
 
-Every component must independently pass accuracy, calibration, paired change or
-clean-target stability, coverage, anti-shortcut tests, three-second transfer,
-input gradients, and CS/SV, patient, severe-SV, and 10 dB external slices. The
-initial learned forms also failed after three locked seeds; the expanded, full
-TF-GridNet, and direct routes did not qualify for multi-seed promotion.
+Every component must independently pass accuracy, calibration, paired change,
+coverage, anti-shortcut tests, three-second transfer, finite input gradients,
+and the required CS/SV, patient, severe-SV, and 10 dB external slices.
 
-**Plain conclusion:** more data helped, but it did not make either learned route
-safe. A larger predictor did not beat the small frequency-aware CNN. The direct
-LTAS-slope formula is useful as a diagnostic, but it cannot be promoted alone.
-The current decision remains `NO_GO_AVQI_BACKPROP`: generator optimizer steps
-stayed at zero and no formal AVQI-T2 pathology training was submitted. This is
-a result about the tested implementations, not a proof that dual-head or frozen
-predictor ideas can never work.
+The promoted direct estimator was then tested by optimizing only a bounded
+waveform residual, with HNR and LTAS tilt matched to the same speaker's clean
+pathological target. Learning rate selection and final evaluation used disjoint
+speakers. Exact Praat, rather than the surrogate, made the final decision:
+
+| Exact result on 12 final CS/SV cases | Outcome |
+|---|---|
+| LTAS tilt | improved in `12/12`; median normalized gap reduction `0.123` — pass |
+| HNR | improved in `10/12`; median normalized gap reduction `0.009 < 0.02` — fail |
+| Waveform safety | worst residual about `-48.1 dB`, cosine `>0.99999`, no clipping, no median degradation of the other four terms — pass |
+
+**Plain conclusion:** the independent direct estimator is currently more
+reliable than the tested dual head or neural frozen predictors. Its LTAS-tilt
+gradient also survives exact Praat verification, but HNR moves too weakly at a
+safe perturbation level. The present decision is therefore
+`NO_GO_AVQI_T2_TRAINING`: generator optimizer steps remain zero. This is a
+bounded negative result for the current loss, not a claim that dual-head or
+independent-predictor research can never work.
+
+The locked receipts are on Triton under
+`runs/avqi_component_direct_praat_v2_voicedmask_consensus_20260814_01/` and
+`runs/avqi_direct_waveform_opt_balanced_hnr_tilt_final_20260814_01/`.
 
 ## Repository and retained artifacts
 
@@ -155,6 +170,7 @@ the audio itself is shared privately after checking the data-sharing boundary.
 - inference: `infer.py` or `TASK=infer scripts/slurm.sh`
 - AVQI diagnostic: `scripts/evaluate_avqi_component_backprop.py`
 - AVQI multi-seed consensus: `scripts/summarize_avqi_component_multiseed.py`
+- exact-scored waveform backprop check: `scripts/evaluate_direct_avqi_waveform_optimization.py`
 - local verification: `CUDA_VISIBLE_DEVICES='' python -m pytest -q`
 
 Python 3.10 is the reference environment. Slurm launchers require

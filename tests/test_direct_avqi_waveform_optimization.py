@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import csv
 import runpy
 from pathlib import Path
 
+import soundfile as sf
 import torch
 
 
@@ -67,3 +69,45 @@ def test_project_residual_enforces_rms_and_peak_limits() -> None:
     namespace["project_residual"](base, residual, maximum_rms)
     assert float(residual.square().mean().sqrt()) <= 0.010001
     assert float((base + residual).abs().max()) <= 0.999001
+
+
+def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
+    namespace = load_namespace()
+    components = namespace["AVQI_COMPONENT_NAMES"]
+    waveform_path = tmp_path / "source.wav"
+    sf.write(waveform_path, torch.zeros(1_600).numpy(), 16_000)
+    rows = []
+    for group, prefix in (
+        ("pathological_mild", "mild"),
+        ("pathological_severe", "severe"),
+    ):
+        for speaker_index in range(5):
+            for view in ("cs", "sv"):
+                row = {
+                    "candidate": "S3_500",
+                    "condition": "snr10",
+                    "view": view,
+                    "sample_group": group,
+                    "label": "patient",
+                    "scoring_status": "ok",
+                    "speaker_id": f"{prefix}_{speaker_index}",
+                    "cs_path": str(waveform_path),
+                    "sv_path": str(waveform_path),
+                }
+                for component_index, component in enumerate(components):
+                    row[f"clean_{component}"] = str(component_index)
+                    row[f"audio_{component}"] = str(component_index + 0.5)
+                rows.append(row)
+    csv_path = tmp_path / "exact.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    cases = namespace["load_cases"](csv_path, 2, 8, 1)
+    assert {case.speaker_id for case in cases} == {
+        "mild_1",
+        "mild_2",
+        "severe_1",
+        "severe_2",
+    }
