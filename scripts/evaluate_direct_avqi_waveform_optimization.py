@@ -113,6 +113,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def repository_head(path: Path) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def avqi_code_tree_sha256(root: Path) -> str:
     files = sorted(
         path
@@ -699,6 +709,8 @@ def main() -> None:
     args = parse_args()
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite output: {args.output_dir}")
+    if repository_head(REPO_ROOT) != args.source_commit:
+        raise ValueError("declared source commit differs from repository HEAD")
     if sha256_file(args.external_exact_csv) != args.external_exact_csv_sha256:
         raise ValueError("external exact CSV hash drift")
     if sha256_file(args.predictor_checkpoint) != args.predictor_checkpoint_sha256:
