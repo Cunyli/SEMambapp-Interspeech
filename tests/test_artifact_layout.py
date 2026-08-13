@@ -100,6 +100,8 @@ def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None
     assert 'CANDIDATE = "S3_500"' in source
     assert 'CONDITION = "snr10"' in source
     assert 'OPTIMIZED_COMPONENTS = ("hnr", "tilt")' in source
+    assert "SCREEN_COMPONENT_GRADIENT_NORMS" in source
+    assert "OPTIMIZATION_COMPONENT_WEIGHTS" in source
     assert "avqi_code_tree_sha256" in source
     assert 'parser.add_argument("--exact-python"' in source
     assert "AVQI_EXACT_JSON=" in source

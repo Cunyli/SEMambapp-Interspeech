@@ -47,6 +47,18 @@ VIEWS = ("cs", "sv")
 # still reported as a validated component, but is not co-weighted with HNR and
 # LTAS tilt in this two-term waveform diagnostic.
 OPTIMIZED_COMPONENTS = ("hnr", "tilt")
+# Fixed from the seed-20260814 component-input gradient report before waveform
+# optimization.  Inverse weighting prevents LTAS tilt (96.05) from drowning
+# HNR (0.81); these are not fitted to the exact waveform-optimization result.
+SCREEN_COMPONENT_GRADIENT_NORMS = {
+    "hnr": 0.8105605244636536,
+    "tilt": 96.05075073242188,
+}
+OPTIMIZATION_COMPONENT_WEIGHTS = {
+    component: min(SCREEN_COMPONENT_GRADIENT_NORMS.values())
+    / SCREEN_COMPONENT_GRADIENT_NORMS[component]
+    for component in OPTIMIZED_COMPONENTS
+}
 EXACT_IMPROVEMENT_FRACTION_GATE = 2.0 / 3.0
 SURROGATE_IMPROVEMENT_FRACTION_GATE = 0.75
 NORMALIZED_GAP_REDUCTION_GATE = 0.02
@@ -357,6 +369,9 @@ def optimize_waveform(
         [AVQI_COMPONENT_NAMES.index(name) for name in OPTIMIZED_COMPONENTS],
         device=base.device,
     )
+    component_weights = base.new_tensor(
+        [OPTIMIZATION_COMPONENT_WEIGHTS[name] for name in OPTIMIZED_COMPONENTS]
+    )
     base = base.reshape(1, -1)
     target = target.to(base.device).reshape(1, -1)
     base_rms = base.square().mean().sqrt().clamp_min(1e-6)
@@ -388,10 +403,14 @@ def optimize_waveform(
             prediction.index_select(-1, selected_indices)
             - target.index_select(-1, selected_indices)
         ) / target_scale.index_select(0, selected_indices).clamp_min(1e-8)
-        component_loss = F.smooth_l1_loss(
+        component_element_loss = F.smooth_l1_loss(
             normalized_gap,
             torch.zeros_like(normalized_gap),
+            reduction="none",
         )
+        component_loss = (
+            component_element_loss * component_weights.unsqueeze(0)
+        ).sum() / component_weights.sum()
         residual_power_ratio = residual.square().mean() / base_rms.square()
         residual_difference = residual[:, 1:] - residual[:, :-1]
         base_difference = base[:, 1:] - base[:, :-1]
@@ -846,6 +865,8 @@ def main() -> None:
             ),
             "expected_cases": args.expected_cases,
             "optimized_components": list(OPTIMIZED_COMPONENTS),
+            "screen_component_gradient_norms": SCREEN_COMPONENT_GRADIENT_NORMS,
+            "optimization_component_weights": OPTIMIZATION_COMPONENT_WEIGHTS,
             "steps": args.steps,
             "learning_rate_scale": args.learning_rate_scale,
             "fidelity_weight": args.fidelity_weight,
