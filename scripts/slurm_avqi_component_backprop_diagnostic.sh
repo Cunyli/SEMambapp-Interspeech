@@ -30,10 +30,12 @@ LABEL_BANK="${LABEL_BANK:-$ROOT_DIR/runs/tau_pathology_preservation_eval_phase2_
 CONFIG="${CONFIG:-$ROOT_DIR/runs/tau_s1_sv_threshold_ablation_20260719_01/configs/s_fidelity_m3_stage0500.yaml}"
 CHECKPOINT="${CHECKPOINT:-$ROOT_DIR/checkpoints/S3_500/ln_g_00000500.pth}"
 EXTERNAL_EXACT_CSV="${EXTERNAL_EXACT_CSV:-$ROOT_DIR/runs/tau_pathology_three_tracks_20260810_01/outputs/intensity_eval/exact_components_all.csv}"
+FULL_TFGRID_CHECKPOINT="${FULL_TFGRID_CHECKPOINT:-}"
 LABEL_BANK_SHA256="${LABEL_BANK_SHA256:?LABEL_BANK_SHA256 is required}"
 CONFIG_SHA256="${CONFIG_SHA256:?CONFIG_SHA256 is required}"
 CHECKPOINT_SHA256="${CHECKPOINT_SHA256:?CHECKPOINT_SHA256 is required}"
 EXTERNAL_EXACT_CSV_SHA256="${EXTERNAL_EXACT_CSV_SHA256:?EXTERNAL_EXACT_CSV_SHA256 is required}"
+FULL_TFGRID_CHECKPOINT_SHA256="${FULL_TFGRID_CHECKPOINT_SHA256:-}"
 
 if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
   echo "Refusing to run from a dirty source tree: $SOURCE_ROOT" >&2
@@ -52,7 +54,8 @@ export SEED EXPECTED_TRAIN_SPEAKERS EXPECTED_CALIBRATION_SPEAKERS
 export EXPECTED_HOLDOUT_SPEAKERS SHARED_CANDIDATES WAVEFORM_ARCHITECTURES
 export LABEL_BANK CONFIG CHECKPOINT EXTERNAL_EXACT_CSV
 export LABEL_BANK_SHA256 CONFIG_SHA256 CHECKPOINT_SHA256
-export EXTERNAL_EXACT_CSV_SHA256 SOURCE_COMMIT
+export EXTERNAL_EXACT_CSV_SHA256 FULL_TFGRID_CHECKPOINT
+export FULL_TFGRID_CHECKPOINT_SHA256 SOURCE_COMMIT
 
 mkdir -p "$LOG_DIR"
 
@@ -100,6 +103,18 @@ LIVE_LOG="$LOG_DIR/avqi_component_diagnostic_${SLURM_JOB_ID}.log"
 echo "event=start job=$SLURM_JOB_ID time=$(date -Is)" | tee -a "$LIVE_LOG"
 python -c 'import os, torch; print("torch", torch.__version__); print("cuda", torch.cuda.is_available()); print("device", torch.cuda.get_device_name(0)); print("CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES"))' | tee -a "$LIVE_LOG"
 
+FULL_TFGRID_ARGS=()
+if [[ -n "$FULL_TFGRID_CHECKPOINT" || -n "$FULL_TFGRID_CHECKPOINT_SHA256" ]]; then
+  if [[ -z "$FULL_TFGRID_CHECKPOINT" || -z "$FULL_TFGRID_CHECKPOINT_SHA256" ]]; then
+    echo "Both FULL_TFGRID_CHECKPOINT and its SHA256 are required" >&2
+    exit 2
+  fi
+  FULL_TFGRID_ARGS=(
+    --full-tfgrid-checkpoint "$FULL_TFGRID_CHECKPOINT"
+    --full-tfgrid-checkpoint-sha256 "$FULL_TFGRID_CHECKPOINT_SHA256"
+  )
+fi
+
 python "$PYTHON_SCRIPT" \
   --label-bank "$LABEL_BANK" \
   --label-bank-sha256 "$LABEL_BANK_SHA256" \
@@ -118,6 +133,7 @@ python "$PYTHON_SCRIPT" \
   --expected-holdout-speakers "$EXPECTED_HOLDOUT_SPEAKERS" \
   --shared-candidates "$SHARED_CANDIDATES" \
   --waveform-architectures "$WAVEFORM_ARCHITECTURES" \
+  "${FULL_TFGRID_ARGS[@]}" \
   --device cuda \
   2>&1 | tee -a "$LIVE_LOG"
 

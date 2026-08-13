@@ -42,6 +42,10 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert "export RUN_ROOT LOG_DIR OUTPUT_DIR CHECKPOINT_DIR" in launcher
     assert '"late_tfgrid"' in source
     assert '"compact_tfgrid"' in source
+    assert '"pretrained_full_tfgrid"' in source
+    assert 'parser.add_argument("--full-tfgrid-checkpoint"' in source
+    assert '--full-tfgrid-checkpoint "$FULL_TFGRID_CHECKPOINT"' in launcher
+    assert "FULL_TFGRID_CHECKPOINT_SHA256" in launcher
     assert "circular_shift_100ms" in source
     assert "ELIGIBLE_FOR_MULTISEED_CONFIRMATION" in source
     assert ").clamp_min(1e-4)" in source

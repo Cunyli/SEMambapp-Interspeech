@@ -13,6 +13,7 @@ from model.avqi_components import (
     ComponentAffineCalibrator,
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
+    PretrainedFullTFGridWaveformComponentPredictor,
     SharedComponentHead,
     WaveformComponentPredictor,
     avqi_v0301,
@@ -186,6 +187,105 @@ def test_compact_tfgrid_frozen_cuda_input_gradient() -> None:
         atol=1e-6,
         rtol=1e-5,
     )
+    prediction.square().mean().backward()
+    assert waveform.grad is not None
+    assert torch.isfinite(waveform.grad).all()
+    assert float(waveform.grad.norm()) > 0.0
+    assert all(parameter.grad is None for parameter in predictor.parameters())
+
+
+def test_pretrained_full_tfgrid_checkpoint_mapping_and_freeze(tmp_path) -> None:
+    config = {
+        "n_fft": 32,
+        "hop_length": 16,
+        "time_bins": 8,
+        "embedding": 16,
+        "lstm_hidden": 16,
+        "num_blocks": 2,
+        "adaptation_blocks": 1,
+        "attention_heads": 4,
+    }
+    source = PretrainedFullTFGridWaveformComponentPredictor(**config)
+    hybrid_state = {}
+    replacements = {
+        ".attention_norm.": ".attn_norm.",
+        ".frame_attention.": ".frame_attn.",
+        ".attention_ffn.": ".attn_ffn.",
+    }
+    for key, value in source.state_dict().items():
+        if not (key.startswith("encoder.") or key.startswith("blocks.")):
+            continue
+        hybrid_key = key
+        for current, original in replacements.items():
+            hybrid_key = hybrid_key.replace(current, original)
+        hybrid_state[f"discriminative.{hybrid_key}"] = value.clone()
+    hybrid_state["discriminative.mask_head.weight"] = torch.randn(2, 16, 1, 1)
+    hybrid_state["discriminative.mask_head.bias"] = torch.randn(2)
+    checkpoint_path = tmp_path / "hybrid_disc.ckpt"
+    torch.save(
+        {
+            "state_dict": hybrid_state,
+            "hybrid_stage": "disc",
+            "hybrid_architecture_config": {
+                "discriminative": {
+                    "num_blocks": 2,
+                    "embedding": 16,
+                    "lstm_hidden": 16,
+                    "attention_heads": 4,
+                    "dropout": 0.0,
+                }
+            },
+        },
+        checkpoint_path,
+    )
+
+    restored = PretrainedFullTFGridWaveformComponentPredictor(**config)
+    receipt = restored.load_hybrid_discriminative_checkpoint(checkpoint_path)
+    assert receipt["checkpoint_stage"] == "disc"
+    assert receipt["adaptation_blocks"] == 1
+    assert receipt["time_pool_position"] == "after_frozen_prefix"
+    assert receipt["loaded_tensor_count"] == len(hybrid_state) - 2
+    assert torch.equal(restored.encoder[0].weight, source.encoder[0].weight)
+    assert all(
+        not parameter.requires_grad
+        for parameter in restored.encoder.parameters()
+    )
+    assert all(
+        not parameter.requires_grad
+        for parameter in restored.blocks[0].parameters()
+    )
+    assert all(
+        parameter.requires_grad
+        for parameter in restored.blocks[1].parameters()
+    )
+    assert all(
+        parameter.requires_grad
+        for parameter in restored.regressor.parameters()
+    )
+
+
+def test_pretrained_full_tfgrid_supports_cached_and_input_gradient() -> None:
+    predictor = PretrainedFullTFGridWaveformComponentPredictor(
+        n_fft=32,
+        hop_length=16,
+        time_bins=8,
+        embedding=16,
+        lstm_hidden=16,
+        num_blocks=2,
+        adaptation_blocks=1,
+        attention_heads=4,
+    )
+    predictor.eval()
+    waveform = torch.randn(1, 512, requires_grad=True)
+    spectrogram = predictor.spectrogram_features(waveform)
+    prefix = predictor.encode_frozen_prefix(spectrogram)
+    direct = predictor.forward_spectrogram(spectrogram)
+    cached = predictor.forward_cached_prefix(prefix)
+    assert direct.shape == (1, 6)
+    assert torch.allclose(direct, cached)
+
+    freeze_module_for_input_gradient(predictor)
+    prediction = predictor(waveform)
     prediction.square().mean().backward()
     assert waveform.grad is not None
     assert torch.isfinite(waveform.grad).all()

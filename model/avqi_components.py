@@ -6,6 +6,9 @@ excluded because it is diagnostic-only in the verified Praat implementation.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -489,6 +492,206 @@ class CompactTFGridWaveformComponentPredictor(WaveformSpectrogramFrontend):
 
     def forward(self, waveform: torch.Tensor) -> torch.Tensor:
         return self.forward_spectrogram(self.log_spectrogram(waveform))
+
+
+class PretrainedFullTFGridWaveformComponentPredictor(nn.Module):
+    """Full Hybrid-UniSE TF-GridNet backbone adapted to component regression.
+
+    The encoder and all eight TF-GridNet blocks match the discriminative branch
+    used by Hybrid-UniSE. The pretrained prefix is frozen; the final block and
+    a grouped six-component regressor are adapted on the bounded TAU label bank.
+    """
+
+    def __init__(
+        self,
+        n_fft: int = 320,
+        hop_length: int = 160,
+        time_bins: int = 64,
+        embedding: int = 64,
+        lstm_hidden: int = 256,
+        num_blocks: int = 8,
+        adaptation_blocks: int = 1,
+        attention_heads: int = 4,
+    ):
+        super().__init__()
+        if n_fft < 2 or n_fft % 2 != 0:
+            raise ValueError("n_fft must be a positive even integer")
+        if hop_length < 1 or time_bins < 1:
+            raise ValueError("hop_length and time_bins must be positive")
+        if not 1 <= adaptation_blocks <= num_blocks:
+            raise ValueError(
+                "adaptation_blocks must be between one and num_blocks"
+            )
+        if embedding % attention_heads != 0:
+            raise ValueError(
+                f"attention_heads={attention_heads} must divide embedding={embedding}"
+            )
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.time_bins = time_bins
+        self.frequency_bins = n_fft // 2 + 1
+        self.prefix_blocks = num_blocks - adaptation_blocks
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, embedding, kernel_size=3, padding=1),
+            nn.PReLU(),
+        )
+        self.blocks = nn.ModuleList(
+            [
+                TFGridNetBlock(
+                    embedding,
+                    lstm_hidden,
+                    attention_heads=attention_heads,
+                    dropout=0.0,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.regressor = GroupedComponentRegressor(embedding * 2)
+        self.register_buffer(
+            "window",
+            torch.hann_window(n_fft, periodic=True),
+            persistent=False,
+        )
+        self.pretrained_backbone_receipt: dict[str, Any] | None = None
+
+    def spectrogram_features(self, waveform: torch.Tensor) -> torch.Tensor:
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        if waveform.ndim != 2:
+            raise ValueError(
+                f"expected a [batch, time] waveform, got {tuple(waveform.shape)}"
+            )
+        if waveform.shape[-1] < self.n_fft:
+            waveform = F.pad(waveform, (0, self.n_fft - waveform.shape[-1]))
+        peak = waveform.abs().amax(dim=-1, keepdim=True).clamp_min(1e-5)
+        normalized = waveform * (0.5 / peak)
+        spectrum = torch.stft(
+            normalized,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            win_length=self.n_fft,
+            window=self.window.to(dtype=waveform.dtype),
+            center=True,
+            pad_mode="reflect",
+            normalized=False,
+            return_complex=True,
+        )
+        features = torch.stack(
+            (spectrum.real, spectrum.imag, spectrum.abs()),
+            dim=1,
+        )
+        return features
+
+    def encode_frozen_prefix(self, spectrogram_features: torch.Tensor) -> torch.Tensor:
+        features = self.encoder(spectrogram_features)
+        for block in self.blocks[: self.prefix_blocks]:
+            features = block(features)
+        # Preserve the input grid through the frozen pretrained prefix. Pooling
+        # only here keeps the checkpoint's feature extraction intact while
+        # bounding the one trainable block and its cache.
+        return F.adaptive_avg_pool2d(
+            features,
+            (self.frequency_bins, self.time_bins),
+        )
+
+    def forward_cached_prefix(self, prefix_features: torch.Tensor) -> torch.Tensor:
+        features = prefix_features
+        for block in self.blocks[self.prefix_blocks :]:
+            features = block(features)
+        mean = features.mean(dim=(-2, -1))
+        std = features.std(dim=(-2, -1), unbiased=False)
+        return self.regressor(torch.cat((mean, std), dim=-1))
+
+    def forward_spectrogram(self, spectrogram_features: torch.Tensor) -> torch.Tensor:
+        prefix = self.encode_frozen_prefix(spectrogram_features)
+        return self.forward_cached_prefix(prefix)
+
+    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        return self.forward_spectrogram(self.spectrogram_features(waveform))
+
+    def freeze_pretrained_prefix(self) -> None:
+        for parameter in self.encoder.parameters():
+            parameter.requires_grad_(False)
+        for block in self.blocks[: self.prefix_blocks]:
+            for parameter in block.parameters():
+                parameter.requires_grad_(False)
+
+    def load_hybrid_discriminative_checkpoint(
+        self,
+        checkpoint_path: Path,
+    ) -> dict[str, Any]:
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        architecture = checkpoint.get("hybrid_architecture_config", {}).get(
+            "discriminative",
+            {},
+        )
+        expected_architecture = {
+            "num_blocks": len(self.blocks),
+            "embedding": self.encoder[0].out_channels,
+            "lstm_hidden": self.blocks[0].intra_rnn.hidden_size,
+            "attention_heads": self.blocks[0].frame_attention.num_heads,
+            "dropout": 0.0,
+        }
+        if architecture and architecture != expected_architecture:
+            raise ValueError(
+                "Hybrid-UniSE TF-GridNet architecture mismatch: "
+                f"{architecture} != {expected_architecture}"
+            )
+        mapped: dict[str, torch.Tensor] = {}
+        prefix = "discriminative."
+        replacements = {
+            ".attn_norm.": ".attention_norm.",
+            ".frame_attn.": ".frame_attention.",
+            ".attn_ffn.": ".attention_ffn.",
+        }
+        for raw_key, value in state_dict.items():
+            if not raw_key.startswith(prefix):
+                continue
+            key = raw_key[len(prefix) :]
+            if key.startswith("mask_head."):
+                continue
+            for source, target in replacements.items():
+                key = key.replace(source, target)
+            mapped[key] = value
+        expected_keys = {
+            key
+            for key in self.state_dict()
+            if key.startswith("encoder.") or key.startswith("blocks.")
+        }
+        if set(mapped) != expected_keys:
+            raise ValueError(
+                "pretrained TF-GridNet key mismatch: "
+                f"missing={sorted(expected_keys - set(mapped))[:10]}, "
+                f"extra={sorted(set(mapped) - expected_keys)[:10]}"
+            )
+        load_result = self.load_state_dict(mapped, strict=False)
+        unexpected = list(load_result.unexpected_keys)
+        missing = [
+            key
+            for key in load_result.missing_keys
+            if not key.startswith("regressor.")
+        ]
+        if missing or unexpected:
+            raise ValueError(
+                f"pretrained TF-GridNet load mismatch: {missing=} {unexpected=}"
+            )
+        receipt = {
+            "checkpoint": str(checkpoint_path.resolve()),
+            "checkpoint_stage": checkpoint.get("hybrid_stage"),
+            "architecture": expected_architecture,
+            "loaded_tensor_count": len(mapped),
+            "loaded_parameter_count": sum(value.numel() for value in mapped.values()),
+            "adaptation_blocks": len(self.blocks) - self.prefix_blocks,
+            "time_pool_position": "after_frozen_prefix",
+        }
+        self.pretrained_backbone_receipt = receipt
+        self.freeze_pretrained_prefix()
+        return receipt
 
 
 class ComponentAffineCalibrator(nn.Module):

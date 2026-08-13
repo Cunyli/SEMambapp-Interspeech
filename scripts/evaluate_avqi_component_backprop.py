@@ -44,6 +44,7 @@ from model.avqi_components import (
     ComponentAffineCalibrator,
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
+    PretrainedFullTFGridWaveformComponentPredictor,
     SharedComponentHead,
     WaveformComponentPredictor,
     denormalize_components,
@@ -86,6 +87,7 @@ SCREEN_BATCH_SIZE = 16
 SCREEN_LEARNING_RATE = 3e-4
 SCREEN_MIN_EPOCHS = 15
 SCREEN_GRADIENT_CLIP_NORM = 5.0
+FULL_TFGRID_BACKBONE_LEARNING_RATE = 3e-5
 TRAINING_SEGMENT_SAMPLES = 48_000
 SEGMENT_TRANSFER_NMAE_GATE = NORMALIZED_MAE_GATE
 EXTERNAL_CANDIDATES = ("B0_250", "S3_500", "S3_2000")
@@ -136,6 +138,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument("--external-exact-csv", type=Path, required=True)
     parser.add_argument("--external-exact-csv-sha256", required=True)
+    parser.add_argument("--full-tfgrid-checkpoint", type=Path)
+    parser.add_argument("--full-tfgrid-checkpoint-sha256")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
@@ -622,14 +626,17 @@ def train_waveform_predictor(
     seed: int,
     architecture: str,
     cached_spectrograms: torch.Tensor | None = None,
+    full_tfgrid_checkpoint: Path | None = None,
 ) -> tuple[
     torch.nn.Module,
     dict[str, Any],
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor | None,
 ]:
     set_model_seed(seed)
     target_mean, target_scale = target_stats(examples, "own_target", device)
+    pretrained_receipt: dict[str, Any] | None = None
     if architecture == "global_stats":
         predictor: torch.nn.Module = WaveformComponentPredictor()
     elif architecture == "frequency_aware":
@@ -638,14 +645,52 @@ def train_waveform_predictor(
         )
     elif architecture == "compact_tfgrid":
         predictor = CompactTFGridWaveformComponentPredictor()
+    elif architecture == "pretrained_full_tfgrid":
+        if full_tfgrid_checkpoint is None:
+            raise ValueError(
+                "pretrained_full_tfgrid requires --full-tfgrid-checkpoint"
+            )
+        predictor = PretrainedFullTFGridWaveformComponentPredictor()
+        pretrained_receipt = predictor.load_hybrid_discriminative_checkpoint(
+            full_tfgrid_checkpoint
+        )
     else:
         raise ValueError(f"unknown waveform architecture: {architecture}")
     predictor = predictor.to(device)
-    optimizer = torch.optim.AdamW(
-        predictor.parameters(),
-        lr=SCREEN_LEARNING_RATE,
-        weight_decay=1e-4,
-    )
+    cached_inputs = cached_spectrograms
+    if isinstance(predictor, PretrainedFullTFGridWaveformComponentPredictor):
+        if cached_spectrograms is not None:
+            raise ValueError(
+                "full TF-GridNet uses cached pretrained-prefix features, "
+                "not log-spectrogram cache"
+            )
+        cached_inputs = cache_full_tfgrid_prefix_features(
+            predictor,
+            examples,
+            device,
+        )
+        adapted_blocks = list(
+            predictor.blocks[predictor.prefix_blocks :].parameters()
+        )
+        optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": adapted_blocks,
+                    "lr": FULL_TFGRID_BACKBONE_LEARNING_RATE,
+                },
+                {
+                    "params": predictor.regressor.parameters(),
+                    "lr": SCREEN_LEARNING_RATE,
+                },
+            ],
+            weight_decay=1e-4,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            predictor.parameters(),
+            lr=SCREEN_LEARNING_RATE,
+            weight_decay=1e-4,
+        )
     train_indices = [
         index
         for index, example in enumerate(examples)
@@ -660,10 +705,11 @@ def train_waveform_predictor(
     history: list[dict[str, float]] = []
 
     def predict(current: torch.nn.Module, index: int) -> torch.Tensor:
-        if cached_spectrograms is None:
+        if cached_inputs is None:
             return current(examples[index].waveform.to(device))
-        return current.forward_spectrogram(
-            cached_spectrograms[index : index + 1].to(device)
+        return cached_waveform_prediction(
+            current,
+            cached_inputs[index : index + 1].to(device),
         )
 
     for epoch in range(1, epochs + 1):
@@ -673,7 +719,7 @@ def train_waveform_predictor(
         epoch_losses = []
         for start in range(0, len(order), SCREEN_BATCH_SIZE):
             batch = order[start : start + SCREEN_BATCH_SIZE]
-            if cached_spectrograms is None:
+            if cached_inputs is None:
                 batch_losses = []
                 for index in batch:
                     prediction = predict(predictor, index)
@@ -688,8 +734,9 @@ def train_waveform_predictor(
                     )
                 loss = torch.stack(batch_losses).mean()
             else:
-                prediction = predictor.forward_spectrogram(
-                    cached_spectrograms[batch].to(device)
+                prediction = cached_waveform_prediction(
+                    predictor,
+                    cached_inputs[batch].to(device),
                 )
                 target = torch.stack(
                     [examples[index].own_target for index in batch]
@@ -751,9 +798,16 @@ def train_waveform_predictor(
             "epochs_ran": len(history),
             "optimizer_steps": optimizer_steps,
             "history": history,
+            "pretrained_backbone": pretrained_receipt,
+            "trainable_parameter_count": sum(
+                parameter.numel()
+                for parameter in predictor.parameters()
+                if parameter.requires_grad
+            ),
         },
         target_mean,
         target_scale,
+        cached_inputs,
     )
 
 
@@ -780,17 +834,18 @@ def predict_waveforms(
     target_mean: torch.Tensor,
     target_scale: torch.Tensor,
     device: torch.device,
-    cached_spectrograms: torch.Tensor | None = None,
+    cached_inputs: torch.Tensor | None = None,
 ) -> torch.Tensor:
     predictions = []
     predictor.eval()
     with torch.inference_mode():
         for index, example in enumerate(examples):
-            if cached_spectrograms is None:
+            if cached_inputs is None:
                 normalized = predictor(example.waveform.to(device))
             else:
-                normalized = predictor.forward_spectrogram(
-                    cached_spectrograms[index : index + 1].to(device)
+                normalized = cached_waveform_prediction(
+                    predictor,
+                    cached_inputs[index : index + 1].to(device),
                 )
             predictions.append(
                 denormalize_components(normalized, target_mean, target_scale).cpu()[0]
@@ -812,6 +867,42 @@ def cache_waveform_spectrograms(
     if len(shapes) != 1:
         raise ValueError(f"waveform spectrogram shapes differ: {sorted(shapes)}")
     return torch.stack(spectrograms)
+
+
+def cache_full_tfgrid_prefix_features(
+    predictor: PretrainedFullTFGridWaveformComponentPredictor,
+    examples: list[Example],
+    device: torch.device,
+) -> torch.Tensor:
+    prefix_features = []
+    predictor.eval()
+    with torch.inference_mode():
+        for index, example in enumerate(examples, start=1):
+            spectrogram = predictor.spectrogram_features(
+                example.waveform.to(device)
+            )
+            prefix = predictor.encode_frozen_prefix(spectrogram)
+            prefix_features.append(prefix.cpu()[0])
+            if index % 25 == 0 or index == len(examples):
+                print(
+                    f"full_tfgrid_prefix_rows={index}/{len(examples)}",
+                    flush=True,
+                )
+    shapes = {tuple(features.shape) for features in prefix_features}
+    if len(shapes) != 1:
+        raise ValueError(
+            f"full TF-GridNet prefix shapes differ: {sorted(shapes)}"
+        )
+    return torch.stack(prefix_features)
+
+
+def cached_waveform_prediction(
+    predictor: torch.nn.Module,
+    cached_inputs: torch.Tensor,
+) -> torch.Tensor:
+    if isinstance(predictor, PretrainedFullTFGridWaveformComponentPredictor):
+        return predictor.forward_cached_prefix(cached_inputs)
+    return predictor.forward_spectrogram(cached_inputs)
 
 
 def fit_component_calibrator(
@@ -2008,6 +2099,7 @@ def main() -> None:
         "global_stats",
         "frequency_aware",
         "compact_tfgrid",
+        "pretrained_full_tfgrid",
     }
     if not set(shared_candidates) <= allowed_shared:
         raise ValueError(
@@ -2017,6 +2109,21 @@ def main() -> None:
         raise ValueError(
             "unknown waveform architectures: "
             f"{sorted(set(waveform_architectures) - allowed_waveform)}"
+        )
+    uses_full_tfgrid = "pretrained_full_tfgrid" in waveform_architectures
+    if uses_full_tfgrid and (
+        args.full_tfgrid_checkpoint is None
+        or args.full_tfgrid_checkpoint_sha256 is None
+    ):
+        raise ValueError(
+            "pretrained_full_tfgrid requires both checkpoint path and SHA256"
+        )
+    if not uses_full_tfgrid and (
+        args.full_tfgrid_checkpoint is not None
+        or args.full_tfgrid_checkpoint_sha256 is not None
+    ):
+        raise ValueError(
+            "full TF-GridNet checkpoint arguments require the matching architecture"
         )
     if args.shared_head_epochs != args.waveform_epochs:
         raise ValueError(
@@ -2041,6 +2148,11 @@ def main() -> None:
     ):
         if sha256_file(path) != expected_hash:
             raise ValueError(f"source hash mismatch: {path}")
+    if uses_full_tfgrid:
+        if sha256_file(args.full_tfgrid_checkpoint) != args.full_tfgrid_checkpoint_sha256:
+            raise ValueError(
+                f"source hash mismatch: {args.full_tfgrid_checkpoint}"
+            )
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
@@ -2073,6 +2185,22 @@ def main() -> None:
             "frozen_independent_predictor": {
                 "architectures": list(waveform_architectures),
                 "target": "input waveform exact Praat components",
+                "pretrained_full_tfgrid": (
+                    {
+                        "backbone": "Hybrid-UniSE discriminative branch",
+                        "depth": 8,
+                        "embedding": 64,
+                        "lstm_hidden": 256,
+                        "adaptation_blocks": 1,
+                        "time_pool_position": "after_frozen_prefix",
+                        "backbone_learning_rate": (
+                            FULL_TFGRID_BACKBONE_LEARNING_RATE
+                        ),
+                        "head_learning_rate": SCREEN_LEARNING_RATE,
+                    }
+                    if uses_full_tfgrid
+                    else None
+                ),
             },
         },
         "calibration": {
@@ -2131,6 +2259,9 @@ def main() -> None:
             "config": args.config_sha256,
             "generator_checkpoint": args.checkpoint_sha256,
             "external_exact_csv": args.external_exact_csv_sha256,
+            "full_tfgrid_checkpoint": (
+                args.full_tfgrid_checkpoint_sha256 if uses_full_tfgrid else None
+            ),
         },
         "source_commit": args.source_commit,
         "artifact_layout": {
@@ -2222,20 +2353,31 @@ def main() -> None:
     waveform_predictions: dict[str, torch.Tensor] = {}
     waveform_calibrators: dict[str, ComponentAffineCalibrator] = {}
     waveform_stats: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    spectrogram_template = WaveformComponentPredictor()
-    cached_spectrograms = cache_waveform_spectrograms(
-        spectrogram_template,
-        examples,
-    )
+    standard_architectures = set(waveform_architectures) - {
+        "pretrained_full_tfgrid"
+    }
+    cached_spectrograms: torch.Tensor | None = None
+    if standard_architectures:
+        spectrogram_template = WaveformComponentPredictor()
+        cached_spectrograms = cache_waveform_spectrograms(
+            spectrogram_template,
+            examples,
+        )
     for architecture in waveform_architectures:
-        predictor, training, mean, scale = train_waveform_predictor(
+        architecture_cache = (
+            None
+            if architecture == "pretrained_full_tfgrid"
+            else cached_spectrograms
+        )
+        predictor, training, mean, scale, trained_cache = train_waveform_predictor(
             examples,
             device,
             args.waveform_epochs,
             args.patience,
             args.seed,
             architecture,
-            cached_spectrograms,
+            architecture_cache,
+            args.full_tfgrid_checkpoint,
         )
         raw_predictions = predict_waveforms(
             predictor,
@@ -2243,7 +2385,7 @@ def main() -> None:
             mean,
             scale,
             device,
-            cached_spectrograms,
+            trained_cache,
         )
         calibrator = fit_component_calibrator(
             examples,
@@ -2275,6 +2417,10 @@ def main() -> None:
                 "parameter_count": sum(
                     parameter.numel() for parameter in predictor.parameters()
                 ),
+                "trainable_parameter_count": training[
+                    "trainable_parameter_count"
+                ],
+                "pretrained_backbone": training["pretrained_backbone"],
             },
             args.checkpoint_dir / f"waveform_{architecture}_predictor.pt",
         )
