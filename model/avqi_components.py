@@ -1252,6 +1252,26 @@ class PraatDifferentiableAVQIComponentEstimator(
         frame_cpps = 10.0 * (peak_value - baseline) / math.log(10.0)
         return self._weighted_mean(frame_cpps, selection_weight)
 
+    def _soft_voiced_ltas_input(self, prepared: torch.Tensor) -> torch.Tensor:
+        """Approximate Praat CS frame selection without a hard crop decision."""
+        frames = prepared.unfold(0, self.frame_length, self.hop_length)
+        _, _, selection_weight = self._selection_weights(frames)
+        kernel = prepared.new_ones(1, 1, self.frame_length)
+        numerator = F.conv_transpose1d(
+            selection_weight.reshape(1, 1, -1),
+            kernel,
+            stride=self.hop_length,
+        ).reshape(-1)
+        denominator = F.conv_transpose1d(
+            torch.ones_like(selection_weight).reshape(1, 1, -1),
+            kernel,
+            stride=self.hop_length,
+        ).reshape(-1)
+        mask = numerator / denominator.clamp_min(1.0)
+        if mask.numel() < prepared.numel():
+            mask = F.pad(mask, (0, prepared.numel() - mask.numel()))
+        return prepared * mask[: prepared.numel()].clamp_min(1e-5).sqrt()
+
     def _global_ltas(
         self,
         prepared: torch.Tensor,
@@ -1380,7 +1400,8 @@ class PraatDifferentiableAVQIComponentEstimator(
         shimmer_db = self._weighted_mean(shimmer_db_frames, shimmer_weight)
 
         cpps = self._cpps(prepared)
-        slope, tilt = self._global_ltas(prepared)
+        ltas_input = self._soft_voiced_ltas_input(prepared)
+        slope, tilt = self._global_ltas(ltas_input)
         components = torch.stack(
             (cpps, hnr, shimmer_percent, shimmer_db, slope, tilt)
         )
