@@ -101,6 +101,8 @@ def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None
     assert 'CONDITION = "snr10"' in source
     assert 'OPTIMIZED_COMPONENTS = ("hnr", "tilt")' in source
     assert "avqi_code_tree_sha256" in source
+    assert 'parser.add_argument("--exact-python"' in source
+    assert "AVQI_EXACT_JSON=" in source
     assert "project_residual" in source
     assert '"generator_optimizer_steps": 0' in source
     assert '"formal_pathology_training_submitted": False' in source

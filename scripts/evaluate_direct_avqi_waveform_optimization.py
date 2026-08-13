@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import random
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +91,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--predictor-checkpoint-sha256", required=True)
     parser.add_argument("--avqi-code-root", type=Path, required=True)
     parser.add_argument("--avqi-code-tree-sha256", required=True)
+    parser.add_argument("--exact-python", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--device", default="cuda")
@@ -432,19 +434,52 @@ def optimize_waveform(
     }
 
 
-def score_exact(path: Path, view: str) -> torch.Tensor:
-    # The exact scorer lives in a separate, hash-locked AVQI checkout and is
-    # loaded only for post-optimization scoring; model tests do not require it.
-    from avqi_code import run_avqi
+def score_exact(
+    path: Path,
+    view: str,
+    exact_python: Path,
+    avqi_code_root: Path,
+) -> torch.Tensor:
+    # PyTorch and Praat deliberately live in separate locked environments on
+    # Triton.  Keep the optimizer in semambapp and invoke exact Praat with the
+    # established AVQI interpreter instead of mixing their dependencies.
+    scorer = """
+import json
+import sys
 
-    metrics = run_avqi(
-        str(path),
-        str(path),
-        target_sr=SAMPLE_RATE,
-        speaking_type=view,
-        step_versions=STEP_VERSIONS,
-        remove_sv_silence_with_sox=False,
+sys.path.insert(0, sys.argv[1])
+from avqi_code import run_avqi
+
+step_versions = json.loads(sys.argv[4])
+metrics = run_avqi(
+    sys.argv[2],
+    sys.argv[2],
+    target_sr=16000,
+    speaking_type=sys.argv[3],
+    step_versions=step_versions,
+    remove_sv_silence_with_sox=False,
+)
+print("AVQI_EXACT_JSON=" + json.dumps(metrics, sort_keys=True))
+"""
+    result = subprocess.run(
+        [
+            str(exact_python),
+            "-c",
+            scorer,
+            str(avqi_code_root),
+            str(path),
+            view,
+            json.dumps(STEP_VERSIONS, sort_keys=True),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
     )
+    marker = "AVQI_EXACT_JSON="
+    lines = [line for line in result.stdout.splitlines() if line.startswith(marker)]
+    if len(lines) != 1:
+        raise RuntimeError(f"exact Praat emitted {len(lines)} JSON records")
+    metrics = json.loads(lines[0][len(marker) :])
     tensor = torch.tensor(
         [float(metrics[name]) for name in AVQI_COMPONENT_NAMES],
         dtype=torch.float32,
@@ -670,6 +705,8 @@ def main() -> None:
         raise ValueError("predictor checkpoint hash drift")
     if avqi_code_tree_sha256(args.avqi_code_root) != args.avqi_code_tree_sha256:
         raise ValueError("exact AVQI code tree hash drift")
+    if not args.exact_python.is_file():
+        raise FileNotFoundError(f"exact AVQI interpreter missing: {args.exact_python}")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
@@ -724,7 +761,12 @@ def main() -> None:
                 target_scale,
                 written.to(device).unsqueeze(0),
             ).cpu()[0]
-        exact_after = score_exact(output_path, case.view)
+        exact_after = score_exact(
+            output_path,
+            case.view,
+            args.exact_python,
+            args.avqi_code_root,
+        )
         surrogate_before = torch.tensor(optimization["surrogate_before"])
         target = case.target
         row: dict[str, Any] = {
@@ -810,6 +852,7 @@ def main() -> None:
                 "predictor_checkpoint": args.predictor_checkpoint_sha256,
                 "avqi_code_tree": args.avqi_code_tree_sha256,
             },
+            "exact_python": str(args.exact_python.resolve()),
         },
         "summary": summary,
         "trajectories": trajectories,
