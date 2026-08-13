@@ -45,7 +45,7 @@ def test_waveform_optimization_summary_passes_consistent_exact_moves() -> None:
     )
     assert summary["decision"] == "PASS_WAVEFORM_OPTIMIZATION"
     assert summary["component_gates"]["hnr"]["decision"] == "PASS"
-    assert summary["component_gates"]["shimmer_percent"]["decision"] == "PASS"
+    assert summary["component_gates"]["tilt"]["decision"] == "PASS"
     assert summary["safety"]["decision"] == "PASS"
 
 

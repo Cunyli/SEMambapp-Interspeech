@@ -42,7 +42,10 @@ CANDIDATE = "S3_500"
 CONDITION = "snr10"
 SEVERITY_GROUPS = ("pathological_mild", "pathological_severe")
 VIEWS = ("cs", "sv")
-OPTIMIZED_COMPONENTS = ("hnr", "shimmer_percent")
+# Keep the first backprop test minimal and family-diverse.  Shimmer percent is
+# still reported as a validated component, but is not co-weighted with HNR and
+# LTAS tilt in this two-term waveform diagnostic.
+OPTIMIZED_COMPONENTS = ("hnr", "tilt")
 EXACT_IMPROVEMENT_FRACTION_GATE = 2.0 / 3.0
 SURROGATE_IMPROVEMENT_FRACTION_GATE = 0.75
 NORMALIZED_GAP_REDUCTION_GATE = 0.02
