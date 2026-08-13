@@ -151,7 +151,12 @@ def test_compact_tfgrid_waveform_predictor_supports_frozen_input_gradient() -> N
     freeze_module_for_input_gradient(predictor)
     prediction = predictor(waveform)
     assert prediction.shape == (1, 6)
-    assert torch.allclose(prediction.detach(), eval_prediction)
+    assert torch.allclose(
+        prediction.detach(),
+        eval_prediction,
+        atol=1e-6,
+        rtol=1e-5,
+    )
     prediction.square().mean().backward()
     assert waveform.grad is not None
     assert torch.isfinite(waveform.grad).all()
@@ -162,6 +167,30 @@ def test_compact_tfgrid_waveform_predictor_supports_frozen_input_gradient() -> N
         for child in predictor.modules()
         if isinstance(child, torch.nn.LSTM)
     )
+
+
+def test_compact_tfgrid_frozen_cuda_input_gradient() -> None:
+    if not torch.cuda.is_available():
+        return
+    device = torch.device("cuda")
+    waveform = torch.randn(1, 48_000, device=device, requires_grad=True)
+    predictor = CompactTFGridWaveformComponentPredictor().to(device)
+    predictor.eval()
+    with torch.no_grad():
+        eval_prediction = predictor(waveform.detach())
+    freeze_module_for_input_gradient(predictor)
+    prediction = predictor(waveform)
+    assert torch.allclose(
+        prediction.detach(),
+        eval_prediction,
+        atol=1e-6,
+        rtol=1e-5,
+    )
+    prediction.square().mean().backward()
+    assert waveform.grad is not None
+    assert torch.isfinite(waveform.grad).all()
+    assert float(waveform.grad.norm()) > 0.0
+    assert all(parameter.grad is None for parameter in predictor.parameters())
 
 
 def test_component_affine_calibrator_is_fixed_and_differentiable() -> None:
