@@ -694,6 +694,282 @@ class PretrainedFullTFGridWaveformComponentPredictor(nn.Module):
         return receipt
 
 
+class DifferentiableAVQIComponentEstimator(nn.Module):
+    """Direct, exact-inspired approximations of all six AVQI components.
+
+    This route has no neural predictor. It uses soft voicing, autocorrelation,
+    cepstral prominence, adjacent-frame amplitude variation, and LTAS band
+    statistics. A positive affine map fitted on the training split only aligns
+    each approximation to the corresponding exact Praat label.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16_000,
+        frame_length: int = 640,
+        hop_length: int = 160,
+        n_fft: int = 1024,
+        max_frames: int = 256,
+        peak_temperature: float = 30.0,
+    ):
+        super().__init__()
+        if sample_rate <= 0:
+            raise ValueError("sample_rate must be positive")
+        if frame_length <= 1 or hop_length <= 0:
+            raise ValueError("frame and hop lengths must be positive")
+        if n_fft < frame_length:
+            raise ValueError("n_fft must be at least frame_length")
+        if max_frames < 2 or peak_temperature <= 0.0:
+            raise ValueError("max_frames and peak_temperature must be positive")
+        self.sample_rate = sample_rate
+        self.frame_length = frame_length
+        self.hop_length = hop_length
+        self.n_fft = n_fft
+        self.max_frames = max_frames
+        self.peak_temperature = peak_temperature
+        self.register_buffer(
+            "window",
+            torch.hann_window(frame_length, periodic=True),
+            persistent=False,
+        )
+        self.register_buffer(
+            "alignment_scale",
+            torch.ones(len(AVQI_COMPONENT_NAMES)),
+        )
+        self.register_buffer(
+            "alignment_bias",
+            torch.zeros(len(AVQI_COMPONENT_NAMES)),
+        )
+
+    @staticmethod
+    def _weighted_mean(
+        values: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        return (values * weights).sum() / weights.sum().clamp_min(1e-8)
+
+    def _prepare(self, waveform: torch.Tensor) -> torch.Tensor:
+        waveform = waveform.reshape(-1)
+        if waveform.numel() < self.frame_length + self.hop_length:
+            waveform = F.pad(
+                waveform,
+                (0, self.frame_length + self.hop_length - waveform.numel()),
+            )
+        waveform = waveform - waveform.mean()
+        spectrum = torch.fft.rfft(waveform)
+        frequencies = torch.fft.rfftfreq(
+            waveform.numel(),
+            d=1.0 / self.sample_rate,
+            device=waveform.device,
+        )
+        response = torch.sigmoid((frequencies - 34.0) / 4.0)
+        response = response * (frequencies > 0.0).to(response.dtype)
+        highpassed = torch.fft.irfft(
+            spectrum * response,
+            n=waveform.numel(),
+        )
+        rms = highpassed.square().mean().sqrt().clamp_min(1e-5)
+        return highpassed / rms
+
+    def _frames(self, waveform: torch.Tensor) -> torch.Tensor:
+        frames = waveform.unfold(
+            0,
+            self.frame_length,
+            self.hop_length,
+        )
+        if frames.shape[0] > self.max_frames:
+            indices = torch.linspace(
+                0,
+                frames.shape[0] - 1,
+                self.max_frames,
+                device=frames.device,
+            ).round().long()
+            frames = frames.index_select(0, indices)
+        return frames
+
+    def _raw_one(self, waveform: torch.Tensor) -> torch.Tensor:
+        prepared = self._prepare(waveform)
+        frames = self._frames(prepared)
+        centered = frames - frames.mean(dim=-1, keepdim=True)
+        frame_power = centered.square().mean(dim=-1).clamp_min(1e-10)
+        relative_power_db = 10.0 * torch.log10(
+            frame_power / frame_power.mean().clamp_min(1e-10)
+        )
+        power_weight = torch.sigmoid((relative_power_db + 5.0) / 2.0)
+        normalized_frames = centered / frame_power.sqrt().unsqueeze(-1)
+        adjacent_product = (
+            normalized_frames[:, 1:] * normalized_frames[:, :-1]
+        )
+        crossing_probability = torch.sigmoid(-20.0 * adjacent_product)
+        crossing_rate_hz = crossing_probability.mean(dim=-1) * self.sample_rate
+        zcr_weight = torch.sigmoid((3_000.0 - crossing_rate_hz) / 500.0)
+        voicing_weight = (power_weight * zcr_weight).clamp_min(1e-4)
+
+        windowed = centered * self.window.to(dtype=waveform.dtype)
+        spectrum = torch.fft.rfft(windowed, n=self.n_fft, dim=-1)
+        power = spectrum.abs().square().clamp_min(1e-12)
+        autocorrelation = torch.fft.irfft(power, n=self.n_fft, dim=-1)
+        autocorrelation = autocorrelation / autocorrelation[:, :1].clamp_min(1e-10)
+        lag_min = max(1, int(self.sample_rate / 600.0))
+        lag_max = min(
+            self.n_fft // 2 - 1,
+            int(self.sample_rate / 60.0),
+        )
+        pitch_correlation = autocorrelation[:, lag_min : lag_max + 1]
+        pitch_weights = torch.softmax(
+            self.peak_temperature * pitch_correlation,
+            dim=-1,
+        )
+        periodicity = (pitch_weights * pitch_correlation).sum(dim=-1)
+        periodicity = periodicity.clamp(1e-4, 0.9999)
+        frame_hnr = 10.0 * torch.log10(periodicity / (1.0 - periodicity))
+        hnr = self._weighted_mean(frame_hnr, voicing_weight)
+
+        cepstrum = torch.fft.irfft(torch.log(power), n=self.n_fft, dim=-1)
+        quefrency = torch.arange(
+            self.n_fft,
+            device=waveform.device,
+            dtype=waveform.dtype,
+        ) / float(self.sample_rate)
+        quefrency_mask = (quefrency >= 1.0 / 330.0) & (
+            quefrency <= 1.0 / 60.0
+        )
+        cepstral_band = cepstrum[:, quefrency_mask]
+        quefrency_band = quefrency[quefrency_mask]
+        cepstral_weights = torch.softmax(
+            self.peak_temperature * cepstral_band,
+            dim=-1,
+        )
+        soft_peak = (cepstral_weights * cepstral_band).sum(dim=-1)
+        soft_peak_quefrency = (
+            cepstral_weights * quefrency_band.unsqueeze(0)
+        ).sum(dim=-1)
+        centered_quefrency = quefrency_band - quefrency_band.mean()
+        baseline_slope = (
+            cepstral_band * centered_quefrency.unsqueeze(0)
+        ).sum(dim=-1) / centered_quefrency.square().sum().clamp_min(1e-10)
+        baseline_at_peak = cepstral_band.mean(dim=-1) + baseline_slope * (
+            soft_peak_quefrency - quefrency_band.mean()
+        )
+        frame_cpps = 10.0 * (soft_peak - baseline_at_peak) / torch.log(
+            waveform.new_tensor(10.0)
+        )
+        cpps = self._weighted_mean(frame_cpps, voicing_weight)
+
+        amplitude = frame_power.sqrt()
+        pair_weight = (
+            voicing_weight[1:] * voicing_weight[:-1]
+        ).sqrt().clamp_min(1e-4)
+        amplitude_first = amplitude[:-1]
+        amplitude_second = amplitude[1:]
+        shimmer_percent_frames = (
+            200.0
+            * (amplitude_second - amplitude_first).abs()
+            / (amplitude_second + amplitude_first).clamp_min(1e-8)
+        )
+        shimmer_db_frames = (
+            20.0
+            * torch.log10(
+                amplitude_second.clamp_min(1e-8)
+                / amplitude_first.clamp_min(1e-8)
+            ).abs()
+        )
+        shimmer_percent = self._weighted_mean(
+            shimmer_percent_frames,
+            pair_weight,
+        )
+        shimmer_db = self._weighted_mean(shimmer_db_frames, pair_weight)
+
+        mean_power = (
+            power * voicing_weight.unsqueeze(-1)
+        ).sum(dim=0) / voicing_weight.sum().clamp_min(1e-8)
+        frequencies = torch.fft.rfftfreq(
+            self.n_fft,
+            d=1.0 / self.sample_rate,
+            device=waveform.device,
+        )
+        low_band = (frequencies >= 34.0) & (frequencies < 1_000.0)
+        high_band = (frequencies >= 1_000.0) & (
+            frequencies <= self.sample_rate / 2.0
+        )
+        low_energy = mean_power[low_band].mean().clamp_min(1e-12)
+        high_energy = mean_power[high_band].mean().clamp_min(1e-12)
+        slope = 10.0 * torch.log10(high_energy / low_energy)
+
+        trend_band = (frequencies >= 34.0) & (
+            frequencies <= self.sample_rate / 2.0
+        )
+        trend_frequency = frequencies[trend_band] / (self.sample_rate / 2.0)
+        trend_power_db = 10.0 * torch.log10(mean_power[trend_band].clamp_min(1e-12))
+        centered_frequency = trend_frequency - trend_frequency.mean()
+        trend_slope = (
+            centered_frequency
+            * (trend_power_db - trend_power_db.mean())
+        ).sum() / centered_frequency.square().sum().clamp_min(1e-10)
+        trend_line_db = trend_power_db.mean() + trend_slope * centered_frequency
+        trend_linear = torch.pow(
+            waveform.new_tensor(10.0),
+            trend_line_db.clamp(-120.0, 120.0) / 10.0,
+        )
+        trend_boundary = 1_000.0 / (self.sample_rate / 2.0)
+        trend_low = trend_linear[trend_frequency < trend_boundary]
+        trend_high = trend_linear[trend_frequency >= trend_boundary]
+        tilt = 10.0 * torch.log10(
+            trend_high.mean().clamp_min(1e-12)
+            / trend_low.mean().clamp_min(1e-12)
+        )
+        components = torch.stack(
+            (cpps, hnr, shimmer_percent, shimmer_db, slope, tilt)
+        )
+        if not torch.isfinite(components).all():
+            raise ValueError("non-finite differentiable AVQI components")
+        return components
+
+    def raw_components(self, waveform: torch.Tensor) -> torch.Tensor:
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        if waveform.ndim != 2:
+            raise ValueError(
+                f"expected a [batch, time] waveform, got {tuple(waveform.shape)}"
+            )
+        return torch.stack([self._raw_one(row) for row in waveform])
+
+    def fit_alignment(
+        self,
+        raw_features: torch.Tensor,
+        raw_targets: torch.Tensor,
+        target_mean: torch.Tensor,
+        target_scale: torch.Tensor,
+    ) -> dict[str, list[float]]:
+        if raw_features.shape != raw_targets.shape:
+            raise ValueError(
+                f"feature and target shapes differ: {raw_features.shape} != "
+                f"{raw_targets.shape}"
+            )
+        normalized_target = (raw_targets - target_mean) / target_scale.clamp_min(1e-8)
+        centered_features = raw_features - raw_features.mean(dim=0)
+        centered_targets = normalized_target - normalized_target.mean(dim=0)
+        variance = centered_features.square().mean(dim=0).clamp_min(1e-8)
+        scale = (
+            (centered_features * centered_targets).mean(dim=0) / variance
+        ).clamp_min(1e-4)
+        bias = normalized_target.mean(dim=0) - scale * raw_features.mean(dim=0)
+        if not torch.isfinite(scale).all() or not torch.isfinite(bias).all():
+            raise ValueError("non-finite direct-component alignment")
+        self.alignment_scale.copy_(scale.detach())
+        self.alignment_bias.copy_(bias.detach())
+        return {
+            "scale": scale.detach().cpu().tolist(),
+            "bias": bias.detach().cpu().tolist(),
+        }
+
+    def forward_proxy_features(self, raw_features: torch.Tensor) -> torch.Tensor:
+        return raw_features * self.alignment_scale + self.alignment_bias
+
+    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        return self.forward_proxy_features(self.raw_components(waveform))
+
+
 class ComponentAffineCalibrator(nn.Module):
     """A fixed per-component affine calibration fitted outside this module."""
 

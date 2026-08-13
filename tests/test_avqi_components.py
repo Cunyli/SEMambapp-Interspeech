@@ -11,6 +11,7 @@ from model.avqi_components import (
     CompactTFGridSharedComponentHead,
     CompactTFGridWaveformComponentPredictor,
     ComponentAffineCalibrator,
+    DifferentiableAVQIComponentEstimator,
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
     PretrainedFullTFGridWaveformComponentPredictor,
@@ -291,6 +292,71 @@ def test_pretrained_full_tfgrid_supports_cached_and_input_gradient() -> None:
     assert torch.isfinite(waveform.grad).all()
     assert float(waveform.grad.norm()) > 0.0
     assert all(parameter.grad is None for parameter in predictor.parameters())
+
+
+def test_direct_exact_inspired_components_are_invariant_and_sensitive() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    carrier = torch.sin(2.0 * math.pi * 170.0 * time)
+    waveform = carrier * (
+        1.0 + 0.1 * torch.sin(2.0 * math.pi * 3.0 * time)
+    )
+    estimator = DifferentiableAVQIComponentEstimator(max_frames=64)
+    clean = estimator.raw_components(waveform)[0]
+    gained = estimator.raw_components(waveform * 0.25)[0]
+    modulated = estimator.raw_components(
+        carrier * (1.0 + 0.5 * torch.sin(2.0 * math.pi * 5.0 * time))
+    )[0]
+    noisy = estimator.raw_components(
+        waveform + 0.35 * torch.randn_like(waveform)
+    )[0]
+    spectrum = torch.fft.rfft(waveform)
+    frequencies = torch.fft.rfftfreq(waveform.numel(), d=1.0 / sample_rate)
+    lowpassed = torch.fft.irfft(
+        spectrum * (frequencies <= 1_000.0),
+        n=waveform.numel(),
+    )
+    lowpass_components = estimator.raw_components(lowpassed)[0]
+
+    assert torch.allclose(clean, gained, atol=2e-4, rtol=2e-4)
+    assert abs(float(noisy[1] - clean[1])) > 0.1
+    assert abs(float(modulated[2] - clean[2])) > 0.1
+    assert abs(float(lowpass_components[4] - clean[4])) > 0.1
+
+
+def test_direct_exact_inspired_alignment_and_input_gradient() -> None:
+    estimator = DifferentiableAVQIComponentEstimator(max_frames=32)
+    raw = torch.tensor(
+        [
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            [3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        ]
+    )
+    target_mean = torch.arange(6, dtype=torch.float32)
+    target_scale = torch.ones(6)
+    targets = raw * 2.0 + target_mean
+    receipt = estimator.fit_alignment(
+        raw,
+        targets,
+        target_mean,
+        target_scale,
+    )
+    assert all(value > 0.0 for value in receipt["scale"])
+    assert torch.allclose(
+        estimator.forward_proxy_features(raw),
+        (targets - target_mean) / target_scale,
+        atol=1e-6,
+    )
+
+    waveform = torch.randn(1, 8_000, requires_grad=True)
+    prediction = estimator(waveform)
+    assert prediction.shape == (1, 6)
+    prediction.square().mean().backward()
+    assert waveform.grad is not None
+    assert torch.isfinite(waveform.grad).all()
+    assert float(waveform.grad.norm()) > 0.0
+    assert not list(estimator.parameters())
 
 
 def test_component_affine_calibrator_is_fixed_and_differentiable() -> None:

@@ -42,6 +42,7 @@ from model.avqi_components import (
     CompactTFGridSharedComponentHead,
     CompactTFGridWaveformComponentPredictor,
     ComponentAffineCalibrator,
+    DifferentiableAVQIComponentEstimator,
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
     PretrainedFullTFGridWaveformComponentPredictor,
@@ -654,9 +655,66 @@ def train_waveform_predictor(
         pretrained_receipt = predictor.load_hybrid_discriminative_checkpoint(
             full_tfgrid_checkpoint
         )
+    elif architecture == "direct_exact_inspired":
+        predictor = DifferentiableAVQIComponentEstimator()
     else:
         raise ValueError(f"unknown waveform architecture: {architecture}")
     predictor = predictor.to(device)
+    if isinstance(predictor, DifferentiableAVQIComponentEstimator):
+        if cached_spectrograms is not None:
+            raise ValueError(
+                "direct exact-inspired estimator uses cached formula outputs, "
+                "not log-spectrogram cache"
+            )
+        cached_inputs = cache_direct_component_features(
+            predictor,
+            examples,
+            device,
+        )
+        train_indices = [
+            index
+            for index, example in enumerate(examples)
+            if example.split == "surrogate_train"
+        ]
+        raw_targets = torch.stack(
+            [examples[index].own_target for index in train_indices]
+        ).to(device)
+        alignment = predictor.fit_alignment(
+            cached_inputs[train_indices].to(device),
+            raw_targets,
+            target_mean,
+            target_scale,
+        )
+
+        def direct_predict(current: torch.nn.Module, index: int) -> torch.Tensor:
+            return current.forward_proxy_features(
+                cached_inputs[index : index + 1].to(device)
+            )
+
+        value = calibration_loss(
+            predictor,
+            direct_predict,
+            examples,
+            "own_target",
+            target_mean,
+            target_scale,
+        )
+        return (
+            predictor,
+            {
+                "best_epoch": 0,
+                "best_calibration_loss": value,
+                "epochs_ran": 0,
+                "optimizer_steps": 0,
+                "history": [],
+                "pretrained_backbone": None,
+                "direct_alignment": alignment,
+                "trainable_parameter_count": 0,
+            },
+            target_mean,
+            target_scale,
+            cached_inputs,
+        )
     cached_inputs = cached_spectrograms
     if isinstance(predictor, PretrainedFullTFGridWaveformComponentPredictor):
         if cached_spectrograms is not None:
@@ -896,12 +954,33 @@ def cache_full_tfgrid_prefix_features(
     return torch.stack(prefix_features)
 
 
+def cache_direct_component_features(
+    predictor: DifferentiableAVQIComponentEstimator,
+    examples: list[Example],
+    device: torch.device,
+) -> torch.Tensor:
+    components = []
+    predictor.eval()
+    with torch.inference_mode():
+        for index, example in enumerate(examples, start=1):
+            raw = predictor.raw_components(example.waveform.to(device))
+            components.append(raw.cpu()[0])
+            if index % 50 == 0 or index == len(examples):
+                print(
+                    f"direct_component_rows={index}/{len(examples)}",
+                    flush=True,
+                )
+    return torch.stack(components)
+
+
 def cached_waveform_prediction(
     predictor: torch.nn.Module,
     cached_inputs: torch.Tensor,
 ) -> torch.Tensor:
     if isinstance(predictor, PretrainedFullTFGridWaveformComponentPredictor):
         return predictor.forward_cached_prefix(cached_inputs)
+    if isinstance(predictor, DifferentiableAVQIComponentEstimator):
+        return predictor.forward_proxy_features(cached_inputs)
     return predictor.forward_spectrogram(cached_inputs)
 
 
@@ -2100,6 +2179,7 @@ def main() -> None:
         "frequency_aware",
         "compact_tfgrid",
         "pretrained_full_tfgrid",
+        "direct_exact_inspired",
     }
     if not set(shared_candidates) <= allowed_shared:
         raise ValueError(
@@ -2199,6 +2279,21 @@ def main() -> None:
                         "head_learning_rate": SCREEN_LEARNING_RATE,
                     }
                     if uses_full_tfgrid
+                    else None
+                ),
+                "direct_exact_inspired": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "formulas": [
+                            "soft cepstral prominence",
+                            "soft autocorrelation HNR",
+                            "adjacent-frame shimmer percent and dB",
+                            "LTAS band slope and trend tilt",
+                        ],
+                    }
+                    if "direct_exact_inspired" in waveform_architectures
                     else None
                 ),
             },
@@ -2353,9 +2448,11 @@ def main() -> None:
     waveform_predictions: dict[str, torch.Tensor] = {}
     waveform_calibrators: dict[str, ComponentAffineCalibrator] = {}
     waveform_stats: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    standard_architectures = set(waveform_architectures) - {
-        "pretrained_full_tfgrid"
+    cacheless_architectures = {
+        "pretrained_full_tfgrid",
+        "direct_exact_inspired",
     }
+    standard_architectures = set(waveform_architectures) - cacheless_architectures
     cached_spectrograms: torch.Tensor | None = None
     if standard_architectures:
         spectrogram_template = WaveformComponentPredictor()
@@ -2366,7 +2463,7 @@ def main() -> None:
     for architecture in waveform_architectures:
         architecture_cache = (
             None
-            if architecture == "pretrained_full_tfgrid"
+            if architecture in cacheless_architectures
             else cached_spectrograms
         )
         predictor, training, mean, scale, trained_cache = train_waveform_predictor(
