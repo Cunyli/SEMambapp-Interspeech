@@ -86,29 +86,29 @@ AVQI v03.01 uses six terms:
 ```
 
 Jitter is diagnostic only, and the AVQI scalar itself is never minimized. Both
-routes predict all six terms. The small pilot gates CPPS and HNR first, using
-the same speaker's clean CS/SV recording, with its original pathology, as the
-target.
+routes predict all six terms, with the same speaker's clean pathological CS/SV
+recording as the preservation target. This stage tests whether the predictors
+are trustworthy enough to become a loss; it does not update the enhancer.
 
-| Route | Forms compared | Speaker-disjoint holdout | External 24-speaker stress | Decision |
-|---|---|---|---|---|
-| Shared dual head | global late, frequency-aware late, enhanced spectrum | frequency-aware late wins; CPPS passes (`rho=.969`, slope `.927`), HNR calibration fails (slope `.720`) | CPPS/HNR do not both pass CS, SV, patient, and 10 dB slices | no generator training |
-| Frozen predictor | global-stat and frequency-aware log-STFT CNNs | frequency-aware wins; CPPS (`rho=.941`, slope `.832`) and HNR (`rho=.903`, slope `.864`) both pass | overall CPPS/HNR pass, but SV CPPS slope is `.731` and CS HNR slope is `.619` | no generator training |
+| Route | Three forms screened | Locked form | Three-seed result |
+|---|---|---|---|
+| Shared dual head | global, frequency-aware, compact TF-GridNet late-feature heads | compact TF-GridNet | gradients and anti-shortcut checks pass, but clean-target stability and external calibration fail; `0/6` full-gate components in every seed |
+| Frozen predictor | global-stat, frequency-aware CNN, compact TF-GridNet waveform models | frequency-aware CNN | stronger internal CPPS/HNR/LTAS-tilt prediction, but CS, severe-SV, patient, and 10 dB slices remain unstable; `0/6` full-gate components in every seed |
 
-The diagnostic used 390 valid CS/SV rows from 98 speakers with a disjoint
-70/14/14 train/calibration/holdout split. The external panel used 24 unseen
-speakers, all six degradation levels, and 864 enhanced waveforms. The
-independent route also passed CPPS/HNR anti-shortcut and frozen-gradient checks;
-the shared route passed its gradient check but failed HNR calibration and
-anti-shortcut gates. Across all six terms, the independent holdout passed CPPS,
-HNR, and LTAS tilt; shimmer and LTAS slope still missed calibration or
-paired-change gates.
+The screen used 390 valid CS/SV rows from 98 speakers with a disjoint 70/14/14
+train/calibration/holdout split. Confirmation locked the chosen forms for three
+new seeds. The external test used 24 unseen speakers and clean, RIR-only, 30,
+20, 15, and 10 dB conditions. A component had to pass accuracy, calibration,
+paired-change or clean-target stability, coverage, anti-shortcut, three-second
+segment transfer, input-gradient, and every required external slice.
 
-**Plain conclusion:** the frozen frequency-aware predictor is the better of the
-two compact routes, but its CS/SV calibration is not yet reliable enough for a
-safe enhancement loss. Job `19688534` therefore stopped at zero generator
-optimizer steps; no formal pathology training was submitted. The hashed report
-is under `runs/avqi_component_backprop_20260812_02/outputs/` on Triton.
+**Plain conclusion:** the frozen frequency-aware predictor is the more promising
+of the two current routes, but neither route is reliable enough for AVQI-T2
+backpropagation. The multi-seed decision is `NO_GO_AVQI_BACKPROP`: no component
+was admitted, generator optimizer steps stayed at zero, and no formal pathology
+training was submitted. This rejects the current predictor forms, not the
+dual-head or independent-predictor ideas in principle. The hashed consensus is
+under `runs/avqi_component_predictor_multiseed_20260813_01/outputs/` on Triton.
 
 ## Repository and retained artifacts
 
@@ -140,6 +140,7 @@ the audio itself is shared privately after checking the data-sharing boundary.
 - pretrain/fine-tune: `train.py` and `scripts/slurm.sh`
 - inference: `infer.py` or `TASK=infer scripts/slurm.sh`
 - AVQI diagnostic: `scripts/evaluate_avqi_component_backprop.py`
+- AVQI multi-seed consensus: `scripts/summarize_avqi_component_multiseed.py`
 - local verification: `CUDA_VISIBLE_DEVICES='' python -m pytest -q`
 
 Python 3.10 is the reference environment. Slurm launchers require
