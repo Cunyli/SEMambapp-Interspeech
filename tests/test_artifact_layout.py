@@ -95,6 +95,19 @@ def test_avqi_expansion_is_training_only_and_hash_locked() -> None:
     assert "CONFIRM_SLURM_SUBMIT" in launcher
 
 
+def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None:
+    source = read("scripts/evaluate_direct_avqi_waveform_optimization.py")
+    assert 'CANDIDATE = "S3_500"' in source
+    assert 'CONDITION = "snr10"' in source
+    assert 'OPTIMIZED_COMPONENTS = ("hnr", "shimmer_percent")' in source
+    assert "avqi_code_tree_sha256" in source
+    assert "project_residual" in source
+    assert '"generator_optimizer_steps": 0' in source
+    assert '"formal_pathology_training_submitted": False' in source
+    assert "exact_absolute_gap_after" in source
+    assert "FAIL_WAVEFORM_OPTIMIZATION" in source
+
+
 def test_avqi_diagnostic_entry_point_runs_from_repository_root() -> None:
     result = subprocess.run(
         [
@@ -151,6 +164,51 @@ def test_avqi_multiseed_consensus_uses_two_of_three_complete_passes() -> None:
     route = namespace["route_consensus"](confirmations, "shared_dual_head")
     assert route["consensus_components"] == ["cpps", "slope"]
     assert route["decision"] == "RELIABLE"
+
+
+def test_avqi_multiseed_accepts_calibration_selected_direct_v2_screen() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
+    )
+    screen = {
+        "contract": {
+            "routes": {
+                "shared_dual_head": {"candidates": ["late_tfgrid"]},
+                "frozen_independent_predictor": {
+                    "architectures": [
+                        "direct_praat_soft_v2",
+                        "direct_praat_hard_v2",
+                    ]
+                },
+            },
+            "matched_training_budget": {
+                "shared_max_epochs": 60,
+                "independent_max_epochs": 60,
+            },
+            "calibration": {"holdout_used_for_fit_or_selection": False},
+        },
+        "routes": {
+            "shared_dual_head": {
+                "selected_candidate": "late_tfgrid",
+                "selection_rule": "lowest calibration loss before holdout evaluation",
+                "training": {
+                    "late_tfgrid": {"best_calibration_loss": 0.12}
+                },
+            },
+            "frozen_independent_predictor": {
+                "selected_architecture": "direct_praat_hard_v2",
+                "selection_rule": "lowest calibration loss before holdout evaluation",
+                "training": {
+                    "direct_praat_soft_v2": {"best_calibration_loss": 0.13},
+                    "direct_praat_hard_v2": {"best_calibration_loss": 0.06},
+                },
+            },
+        },
+    }
+    namespace["validate_screen_contract"](
+        screen,
+        Path("direct-v2-screen.json"),
+    )
 
 
 def test_avqi_multiseed_promotion_uses_common_components_for_two_routes() -> None:

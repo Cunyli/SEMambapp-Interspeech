@@ -769,7 +769,10 @@ class DifferentiableAVQIComponentEstimator(nn.Module):
             spectrum * response,
             n=waveform.numel(),
         )
-        rms = highpassed.square().mean().sqrt().clamp_min(1e-5)
+        # Put epsilon inside sqrt.  A post-sqrt clamp keeps the forward value
+        # finite but leaves an infinite derivative at exactly zero, which can
+        # contaminate unrelated component gradients through the stacked output.
+        rms = (highpassed.square().mean() + 1e-10).sqrt()
         return highpassed / rms
 
     def _frames(self, waveform: torch.Tensor) -> torch.Tensor:
@@ -1053,7 +1056,8 @@ class PraatDifferentiableAVQIComponentEstimator(
             spectrum * response,
             n=waveform.numel(),
         )
-        rms = highpassed.square().mean().sqrt().clamp_min(1e-5)
+        # Keep the normalization derivative finite for silent or padded input.
+        rms = (highpassed.square().mean() + 1e-10).sqrt()
         return highpassed / rms
 
     @staticmethod
@@ -1112,7 +1116,9 @@ class PraatDifferentiableAVQIComponentEstimator(
         right_energy = prefix[:, -1:].expand(-1, frame_length) - prefix.index_select(
             -1, lags
         )
-        denominator = (left_energy * right_energy).sqrt().clamp_min(1e-10)
+        denominator = (
+            (left_energy * right_energy).clamp_min(0.0) + 1e-10
+        ).sqrt()
         return (autocorrelation / denominator).clamp(-0.9999, 0.9999)
 
     def _periodicity_peak(
@@ -1215,9 +1221,9 @@ class PraatDifferentiableAVQIComponentEstimator(
             -1
         ) * centered_quefrency.unsqueeze(0)
         residual = band - initial_line
-        residual_scale = residual.square().mean(dim=-1, keepdim=True).sqrt().clamp_min(
-            1e-6
-        )
+        residual_scale = (
+            residual.square().mean(dim=-1, keepdim=True) + 1e-12
+        ).sqrt()
         robust_weight = 1.0 / (1.0 + (residual / (2.0 * residual_scale)).square())
         weight_sum = robust_weight.sum(dim=-1).clamp_min(1e-8)
         x_mean = (
@@ -1250,35 +1256,57 @@ class PraatDifferentiableAVQIComponentEstimator(
         self,
         prepared: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        power = torch.fft.rfft(prepared).abs().square().clamp_min(1e-12)
+        fft_size = 1 << (prepared.numel() - 1).bit_length()
+        spectrum = torch.fft.rfft(prepared, n=fft_size)
+        power = spectrum.abs().square()
         frequencies = torch.fft.rfftfreq(
-            prepared.numel(),
+            fft_size,
             d=1.0 / self.sample_rate,
             device=prepared.device,
         )
-        low_band = (frequencies >= 34.0) & (frequencies < 1_000.0)
-        high_band = frequencies >= 1_000.0
-        low_energy = power[low_band].mean().clamp_min(1e-12)
-        high_energy = power[high_band].mean().clamp_min(1e-12)
+        band_count = self.sample_rate // 2
+        band_index = frequencies.floor().long().clamp_max(band_count - 1)
+        band_power = power.new_zeros(band_count)
+        band_samples = power.new_zeros(band_count)
+        band_power.scatter_add_(0, band_index, power)
+        band_samples.scatter_add_(0, band_index, torch.ones_like(power))
+        band_power = band_power / band_samples.clamp_min(1.0)
+        band_centers = (
+            torch.arange(
+                band_count,
+                device=prepared.device,
+                dtype=prepared.dtype,
+            )
+            + 0.5
+        )
+        low_band = band_centers < 1_000.0
+        high_band = ~low_band
+        low_energy = band_power[low_band].mean().clamp_min(1e-20)
+        high_energy = band_power[high_band].mean().clamp_min(1e-20)
         slope = 10.0 * torch.log10(high_energy / low_energy)
 
-        trend_band = frequencies >= 34.0
-        trend_frequency = frequencies[trend_band] / (self.sample_rate / 2.0)
-        trend_power_db = 10.0 * torch.log10(power[trend_band])
+        # Praat's one-Hz LTAS assigns true zero-energy bands -300 dB.  A
+        # relative floor preserves gain invariance while matching that dynamic
+        # range and keeps the zero-band gradient finite.
+        floor = band_power.amax().detach().clamp_min(1e-12) * 1e-30
+        ltas_db = 10.0 * torch.log10(band_power.clamp_min(floor))
+        trend_band = band_centers >= 1.0
+        trend_frequency = band_centers[trend_band] / (self.sample_rate / 2.0)
+        trend_power_db = ltas_db[trend_band]
         centered_frequency = trend_frequency - trend_frequency.mean()
         trend_slope = (
             centered_frequency * (trend_power_db - trend_power_db.mean())
         ).sum() / centered_frequency.square().sum().clamp_min(1e-10)
         trend_line_db = trend_power_db.mean() + trend_slope * centered_frequency
-        trend_linear = torch.pow(
-            prepared.new_tensor(10.0),
-            trend_line_db.clamp(-120.0, 120.0) / 10.0,
+        log_energy = trend_line_db * (math.log(10.0) / 10.0)
+        trend_low = band_centers[trend_band] < 1_000.0
+        log_low_mean = torch.logsumexp(log_energy[trend_low], dim=0) - math.log(
+            int(trend_low.sum())
         )
-        boundary = 1_000.0 / (self.sample_rate / 2.0)
-        tilt = 10.0 * torch.log10(
-            trend_linear[trend_frequency >= boundary].mean().clamp_min(1e-12)
-            / trend_linear[trend_frequency < boundary].mean().clamp_min(1e-12)
+        log_high_mean = torch.logsumexp(log_energy[~trend_low], dim=0) - math.log(
+            int((~trend_low).sum())
         )
+        tilt = (10.0 / math.log(10.0)) * (log_high_mean - log_low_mean)
         return slope, tilt
 
     def _raw_one(self, waveform: torch.Tensor) -> torch.Tensor:

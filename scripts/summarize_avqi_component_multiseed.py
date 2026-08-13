@@ -37,6 +37,13 @@ EXPECTED_SCREEN_FORMS = {
         "compact_tfgrid",
     ],
 }
+EXPECTED_DIRECT_V2_SCREEN_FORMS = {
+    "shared_dual_head": ["late_tfgrid"],
+    "frozen_independent_predictor": [
+        "direct_praat_soft_v2",
+        "direct_praat_hard_v2",
+    ],
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,14 +106,35 @@ def validate_report_shape(report: dict[str, Any], path: Path) -> None:
 
 def validate_screen_contract(screen: dict[str, Any], path: Path) -> None:
     contract = screen["contract"]
-    if contract["routes"]["shared_dual_head"]["candidates"] != (
-        EXPECTED_SCREEN_FORMS["shared_dual_head"]
+    observed_forms = {
+        "shared_dual_head": contract["routes"]["shared_dual_head"][
+            "candidates"
+        ],
+        "frozen_independent_predictor": contract["routes"][
+            "frozen_independent_predictor"
+        ]["architectures"],
+    }
+    if observed_forms not in (
+        EXPECTED_SCREEN_FORMS,
+        EXPECTED_DIRECT_V2_SCREEN_FORMS,
     ):
-        raise ValueError(f"shared architecture screen is incomplete: {path}")
-    if contract["routes"]["frozen_independent_predictor"][
-        "architectures"
-    ] != EXPECTED_SCREEN_FORMS["frozen_independent_predictor"]:
-        raise ValueError(f"independent architecture screen is incomplete: {path}")
+        raise ValueError(f"architecture screen forms are incomplete: {path}")
+    for route in ROUTES:
+        route_report = screen["routes"][route]
+        if route_report["selection_rule"] != (
+            "lowest calibration loss before holdout evaluation"
+        ):
+            raise ValueError(f"selection rule differs for {route}: {path}")
+        selected = selected_form(screen, route)
+        training = route_report["training"]
+        calibration_winner = min(
+            training,
+            key=lambda name: training[name]["best_calibration_loss"],
+        )
+        if selected != calibration_winner:
+            raise ValueError(
+                f"{route} selection did not follow calibration loss: {path}"
+            )
     budget = contract["matched_training_budget"]
     if budget["shared_max_epochs"] != budget["independent_max_epochs"]:
         raise ValueError(f"architecture screen budget is not matched: {path}")

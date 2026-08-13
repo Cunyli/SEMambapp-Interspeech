@@ -374,7 +374,7 @@ def test_praat_differentiable_v2_is_invariant_and_family_sensitive() -> None:
     carrier = torch.sin(2.0 * math.pi * 170.0 * time)
     waveform = carrier * (
         1.0 + 0.15 * torch.sin(2.0 * math.pi * 4.0 * time)
-    )
+    ) + 0.15 * torch.sin(2.0 * math.pi * 2_500.0 * time)
     noisy = waveform + 0.3 * torch.randn_like(waveform)
     spectrum = torch.fft.rfft(waveform)
     frequencies = torch.fft.rfftfreq(waveform.numel(), d=1.0 / sample_rate)
@@ -421,6 +421,32 @@ def test_praat_differentiable_v2_has_finite_input_gradient() -> None:
         assert torch.isfinite(waveform.grad).all()
         assert float(waveform.grad.norm()) > 0.0
         assert not list(estimator.parameters())
+
+
+def test_praat_differentiable_v2_component_gradients_survive_zero_energy_regions() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
+    voiced = torch.sin(2.0 * math.pi * 180.0 * time)
+    waveforms = (
+        torch.zeros(sample_rate),
+        torch.cat((voiced, torch.zeros_like(voiced))),
+    )
+    for peak_mode in ("soft", "hard"):
+        estimator = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode=peak_mode,
+            max_frames=128,
+            cpps_max_frames=256,
+        )
+        for source in waveforms:
+            waveform = source.unsqueeze(0).requires_grad_()
+            prediction = estimator(waveform)
+            for component_index in range(prediction.shape[-1]):
+                gradient = torch.autograd.grad(
+                    prediction[:, component_index].sum(),
+                    waveform,
+                    retain_graph=component_index + 1 < prediction.shape[-1],
+                )[0]
+                assert torch.isfinite(gradient).all()
 
 
 def test_component_affine_calibrator_is_fixed_and_differentiable() -> None:
