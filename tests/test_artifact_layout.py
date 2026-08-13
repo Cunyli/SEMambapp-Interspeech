@@ -81,6 +81,7 @@ def test_avqi_expansion_is_training_only_and_hash_locked() -> None:
     assert "refusing to overwrite output" in prepare
     assert "--noise-manifest-sha256" in prepare
     assert "--rir-manifest-sha256" in prepare
+    assert 'row.get("_shard_dir") or root' in prepare
     assert "EXPECTED_NEW_SPEAKERS=\"${EXPECTED_NEW_SPEAKERS:-55}\"" in launcher
     assert "--expected-train-speakers 125" in launcher
     assert "CONFIRM_SLURM_SUBMIT" in launcher

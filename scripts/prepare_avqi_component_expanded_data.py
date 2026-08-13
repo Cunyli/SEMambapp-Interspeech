@@ -108,7 +108,7 @@ def load_wds_rows(manifest: Path, root: Path) -> list[dict[str, Any]]:
                 continue
             if not str(row.get("audio_member", "")).endswith(".wav"):
                 continue
-            row["_root"] = str(root)
+            row["_root"] = str(row.get("_shard_dir") or root)
             row["_manifest_index"] = manifest_index
             rows.append(row)
     if not rows:
