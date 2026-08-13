@@ -6,6 +6,7 @@ excluded because it is diagnostic-only in the verified Praat implementation.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -968,6 +969,396 @@ class DifferentiableAVQIComponentEstimator(nn.Module):
 
     def forward(self, waveform: torch.Tensor) -> torch.Tensor:
         return self.forward_proxy_features(self.raw_components(waveform))
+
+
+class PraatDifferentiableAVQIComponentEstimator(
+    DifferentiableAVQIComponentEstimator
+):
+    """A closer differentiable translation of the Praat AVQI primitives.
+
+    The implementation keeps the exact AVQI labels as the authority. It uses
+    the verified 34 Hz high-pass response, overlap-normalized linear
+    autocorrelation, a periodicity-aware soft voiced mask, a Praat-like
+    smoothed cepstral analysis, cycle-lag envelope perturbation, and a global
+    LTAS. ``peak_mode="soft"`` gives a smooth expected peak, while
+    ``peak_mode="hard"`` uses PyTorch's piecewise-differentiable maximum.
+    Neither mode has trainable neural parameters.
+    """
+
+    def __init__(
+        self,
+        peak_mode: str,
+        sample_rate: int = 16_000,
+        frame_length: int = 640,
+        hop_length: int = 160,
+        n_fft: int = 1024,
+        max_frames: int = 2_048,
+        cpps_frame_length: int = 800,
+        cpps_hop_length: int = 32,
+        cpps_max_frames: int = 4_096,
+        peak_temperature: float = 80.0,
+    ):
+        if peak_mode not in {"soft", "hard"}:
+            raise ValueError(f"unsupported peak mode: {peak_mode}")
+        if cpps_frame_length <= 1 or cpps_hop_length <= 0:
+            raise ValueError("CPPS frame and hop lengths must be positive")
+        if n_fft < cpps_frame_length or cpps_max_frames < 2:
+            raise ValueError("invalid CPPS FFT or frame limit")
+        super().__init__(
+            sample_rate=sample_rate,
+            frame_length=frame_length,
+            hop_length=hop_length,
+            n_fft=n_fft,
+            max_frames=max_frames,
+            peak_temperature=peak_temperature,
+        )
+        self.peak_mode = peak_mode
+        self.cpps_frame_length = cpps_frame_length
+        self.cpps_hop_length = cpps_hop_length
+        self.cpps_max_frames = cpps_max_frames
+        self.register_buffer(
+            "cpps_window",
+            torch.hann_window(cpps_frame_length, periodic=True),
+            persistent=False,
+        )
+
+    def _prepare(self, waveform: torch.Tensor) -> torch.Tensor:
+        waveform = waveform.reshape(-1)
+        minimum_samples = max(
+            self.frame_length + self.hop_length,
+            self.cpps_frame_length + self.cpps_hop_length,
+        )
+        if waveform.numel() < minimum_samples:
+            waveform = F.pad(waveform, (0, minimum_samples - waveform.numel()))
+        waveform = waveform - waveform.mean()
+        spectrum = torch.fft.rfft(waveform)
+        frequencies = torch.fft.rfftfreq(
+            waveform.numel(),
+            d=1.0 / self.sample_rate,
+            device=waveform.device,
+        )
+        transition = ((frequencies - 34.0) / 0.1).clamp(0.0, 1.0)
+        response = 0.5 - 0.5 * torch.cos(math.pi * transition)
+        response = torch.where(
+            frequencies <= 34.0,
+            torch.zeros_like(response),
+            response,
+        )
+        response = torch.where(
+            frequencies >= 34.1,
+            torch.ones_like(response),
+            response,
+        )
+        highpassed = torch.fft.irfft(
+            spectrum * response,
+            n=waveform.numel(),
+        )
+        rms = highpassed.square().mean().sqrt().clamp_min(1e-5)
+        return highpassed / rms
+
+    @staticmethod
+    def _limited_frames(
+        waveform: torch.Tensor,
+        frame_length: int,
+        hop_length: int,
+        max_frames: int,
+    ) -> torch.Tensor:
+        frames = waveform.unfold(0, frame_length, hop_length)
+        if frames.shape[0] <= max_frames:
+            return frames
+        indices = torch.linspace(
+            0,
+            frames.shape[0] - 1,
+            max_frames,
+            device=waveform.device,
+        ).round().long()
+        return frames.index_select(0, indices)
+
+    def _selection_weights(
+        self,
+        frames: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        centered = frames - frames.mean(dim=-1, keepdim=True)
+        power = centered.square().mean(dim=-1).clamp_min(1e-10)
+        relative_power_db = 10.0 * torch.log10(
+            power / power.mean().clamp_min(1e-10)
+        )
+        power_weight = torch.sigmoid((relative_power_db + 5.0) / 1.5)
+        normalized = centered / power.sqrt().unsqueeze(-1)
+        crossing_probability = torch.sigmoid(
+            -20.0 * normalized[:, 1:] * normalized[:, :-1]
+        )
+        crossing_rate_hz = crossing_probability.mean(dim=-1) * self.sample_rate
+        zcr_weight = torch.sigmoid((3_000.0 - crossing_rate_hz) / 300.0)
+        return centered, power, (power_weight * zcr_weight).clamp_min(1e-5)
+
+    @staticmethod
+    def _linear_normalized_autocorrelation(
+        centered_frames: torch.Tensor,
+    ) -> torch.Tensor:
+        frame_length = centered_frames.shape[-1]
+        fft_size = 1 << (2 * frame_length - 1).bit_length()
+        spectrum = torch.fft.rfft(centered_frames, n=fft_size, dim=-1)
+        autocorrelation = torch.fft.irfft(
+            spectrum.abs().square(),
+            n=fft_size,
+            dim=-1,
+        )[:, :frame_length]
+        squared = centered_frames.square()
+        prefix = F.pad(squared.cumsum(dim=-1), (1, 0))
+        lags = torch.arange(frame_length, device=centered_frames.device)
+        left_end = frame_length - lags
+        left_energy = prefix.index_select(-1, left_end)
+        right_energy = prefix[:, -1:].expand(-1, frame_length) - prefix.index_select(
+            -1, lags
+        )
+        denominator = (left_energy * right_energy).sqrt().clamp_min(1e-10)
+        return (autocorrelation / denominator).clamp(-0.9999, 0.9999)
+
+    def _periodicity_peak(
+        self,
+        autocorrelation: torch.Tensor,
+        lag_min: int,
+        lag_max: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        correlation = autocorrelation[:, lag_min : lag_max + 1]
+        lags = torch.arange(
+            lag_min,
+            lag_max + 1,
+            device=correlation.device,
+            dtype=correlation.dtype,
+        )
+        if self.peak_mode == "soft":
+            weights = torch.softmax(
+                self.peak_temperature * correlation,
+                dim=-1,
+            )
+            periodicity = (weights * correlation).sum(dim=-1)
+            period = (weights * lags.unsqueeze(0)).sum(dim=-1)
+            return periodicity, period
+        periodicity, indices = correlation.max(dim=-1)
+        return periodicity, lags.index_select(0, indices)
+
+    @staticmethod
+    def _smooth_absolute(value: torch.Tensor) -> torch.Tensor:
+        return (value.square() + 1e-8).sqrt()
+
+    @staticmethod
+    def _sample_linear(
+        values: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        bounded = positions.clamp(0.0, float(values.numel() - 1))
+        lower = bounded.floor().long()
+        upper = (lower + 1).clamp_max(values.numel() - 1)
+        fraction = bounded - lower.to(dtype=bounded.dtype)
+        return values.index_select(0, lower) * (1.0 - fraction) + values.index_select(
+            0, upper
+        ) * fraction
+
+    def _cpps(
+        self,
+        prepared: torch.Tensor,
+    ) -> torch.Tensor:
+        raw_frames = self._limited_frames(
+            prepared,
+            self.cpps_frame_length,
+            self.cpps_hop_length,
+            self.cpps_max_frames,
+        )
+        _, _, selection_weight = self._selection_weights(raw_frames)
+        alpha = math.exp(-2.0 * math.pi * 50.0 / self.sample_rate)
+        preemphasized = torch.cat(
+            (
+                prepared[:1],
+                prepared[1:] - alpha * prepared[:-1],
+            )
+        )
+        frames = self._limited_frames(
+            preemphasized,
+            self.cpps_frame_length,
+            self.cpps_hop_length,
+            self.cpps_max_frames,
+        )
+        centered = frames - frames.mean(dim=-1, keepdim=True)
+        windowed = centered * self.cpps_window.to(dtype=prepared.dtype)
+        spectrum = torch.fft.rfft(windowed, n=self.n_fft, dim=-1)
+        power = spectrum.abs().square().clamp_min(1e-12)
+        cepstrum = torch.fft.irfft(torch.log(power), n=self.n_fft, dim=-1)
+        cepstrum = F.avg_pool1d(
+            cepstrum.transpose(0, 1).unsqueeze(0),
+            kernel_size=5,
+            stride=1,
+            padding=2,
+        ).squeeze(0).transpose(0, 1)
+        cepstrum = F.avg_pool1d(
+            cepstrum.unsqueeze(1),
+            kernel_size=17,
+            stride=1,
+            padding=8,
+        ).squeeze(1)
+        quefrency = torch.arange(
+            self.n_fft,
+            device=prepared.device,
+            dtype=prepared.dtype,
+        ) / float(self.sample_rate)
+        band_mask = (quefrency >= 1.0 / 330.0) & (
+            quefrency <= 1.0 / 60.0
+        )
+        band = cepstrum[:, band_mask]
+        band_quefrency = quefrency[band_mask]
+        centered_quefrency = band_quefrency - band_quefrency.mean()
+        initial_slope = (
+            band * centered_quefrency.unsqueeze(0)
+        ).sum(dim=-1) / centered_quefrency.square().sum().clamp_min(1e-10)
+        initial_line = band.mean(dim=-1, keepdim=True) + initial_slope.unsqueeze(
+            -1
+        ) * centered_quefrency.unsqueeze(0)
+        residual = band - initial_line
+        residual_scale = residual.square().mean(dim=-1, keepdim=True).sqrt().clamp_min(
+            1e-6
+        )
+        robust_weight = 1.0 / (1.0 + (residual / (2.0 * residual_scale)).square())
+        weight_sum = robust_weight.sum(dim=-1).clamp_min(1e-8)
+        x_mean = (
+            robust_weight * band_quefrency.unsqueeze(0)
+        ).sum(dim=-1) / weight_sum
+        y_mean = (robust_weight * band).sum(dim=-1) / weight_sum
+        centered_x = band_quefrency.unsqueeze(0) - x_mean.unsqueeze(-1)
+        robust_slope = (
+            robust_weight * centered_x * (band - y_mean.unsqueeze(-1))
+        ).sum(dim=-1) / (
+            robust_weight * centered_x.square()
+        ).sum(dim=-1).clamp_min(1e-10)
+        if self.peak_mode == "soft":
+            peak_weight = torch.softmax(
+                self.peak_temperature * band,
+                dim=-1,
+            )
+            peak_value = (peak_weight * band).sum(dim=-1)
+            peak_quefrency = (
+                peak_weight * band_quefrency.unsqueeze(0)
+            ).sum(dim=-1)
+        else:
+            peak_value, peak_index = band.max(dim=-1)
+            peak_quefrency = band_quefrency.index_select(0, peak_index)
+        baseline = y_mean + robust_slope * (peak_quefrency - x_mean)
+        frame_cpps = 10.0 * (peak_value - baseline) / math.log(10.0)
+        return self._weighted_mean(frame_cpps, selection_weight)
+
+    def _global_ltas(
+        self,
+        prepared: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        power = torch.fft.rfft(prepared).abs().square().clamp_min(1e-12)
+        frequencies = torch.fft.rfftfreq(
+            prepared.numel(),
+            d=1.0 / self.sample_rate,
+            device=prepared.device,
+        )
+        low_band = (frequencies >= 34.0) & (frequencies < 1_000.0)
+        high_band = frequencies >= 1_000.0
+        low_energy = power[low_band].mean().clamp_min(1e-12)
+        high_energy = power[high_band].mean().clamp_min(1e-12)
+        slope = 10.0 * torch.log10(high_energy / low_energy)
+
+        trend_band = frequencies >= 34.0
+        trend_frequency = frequencies[trend_band] / (self.sample_rate / 2.0)
+        trend_power_db = 10.0 * torch.log10(power[trend_band])
+        centered_frequency = trend_frequency - trend_frequency.mean()
+        trend_slope = (
+            centered_frequency * (trend_power_db - trend_power_db.mean())
+        ).sum() / centered_frequency.square().sum().clamp_min(1e-10)
+        trend_line_db = trend_power_db.mean() + trend_slope * centered_frequency
+        trend_linear = torch.pow(
+            prepared.new_tensor(10.0),
+            trend_line_db.clamp(-120.0, 120.0) / 10.0,
+        )
+        boundary = 1_000.0 / (self.sample_rate / 2.0)
+        tilt = 10.0 * torch.log10(
+            trend_linear[trend_frequency >= boundary].mean().clamp_min(1e-12)
+            / trend_linear[trend_frequency < boundary].mean().clamp_min(1e-12)
+        )
+        return slope, tilt
+
+    def _raw_one(self, waveform: torch.Tensor) -> torch.Tensor:
+        prepared = self._prepare(waveform)
+        frames = self._limited_frames(
+            prepared,
+            self.frame_length,
+            self.hop_length,
+            self.max_frames,
+        )
+        centered, _, selection_weight = self._selection_weights(frames)
+        autocorrelation = self._linear_normalized_autocorrelation(centered)
+        lag_min = max(1, int(self.sample_rate / 600.0))
+        lag_max = min(
+            centered.shape[-1] - 1,
+            int(self.sample_rate / 75.0),
+        )
+        periodicity, period = self._periodicity_peak(
+            autocorrelation,
+            lag_min,
+            lag_max,
+        )
+        periodicity = periodicity.clamp(1e-4, 0.9999)
+        periodicity_weight = torch.sigmoid((periodicity - 0.45) / 0.06)
+        voicing_weight = (selection_weight * periodicity_weight).clamp_min(1e-5)
+        frame_hnr = 10.0 * torch.log10(periodicity / (1.0 - periodicity))
+        hnr = self._weighted_mean(frame_hnr, voicing_weight)
+
+        envelope_spectrum = torch.fft.fft(prepared)
+        hilbert_response = torch.zeros_like(envelope_spectrum)
+        hilbert_response[0] = 1.0
+        if prepared.numel() % 2 == 0:
+            hilbert_response[1 : prepared.numel() // 2] = 2.0
+            hilbert_response[prepared.numel() // 2] = 1.0
+        else:
+            hilbert_response[1 : (prepared.numel() + 1) // 2] = 2.0
+        envelope = torch.fft.ifft(envelope_spectrum * hilbert_response).abs()
+        centers = (
+            torch.arange(
+                frames.shape[0],
+                device=prepared.device,
+                dtype=prepared.dtype,
+            )
+            * self.hop_length
+            + self.frame_length / 2.0
+        )
+        current_amplitude = self._sample_linear(envelope, centers)
+        previous_positions = centers - period
+        previous_amplitude = self._sample_linear(envelope, previous_positions)
+        valid_weight = torch.sigmoid(previous_positions / 4.0)
+        shimmer_weight = (voicing_weight * valid_weight).clamp_min(1e-5)
+        amplitude_difference = self._smooth_absolute(
+            current_amplitude - previous_amplitude
+        )
+        shimmer_percent_frames = (
+            200.0
+            * amplitude_difference
+            / (current_amplitude + previous_amplitude).clamp_min(1e-8)
+        )
+        shimmer_db_frames = self._smooth_absolute(
+            20.0
+            * torch.log10(
+                current_amplitude.clamp_min(1e-8)
+                / previous_amplitude.clamp_min(1e-8)
+            )
+        )
+        shimmer_percent = self._weighted_mean(
+            shimmer_percent_frames,
+            shimmer_weight,
+        )
+        shimmer_db = self._weighted_mean(shimmer_db_frames, shimmer_weight)
+
+        cpps = self._cpps(prepared)
+        slope, tilt = self._global_ltas(prepared)
+        components = torch.stack(
+            (cpps, hnr, shimmer_percent, shimmer_db, slope, tilt)
+        )
+        if not torch.isfinite(components).all():
+            raise ValueError("non-finite Praat-inspired differentiable components")
+        return components
 
 
 class ComponentAffineCalibrator(nn.Module):

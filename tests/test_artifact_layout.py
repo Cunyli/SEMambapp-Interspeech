@@ -44,6 +44,8 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"compact_tfgrid"' in source
     assert '"pretrained_full_tfgrid"' in source
     assert '"direct_exact_inspired"' in source
+    assert '"direct_praat_soft_v2"' in source
+    assert '"direct_praat_hard_v2"' in source
     assert '"neural_predictor": False' in source
     assert 'parser.add_argument("--full-tfgrid-checkpoint"' in source
     assert '--full-tfgrid-checkpoint "$FULL_TFGRID_CHECKPOINT"' in launcher

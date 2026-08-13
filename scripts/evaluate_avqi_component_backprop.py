@@ -6,7 +6,8 @@ small mechanisms, evaluates all six AVQI v03.01 terms, and verifies the intended
 gradient paths:
 
 1. shared SeMamba++ heads at late-backbone and enhanced-spectral points;
-2. separately trained waveform predictors that are frozen before backprop.
+2. separately trained waveform predictors that are frozen before backprop;
+3. direct differentiable signal-processing formulas with no neural predictor.
 
 Architecture selection and affine calibration use only the calibration split.
 The speaker-disjoint holdout and 24-speaker external panel remain evaluation-only.
@@ -46,6 +47,7 @@ from model.avqi_components import (
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
     PretrainedFullTFGridWaveformComponentPredictor,
+    PraatDifferentiableAVQIComponentEstimator,
     SharedComponentHead,
     WaveformComponentPredictor,
     denormalize_components,
@@ -657,6 +659,10 @@ def train_waveform_predictor(
         )
     elif architecture == "direct_exact_inspired":
         predictor = DifferentiableAVQIComponentEstimator()
+    elif architecture == "direct_praat_soft_v2":
+        predictor = PraatDifferentiableAVQIComponentEstimator(peak_mode="soft")
+    elif architecture == "direct_praat_hard_v2":
+        predictor = PraatDifferentiableAVQIComponentEstimator(peak_mode="hard")
     else:
         raise ValueError(f"unknown waveform architecture: {architecture}")
     predictor = predictor.to(device)
@@ -2180,6 +2186,8 @@ def main() -> None:
         "compact_tfgrid",
         "pretrained_full_tfgrid",
         "direct_exact_inspired",
+        "direct_praat_soft_v2",
+        "direct_praat_hard_v2",
     }
     if not set(shared_candidates) <= allowed_shared:
         raise ValueError(
@@ -2294,6 +2302,42 @@ def main() -> None:
                         ],
                     }
                     if "direct_exact_inspired" in waveform_architectures
+                    else None
+                ),
+                "direct_praat_soft_v2": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "soft expectation",
+                        "formulas": [
+                            "Praat 34 Hz stop-Hann high-pass",
+                            "overlap-normalized linear autocorrelation HNR",
+                            "periodicity-aware soft voiced mask",
+                            "smoothed robust-baseline CPPS",
+                            "cycle-lag analytic-envelope shimmer",
+                            "global LTAS slope and trend tilt",
+                        ],
+                    }
+                    if "direct_praat_soft_v2" in waveform_architectures
+                    else None
+                ),
+                "direct_praat_hard_v2": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "piecewise-differentiable maximum",
+                        "formulas": [
+                            "Praat 34 Hz stop-Hann high-pass",
+                            "overlap-normalized linear autocorrelation HNR",
+                            "periodicity-aware soft voiced mask",
+                            "smoothed robust-baseline CPPS",
+                            "cycle-lag analytic-envelope shimmer",
+                            "global LTAS slope and trend tilt",
+                        ],
+                    }
+                    if "direct_praat_hard_v2" in waveform_architectures
                     else None
                 ),
             },
@@ -2451,6 +2495,8 @@ def main() -> None:
     cacheless_architectures = {
         "pretrained_full_tfgrid",
         "direct_exact_inspired",
+        "direct_praat_soft_v2",
+        "direct_praat_hard_v2",
     }
     standard_architectures = set(waveform_architectures) - cacheless_architectures
     cached_spectrograms: torch.Tensor | None = None

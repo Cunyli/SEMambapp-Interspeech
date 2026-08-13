@@ -15,6 +15,7 @@ from model.avqi_components import (
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
     PretrainedFullTFGridWaveformComponentPredictor,
+    PraatDifferentiableAVQIComponentEstimator,
     SharedComponentHead,
     WaveformComponentPredictor,
     avqi_v0301,
@@ -357,6 +358,69 @@ def test_direct_exact_inspired_alignment_and_input_gradient() -> None:
     assert torch.isfinite(waveform.grad).all()
     assert float(waveform.grad.norm()) > 0.0
     assert not list(estimator.parameters())
+
+
+def test_praat_differentiable_v2_rejects_unknown_peak_mode() -> None:
+    try:
+        PraatDifferentiableAVQIComponentEstimator(peak_mode="unknown")
+    except ValueError:
+        return
+    raise AssertionError("unknown differentiable AVQI peak mode was accepted")
+
+
+def test_praat_differentiable_v2_is_invariant_and_family_sensitive() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    carrier = torch.sin(2.0 * math.pi * 170.0 * time)
+    waveform = carrier * (
+        1.0 + 0.15 * torch.sin(2.0 * math.pi * 4.0 * time)
+    )
+    noisy = waveform + 0.3 * torch.randn_like(waveform)
+    spectrum = torch.fft.rfft(waveform)
+    frequencies = torch.fft.rfftfreq(waveform.numel(), d=1.0 / sample_rate)
+    lowpassed = torch.fft.irfft(
+        spectrum * (frequencies <= 1_000.0),
+        n=waveform.numel(),
+    )
+
+    for peak_mode in ("soft", "hard"):
+        estimator = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode=peak_mode,
+            max_frames=128,
+            cpps_max_frames=256,
+        )
+        clean = estimator.raw_components(waveform)[0]
+        gained = estimator.raw_components(waveform * 0.25)[0]
+        shifted = estimator.raw_components(torch.roll(waveform, 1_600))[0]
+        noise_components = estimator.raw_components(noisy)[0]
+        lowpass_components = estimator.raw_components(lowpassed)[0]
+
+        assert torch.allclose(clean, gained, atol=2e-3, rtol=2e-3)
+        assert abs(float(noise_components[1] - clean[1])) > 0.1
+        assert abs(float(lowpass_components[4] - clean[4])) > 0.1
+        assert abs(float(shifted[4] - clean[4])) < 0.1
+
+
+def test_praat_differentiable_v2_has_finite_input_gradient() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    base = torch.sin(2.0 * math.pi * 180.0 * time)
+    for peak_mode in ("soft", "hard"):
+        waveform = (
+            base * (1.0 + 0.2 * torch.sin(2.0 * math.pi * 5.0 * time))
+        ).unsqueeze(0).requires_grad_()
+        estimator = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode=peak_mode,
+            max_frames=128,
+            cpps_max_frames=256,
+        )
+        prediction = estimator(waveform)
+        assert prediction.shape == (1, 6)
+        prediction.square().mean().backward()
+        assert waveform.grad is not None
+        assert torch.isfinite(waveform.grad).all()
+        assert float(waveform.grad.norm()) > 0.0
+        assert not list(estimator.parameters())
 
 
 def test_component_affine_calibrator_is_fixed_and_differentiable() -> None:
