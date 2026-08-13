@@ -77,4 +77,5 @@ configs/generated/
 # Preserved local migration leftovers
 checkpoints/.gitkeep
 outputs/.gitkeep
+scripts/slurm_*.sh
 scripts/*.bak*
