@@ -97,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=20260814)
     parser.add_argument("--speakers-per-severity", type=int, default=3)
+    parser.add_argument("--speaker-offset", type=int, default=0)
     parser.add_argument("--expected-cases", type=int, default=12)
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--learning-rate-scale", type=float, default=0.05)
@@ -177,9 +178,10 @@ def load_cases(
     path: Path,
     speakers_per_severity: int,
     expected_cases: int,
+    speaker_offset: int = 0,
 ) -> list[Case]:
-    if speakers_per_severity <= 0:
-        raise ValueError("speakers per severity must be positive")
+    if speakers_per_severity <= 0 or speaker_offset < 0:
+        raise ValueError("speaker count must be positive and offset non-negative")
     with path.open(newline="", encoding="utf-8-sig") as handle:
         rows = [
             row
@@ -196,11 +198,13 @@ def load_cases(
         speakers = sorted(
             {row["speaker_id"] for row in rows if row["sample_group"] == group}
         )
-        if len(speakers) < speakers_per_severity:
+        stop = speaker_offset + speakers_per_severity
+        if len(speakers) < stop:
             raise ValueError(
-                f"insufficient {group} speakers: {len(speakers)}"
+                f"insufficient {group} speakers for offset {speaker_offset}: "
+                f"{len(speakers)}"
             )
-        selected_speakers[group] = speakers[:speakers_per_severity]
+        selected_speakers[group] = speakers[speaker_offset:stop]
     selected = [
         row
         for row in rows
@@ -732,6 +736,7 @@ def main() -> None:
         args.external_exact_csv,
         args.speakers_per_severity,
         args.expected_cases,
+        args.speaker_offset,
     )
     predictor, calibrator, target_mean, target_scale = load_predictor(
         args.predictor_checkpoint,
@@ -835,7 +840,10 @@ def main() -> None:
             "severity_groups": list(SEVERITY_GROUPS),
             "views": list(VIEWS),
             "speakers_per_severity": args.speakers_per_severity,
-            "case_selection": "lexicographically first speakers within severity",
+            "speaker_offset": args.speaker_offset,
+            "case_selection": (
+                "lexicographic severity slice beginning at speaker_offset"
+            ),
             "expected_cases": args.expected_cases,
             "optimized_components": list(OPTIMIZED_COMPONENTS),
             "steps": args.steps,
