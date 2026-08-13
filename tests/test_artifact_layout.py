@@ -55,8 +55,11 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert "SCREEN_GRADIENT_CLIP_NORM = 5.0" in source
     assert '"gradient_clip_norm": SCREEN_GRADIENT_CLIP_NORM' in source
     assert "equal shared and waveform epochs" in source
-    assert "EXPECTED_TOTAL_ROWS = 392" in source
-    assert "EXPECTED_USABLE_ROWS = 390" in source
+    assert '"--expected-train-speakers"' in source
+    assert '"--expected-calibration-speakers"' in source
+    assert '"--expected-holdout-speakers"' in source
+    assert "MIN_LABEL_BANK_COVERAGE = 0.95" in source
+    assert '--expected-train-speakers "$EXPECTED_TRAIN_SPEAKERS"' in launcher
     assert "external_coverage_report" in source
     assert "training_segment_transfer_report" in source
     assert "TRAINING_SEGMENT_SAMPLES = 48_000" in source
@@ -65,6 +68,22 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"generator_optimizer_steps": 0' in multiseed
     assert '"source_report_sha256"' in multiseed
     assert "refusing to overwrite output" in multiseed
+
+
+def test_avqi_expansion_is_training_only_and_hash_locked() -> None:
+    prepare = read("scripts/prepare_avqi_component_expanded_data.py")
+    score = read("scripts/build_avqi_component_expanded_label_bank.py")
+    launcher = read("scripts/slurm_prepare_avqi_component_expanded_data.sh")
+    assert '"surrogate_train"' in score
+    assert "expansion speakers overlap the base label bank" in score
+    assert "expansion speakers overlap the external test panel" in score
+    assert 'if args.output_dir.exists()' in prepare
+    assert "refusing to overwrite output" in prepare
+    assert "--noise-manifest-sha256" in prepare
+    assert "--rir-manifest-sha256" in prepare
+    assert "EXPECTED_NEW_SPEAKERS=\"${EXPECTED_NEW_SPEAKERS:-55}\"" in launcher
+    assert "--expected-train-speakers 125" in launcher
+    assert "CONFIRM_SLURM_SUBMIT" in launcher
 
 
 def test_avqi_diagnostic_entry_point_runs_from_repository_root() -> None:

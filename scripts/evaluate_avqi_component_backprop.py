@@ -60,13 +60,12 @@ from utils import load_config
 
 
 SAMPLE_RATE = 16_000
-EXPECTED_TOTAL_ROWS = 392
-EXPECTED_USABLE_ROWS = 390
-EXPECTED_SPLIT_SPEAKERS = {
+DEFAULT_EXPECTED_SPLIT_SPEAKERS = {
     "surrogate_train": 70,
     "surrogate_calibration": 14,
     "surrogate_holdout": 14,
 }
+MIN_LABEL_BANK_COVERAGE = 0.95
 PRIMARY_GATE_COMPONENTS = ("cpps", "hnr")
 COMPONENT_FAMILIES = {
     "cpps": "periodicity_noise",
@@ -146,6 +145,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--waveform-epochs", type=int, default=60)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument(
+        "--expected-train-speakers",
+        type=int,
+        default=DEFAULT_EXPECTED_SPLIT_SPEAKERS["surrogate_train"],
+    )
+    parser.add_argument(
+        "--expected-calibration-speakers",
+        type=int,
+        default=DEFAULT_EXPECTED_SPLIT_SPEAKERS["surrogate_calibration"],
+    )
+    parser.add_argument(
+        "--expected-holdout-speakers",
+        type=int,
+        default=DEFAULT_EXPECTED_SPLIT_SPEAKERS["surrogate_holdout"],
+    )
+    parser.add_argument(
         "--shared-candidates",
         default="late_global,late_frequency,late_tfgrid",
         help="comma-separated shared-head candidates selected using calibration only",
@@ -200,22 +214,37 @@ def load_waveform(path: Path) -> torch.Tensor:
     return waveform
 
 
-def load_examples(label_bank: Path) -> tuple[list[Example], dict[str, Any]]:
+def load_examples(
+    label_bank: Path,
+    expected_split_speakers: dict[str, int],
+) -> tuple[list[Example], dict[str, Any]]:
     with label_bank.open(newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
     all_task_rows = [row for row in rows if row["view"] in {"cs", "sv"}]
-    if len(all_task_rows) != EXPECTED_TOTAL_ROWS:
+    if not all_task_rows:
+        raise ValueError("label bank contains no CS/SV task rows")
+    row_keys = [
+        (row["speaker_id"], row["split"], row["condition_id"], row["view"])
+        for row in all_task_rows
+    ]
+    if len(row_keys) != len(set(row_keys)):
+        raise ValueError("duplicate speaker/split/condition/view rows in label bank")
+    actual_splits = {row["split"] for row in all_task_rows}
+    if actual_splits != set(expected_split_speakers):
         raise ValueError(
-            f"expected {EXPECTED_TOTAL_ROWS} task rows, found {len(all_task_rows)}"
+            "label-bank split mismatch: "
+            f"expected {sorted(expected_split_speakers)}, found {sorted(actual_splits)}"
         )
     task_rows = [
         row
         for row in all_task_rows
         if row["scoring_status"] == "ok"
     ]
-    if len(task_rows) != EXPECTED_USABLE_ROWS:
+    coverage_fraction = len(task_rows) / len(all_task_rows)
+    if coverage_fraction < MIN_LABEL_BANK_COVERAGE:
         raise ValueError(
-            f"expected {EXPECTED_USABLE_ROWS} usable rows, found {len(task_rows)}"
+            "label-bank exact-score coverage below gate: "
+            f"{coverage_fraction:.6f} < {MIN_LABEL_BANK_COVERAGE:.2f}"
         )
     invalid_rows = [
         {
@@ -232,13 +261,13 @@ def load_examples(label_bank: Path) -> tuple[list[Example], dict[str, Any]]:
     ]
     split_speakers = {
         split: len({row["speaker_id"] for row in task_rows if row["split"] == split})
-        for split in EXPECTED_SPLIT_SPEAKERS
+        for split in expected_split_speakers
     }
-    if split_speakers != EXPECTED_SPLIT_SPEAKERS:
+    if split_speakers != expected_split_speakers:
         raise ValueError(f"speaker split mismatch: {split_speakers}")
     speaker_sets = {
         split: {row["speaker_id"] for row in task_rows if row["split"] == split}
-        for split in EXPECTED_SPLIT_SPEAKERS
+        for split in expected_split_speakers
     }
     for first, first_speakers in speaker_sets.items():
         for second, second_speakers in speaker_sets.items():
@@ -280,7 +309,9 @@ def load_examples(label_bank: Path) -> tuple[list[Example], dict[str, Any]]:
         "total_rows": len(all_task_rows),
         "usable_rows": len(task_rows),
         "invalid_rows": len(invalid_rows),
-        "fraction": len(task_rows) / len(all_task_rows),
+        "fraction": coverage_fraction,
+        "minimum_fraction": MIN_LABEL_BANK_COVERAGE,
+        "split_speakers": split_speakers,
         "invalid_cases": invalid_rows,
     }
     return examples, coverage
@@ -1956,6 +1987,15 @@ def human_summary(report: dict[str, Any]) -> str:
 
 def main() -> None:
     args = parse_args()
+    expected_split_speakers = {
+        "surrogate_train": args.expected_train_speakers,
+        "surrogate_calibration": args.expected_calibration_speakers,
+        "surrogate_holdout": args.expected_holdout_speakers,
+    }
+    if any(count <= 0 for count in expected_split_speakers.values()):
+        raise ValueError(
+            f"expected split speaker counts must be positive: {expected_split_speakers}"
+        )
     shared_candidates = comma_separated_values(args.shared_candidates)
     waveform_architectures = comma_separated_values(args.waveform_architectures)
     allowed_shared = {
@@ -2024,7 +2064,7 @@ def main() -> None:
             "at least one CPPS/HNR component and one component from shimmer or LTAS"
         ),
         "jitter_in_primary_task": False,
-        "speaker_split": EXPECTED_SPLIT_SPEAKERS,
+        "speaker_split": expected_split_speakers,
         "routes": {
             "shared_dual_head": {
                 "candidates": list(shared_candidates),
@@ -2100,7 +2140,10 @@ def main() -> None:
     }
     write_json(args.output_dir / "experiment_contract.json", contract)
 
-    examples, label_bank_coverage = load_examples(args.label_bank)
+    examples, label_bank_coverage = load_examples(
+        args.label_bank,
+        expected_split_speakers,
+    )
     config = load_config(args.config)
     generator = load_generator(config, args.checkpoint, device)
     pooled = extract_shared_features(

@@ -61,6 +61,7 @@ demo_files_normalized/
 # Local agent notes
 AGENTS.md
 CLAUDE.md
+.learnings/
 
 # Generated configs and scratch
 configs/generated/
@@ -76,5 +77,4 @@ configs/generated/
 # Preserved local migration leftovers
 checkpoints/.gitkeep
 outputs/.gitkeep
-scripts/slurm_*.sh
 scripts/*.bak*
