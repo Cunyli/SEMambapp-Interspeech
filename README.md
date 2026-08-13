@@ -85,30 +85,44 @@ AVQI v03.01 uses six terms:
 \mathrm{AVQI}=2.8902\left(4.152-0.177\,\mathrm{CPPS}-0.006\,\mathrm{HNR}-0.037\,\mathrm{Shimmer}_{\%}+0.941\,\mathrm{Shimmer}_{\mathrm{dB}}+0.01\,\mathrm{LTAS}_{\mathrm{slope}}+0.093\,\mathrm{LTAS}_{\mathrm{tilt}}\right).
 ```
 
-Jitter is diagnostic only, and the AVQI scalar itself is never minimized. Both
-routes predict all six terms, with the same speaker's clean pathological CS/SV
-recording as the preservation target. This stage tests whether the predictors
-are trustworthy enough to become a loss; it does not update the enhancer.
+Jitter is diagnostic only, and the AVQI scalar itself is never minimized. The
+loss candidate is always the two-sided gap to the same speaker's clean
+pathological CS/SV target; “healthier-looking” output is not rewarded.
 
-| Route | Three forms screened | Locked form | Three-seed result |
-|---|---|---|---|
-| Shared dual head | global, frequency-aware, compact TF-GridNet late-feature heads | compact TF-GridNet | gradients and anti-shortcut checks pass, but clean-target stability and external calibration fail; `0/6` full-gate components in every seed |
-| Frozen predictor | global-stat, frequency-aware CNN, compact TF-GridNet waveform models | frequency-aware CNN | stronger internal CPPS/HNR/LTAS-tilt prediction, but CS, severe-SV, patient, and 10 dB slices remain unstable; `0/6` full-gate components in every seed |
+Three backpropagation mechanisms were tested:
 
-The screen used 390 valid CS/SV rows from 98 speakers with a disjoint 70/14/14
-train/calibration/holdout split. Confirmation locked the chosen forms for three
-new seeds. The external test used 24 unseen speakers and clean, RIR-only, 30,
-20, 15, and 10 dB conditions. A component had to pass accuracy, calibration,
-paired-change or clean-target stability, coverage, anti-shortcut, three-second
-segment transfer, input-gradient, and every required external slice.
+| Route | Gradient path | Forms tested |
+|---|---|---|
+| Shared dual head | SeMamba++ shared features -> six-parameter head | global, frequency-aware, and compact TF-GridNet heads |
+| Frozen predictor | enhanced waveform -> frozen predictor -> SeMamba++ | global CNN, frequency-aware CNN, compact TF-GridNet, and an 8-block pretrained full TF-GridNet |
+| Direct formulas | enhanced waveform -> differentiable component formulas -> SeMamba++ | soft CPPS/HNR, shimmer percent/dB, LTAS slope/tilt; no neural predictor |
 
-**Plain conclusion:** the frozen frequency-aware predictor is the more promising
-of the two current routes, but neither route is reliable enough for AVQI-T2
-backpropagation. The multi-seed decision is `NO_GO_AVQI_BACKPROP`: no component
-was admitted, generator optimizer steps stayed at zero, and no formal pathology
-training was submitted. This rejects the current predictor forms, not the
-dual-head or independent-predictor ideas in principle. The hashed consensus is
-under `runs/avqi_component_predictor_multiseed_20260813_01/outputs/` on Triton.
+The original bank had 390 usable CS/SV rows; only 278 belonged to training. We
+added 55 speaker-disjoint pairs (30 healthy, 25 pathological) with independent
+noise and RIR draws at 10/15/20 dB. This increased usable training rows to 498
+(`+79%`) and the full bank to 610, while calibration, holdout, and the 24-speaker
+external panel remained unchanged.
+
+| Experiment | Main observation | Complete-gate result |
+|---|---|---|
+| Shared dual head after expansion | calibration loss `0.141 -> 0.119`; CPPS/HNR improved, but clean-target stability and required external slices still fail | `0/6`, no-go |
+| Frequency-aware CNN after expansion | best learned predictor, `0.083 -> 0.073`; HNR is strongest, but CS and severe-SV coverage is incomplete | `0/6`, no-go |
+| Pretrained full TF-GridNet | internal CPPS/HNR/tilt pass, but calibration loss is worse (`0.095`) and all six outputs are too sensitive to a 100 ms circular shift | `0/6`, no-go |
+| Direct differentiable formulas | LTAS slope passes internal, all `5/5` external slices, segment transfer, and gradient checks; it still fails the locked low-pass anti-shortcut gate, while no periodicity term qualifies | `0/6`, no-go |
+
+Every component must independently pass accuracy, calibration, paired change or
+clean-target stability, coverage, anti-shortcut tests, three-second transfer,
+input gradients, and CS/SV, patient, severe-SV, and 10 dB external slices. The
+initial learned forms also failed after three locked seeds; the expanded, full
+TF-GridNet, and direct routes did not qualify for multi-seed promotion.
+
+**Plain conclusion:** more data helped, but it did not make either learned route
+safe. A larger predictor did not beat the small frequency-aware CNN. The direct
+LTAS-slope formula is useful as a diagnostic, but it cannot be promoted alone.
+The current decision remains `NO_GO_AVQI_BACKPROP`: generator optimizer steps
+stayed at zero and no formal AVQI-T2 pathology training was submitted. This is
+a result about the tested implementations, not a proof that dual-head or frozen
+predictor ideas can never work.
 
 ## Repository and retained artifacts
 
