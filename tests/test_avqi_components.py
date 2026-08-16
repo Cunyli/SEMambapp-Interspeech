@@ -14,6 +14,8 @@ from model.avqi_components import (
     DifferentiableAVQIComponentEstimator,
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
+    PhaseAwareCompactTFGridWaveformComponentPredictor,
+    PhaseAwareFrequencyAwareWaveformComponentPredictor,
     PretrainedFullTFGridWaveformComponentPredictor,
     PraatDifferentiableAVQIComponentEstimator,
     SharedComponentHead,
@@ -22,6 +24,7 @@ from model.avqi_components import (
     denormalize_components,
     freeze_module,
     freeze_module_for_input_gradient,
+    phase_aware_spectral_features,
     pool_frequency_aware_shared_feature_map,
     standardized_component_loss,
 )
@@ -135,6 +138,56 @@ def test_waveform_predictors_accept_cached_spectrograms() -> None:
         direct = predictor(waveform)
         cached = predictor.forward_spectrogram(spectrogram)
         assert torch.allclose(direct, cached)
+
+
+def test_phase_aware_features_ignore_constant_phase_offset() -> None:
+    magnitude = torch.rand(2, 17, 13)
+    phase = torch.randn(2, 17, 13)
+    baseline = phase_aware_spectral_features(
+        magnitude,
+        phase,
+        time_dim=-1,
+        magnitude_compression=0.3,
+    )
+    shifted = phase_aware_spectral_features(
+        magnitude,
+        phase + 1.25,
+        time_dim=-1,
+        magnitude_compression=0.3,
+    )
+    assert baseline.shape == (2, 3, 17, 13)
+    assert torch.isfinite(baseline).all()
+    assert torch.allclose(baseline, shifted, atol=1e-6, rtol=1e-6)
+
+
+def test_phase_aware_predictors_accept_cached_features() -> None:
+    waveform = torch.randn(1, 4096)
+    for predictor in (
+        PhaseAwareFrequencyAwareWaveformComponentPredictor(),
+        PhaseAwareCompactTFGridWaveformComponentPredictor(),
+    ):
+        predictor.eval()
+        features = predictor.cache_features(waveform)
+        direct = predictor(waveform)
+        cached = predictor.forward_spectrogram(features)
+        assert features.shape[1] == 3
+        assert torch.allclose(direct, cached)
+
+
+def test_phase_aware_predictors_support_frozen_input_gradient() -> None:
+    for predictor in (
+        PhaseAwareFrequencyAwareWaveformComponentPredictor(),
+        PhaseAwareCompactTFGridWaveformComponentPredictor(),
+    ):
+        waveform = torch.randn(1, 4096, requires_grad=True)
+        freeze_module_for_input_gradient(predictor)
+        prediction = predictor(waveform)
+        assert prediction.shape == (1, 6)
+        prediction.square().mean().backward()
+        assert waveform.grad is not None
+        assert torch.isfinite(waveform.grad).all()
+        assert float(waveform.grad.norm()) > 0.0
+        assert all(parameter.grad is None for parameter in predictor.parameters())
 
 
 def test_waveform_frontend_uses_fixed_time_grid_for_variable_lengths() -> None:

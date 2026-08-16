@@ -1,0 +1,143 @@
+schema_version: avqi-component-phaseaware-v4
+status: frozen_before_implementation
+goal: >-
+  Predict each waveform's own exact AVQI v03.01 components, then compare a
+  frozen scorer on enhanced speech with the same speaker's clean pathological
+  CS or SV reference. The AVQI scalar is never minimized.
+
+source_contract:
+  repository_commit: 6c6563423abf289b0447c9ff2ac86d9d266f27aa
+  base_label_bank_rows: 918
+  base_task_rows: 612
+  base_usable_task_rows: 610
+  base_speakers:
+    surrogate_train: 125
+    surrogate_calibration: 14
+    surrogate_holdout: 14
+  exact_python: /scratch/work/lil14/.conda_envs/avqi/bin/python
+  exact_runner: /scratch/work/lil14/Hybrid_Unise/scripts/validation_selected_tau_free_run.py
+  exact_runner_sha256: 71771de0892df6434f1a693b1ee13b294d785d43db1263d95cc698c994a4670b
+  avqi_main: /scratch/work/lil14/avqi/avqi_code/main.py
+  avqi_main_sha256: b3018da3b41aa17d1382a390f1c2bbf31520a824b82db871d5d67b4417f6bcc6
+
+vctk_expansion:
+  manifest: /scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/v1_vctk_clean/clean/manifest.jsonl
+  root: /scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/v1_vctk_clean/clean
+  expected_manifest_items: 43873
+  expected_speakers: 108
+  split_seed: 20260816
+  split_speakers:
+    surrogate_train: 72
+    surrogate_calibration: 12
+    surrogate_holdout: 12
+    vctk_external: 12
+  utterances_per_speaker: 4
+  selection:
+    minimum_duration_seconds: 3.0
+    maximum_duration_seconds: 12.0
+    policy: deterministic_sha256_rank_after_audio_validity_filter
+  conditions:
+    - clean
+    - rir_only
+    - snr20
+    - snr10
+  noise_manifest: /scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/v1_dns5_noise/noise/manifest.jsonl
+  noise_root: /scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/v1_dns5_noise/noise
+  rir_manifest: /scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/v1_verified/rir/manifest.jsonl
+  rir_root: /scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/v1_verified/rir
+  split_before_simulation: true
+  rescore_every_generated_waveform: true
+
+row_budget:
+  vctk_internal_rows: 1536
+  vctk_external_rows: 192
+  merged_internal_task_rows: 2148
+  nominal_usable_rows_if_new_scores_are_valid:
+    surrogate_train: 1650
+    surrogate_calibration: 248
+    surrogate_holdout: 248
+  minimum_exact_coverage: 0.95
+  minimum_split_condition_coverage: 0.90
+
+representation:
+  sample_rate: 16000
+  n_fft: 400
+  hop_length: 100
+  win_length: 400
+  magnitude_compression: 0.3
+  channels:
+    - standardized_log1p_compressed_magnitude
+    - energy_masked_cos_temporal_phase_increment
+    - energy_masked_sin_temporal_phase_increment
+  reason: >-
+    Temporal phase increments retain phase-related periodic information while
+    reducing dependence on arbitrary absolute phase and time origin.
+
+learned_routes:
+  waveform_architectures:
+    - frequency_aware
+    - phase_frequency_aware
+    - phase_compact_tfgrid
+  output_conditioned_head:
+    candidate: output_phase_tfgrid
+    training_target: own_exact_components
+    training_representation: waveform_derived_generator_compatible_spectrum
+    generator_representation: decoded_enhanced_magnitude_and_phase
+    freeze_before_generator_gradient: true
+    joint_head_generator_training_allowed: false
+  matched_budget:
+    batch_size: 16
+    maximum_optimizer_steps: 2000
+    maximum_epochs: 60
+    minimum_epochs: 15
+    early_stop_patience: 10
+    learning_rate: 0.0003
+    gradient_clip_norm: 5.0
+    seeds:
+      - 20260816
+      - 20260817
+      - 20260818
+
+predictor_gates:
+  level_spearman_min: 0.70
+  delta_spearman_min: 0.60
+  normalized_mae_max: 0.50
+  calibration_slope_range:
+    - 0.75
+    - 1.25
+  external_coverage_min: 0.99
+  internal_coverage_min: 0.95
+  required_slices:
+    - cs
+    - sv
+    - healthy
+    - patient
+    - pathological_severe_sv
+    - snr10
+    - vctk_external
+  require_anti_shortcut: true
+  require_finite_nonzero_bounded_input_gradient: true
+  require_three_second_transfer: true
+  multiseed_component_rule: complete_gate_in_at_least_two_of_three_seeds
+  route_minimum_coverage: one_of_cpps_hnr_plus_one_of_shimmer_ltas
+
+full_tfgrid_auto_promotion:
+  comparison: phase_compact_tfgrid_vs_frequency_aware
+  calibration_loss_relative_improvement_min: 0.15
+  median_component_nmae_relative_improvement_min: 0.10
+  additional_complete_components_min: 1
+  required_slice_regression_allowed: false
+
+waveform_pilot_gates:
+  exact_praat_all_six_reported: true
+  target: same_speaker_clean_pathological_reference
+  exact_improvement_fraction_min: 0.6666666667
+  median_normalized_gap_reduction_min: 0.02
+  non_target_median_normalized_gap_increase_max: 0.05
+  residual_rms_ceiling_db: -30.0
+  cosine_similarity_min: 0.99
+  clip_fraction_max: 0.0001
+  require_full_band_pathology_guardrails: true
+  require_cs_sv_and_severity_slices: true
+  require_denoising_metrics: true
+  formal_generator_training_allowed: false

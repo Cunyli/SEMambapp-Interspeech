@@ -46,6 +46,8 @@ from model.avqi_components import (
     DifferentiableAVQIComponentEstimator,
     FrequencyAwareSharedComponentHead,
     FrequencyAwareWaveformComponentPredictor,
+    PhaseAwareCompactTFGridWaveformComponentPredictor,
+    PhaseAwareFrequencyAwareWaveformComponentPredictor,
     PretrainedFullTFGridWaveformComponentPredictor,
     PraatDifferentiableAVQIComponentEstimator,
     SharedComponentHead,
@@ -54,6 +56,7 @@ from model.avqi_components import (
     enable_recurrent_input_gradients,
     freeze_module,
     freeze_module_for_input_gradient,
+    phase_aware_spectral_features,
     pool_frequency_aware_shared_feature_map,
     pool_shared_feature_map,
     standardized_component_loss,
@@ -119,6 +122,7 @@ EXTERNAL_REQUIRED_SLICES = (
 @dataclass(frozen=True)
 class Example:
     speaker_id: str
+    sample_id: str
     split: str
     condition: str
     view: str
@@ -151,6 +155,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shared-head-epochs", type=int, default=60)
     parser.add_argument("--waveform-epochs", type=int, default=60)
     parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument(
+        "--max-optimizer-steps",
+        type=int,
+        default=0,
+        help="matched per-candidate cap; zero keeps the historical epoch budget",
+    )
     parser.add_argument(
         "--expected-train-speakers",
         type=int,
@@ -211,6 +221,15 @@ def component_tensor(row: dict[str, str], prefix: str = "") -> torch.Tensor:
     return tensor
 
 
+def row_sample_id(row: dict[str, str]) -> str:
+    """Return a stable within-speaker sample key with v1/v2 compatibility."""
+    return (
+        row.get("sample_id", "").strip()
+        or row.get("pair_id", "").strip()
+        or row["speaker_id"]
+    )
+
+
 def load_waveform(path: Path) -> torch.Tensor:
     audio, sample_rate = sf.read(path, dtype="float32", always_2d=True)
     if sample_rate != SAMPLE_RATE or audio.shape[1] != 1 or audio.shape[0] == 0:
@@ -231,11 +250,19 @@ def load_examples(
     if not all_task_rows:
         raise ValueError("label bank contains no CS/SV task rows")
     row_keys = [
-        (row["speaker_id"], row["split"], row["condition_id"], row["view"])
+        (
+            row["speaker_id"],
+            row_sample_id(row),
+            row["split"],
+            row["condition_id"],
+            row["view"],
+        )
         for row in all_task_rows
     ]
     if len(row_keys) != len(set(row_keys)):
-        raise ValueError("duplicate speaker/split/condition/view rows in label bank")
+        raise ValueError(
+            "duplicate speaker/sample/split/condition/view rows in label bank"
+        )
     actual_splits = {row["split"] for row in all_task_rows}
     if actual_splits != set(expected_split_speakers):
         raise ValueError(
@@ -281,7 +308,7 @@ def load_examples(
             if first < second and first_speakers & second_speakers:
                 raise ValueError(f"speaker leakage between {first} and {second}")
     clean_targets = {
-        (row["speaker_id"], row["view"]): component_tensor(row)
+        (row["speaker_id"], row_sample_id(row), row["view"]): component_tensor(row)
         for row in task_rows
         if row["condition_id"] == "clean"
     }
@@ -292,12 +319,14 @@ def load_examples(
         expected_hash = row[f"{view}_sha256"]
         if sha256_file(path) != expected_hash:
             raise ValueError(f"audio hash mismatch: {path}")
-        key = (row["speaker_id"], view)
+        sample_id = row_sample_id(row)
+        key = (row["speaker_id"], sample_id, view)
         if key not in clean_targets:
             raise ValueError(f"missing clean target for {key}")
         examples.append(
             Example(
                 speaker_id=row["speaker_id"],
+                sample_id=sample_id,
                 split=row["split"],
                 condition=row["condition_id"],
                 view=view,
@@ -380,6 +409,11 @@ def shared_feature_maps(
     config: dict[str, Any],
 ) -> dict[str, torch.Tensor]:
     magnitude, phase, _ = normalized_stft_input(waveform, config)
+    input_phase_spectral = phase_aware_spectral_features(
+        magnitude,
+        phase,
+        time_dim=-1,
+    ).transpose(-2, -1)
     magnitude = magnitude.permute(0, 2, 1).unsqueeze(1)
     phase = phase.permute(0, 2, 1).unsqueeze(1)
     shared = model.dense_encoder(torch.cat((magnitude, phase), dim=1))
@@ -396,16 +430,40 @@ def shared_feature_maps(
         ),
         dim=1,
     )
+    output_phase_spectral = phase_aware_spectral_features(
+        enhanced_magnitude,
+        enhanced_phase,
+        time_dim=-2,
+    )
     return {
         "encoder": encoder,
         "late": shared,
         "enhanced_spectral": enhanced_spectral,
+        "input_phase_spectral": input_phase_spectral,
+        "output_phase_spectral": output_phase_spectral,
+    }
+
+
+def input_phase_feature_maps(
+    waveform: torch.Tensor,
+    config: dict[str, Any],
+) -> dict[str, torch.Tensor]:
+    """Build the scorer-training representation without running the generator."""
+    magnitude, phase, _ = normalized_stft_input(waveform, config)
+    return {
+        "input_phase_spectral": phase_aware_spectral_features(
+            magnitude,
+            phase,
+            time_dim=-1,
+        ).transpose(-2, -1)
     }
 
 
 def pool_shared_candidate(
     feature_maps: dict[str, torch.Tensor],
     candidate: str,
+    *,
+    training: bool = False,
 ) -> torch.Tensor:
     if candidate == "late_global":
         return pool_shared_feature_map(feature_maps["late"])
@@ -428,6 +486,14 @@ def pool_shared_candidate(
             feature_maps["enhanced_spectral"],
             frequency_bins=FREQUENCY_BINS,
         )
+    if candidate == "output_phase_tfgrid":
+        key = "input_phase_spectral" if training else "output_phase_spectral"
+        frequency_time = feature_maps[key].transpose(-2, -1)
+        bounded = torch.nn.functional.adaptive_avg_pool2d(
+            frequency_time,
+            (TFGRID_FREQUENCY_BINS, TFGRID_TIME_BINS),
+        )
+        return bounded.transpose(-2, -1)
     raise ValueError(f"unknown shared candidate: {candidate}")
 
 
@@ -436,7 +502,7 @@ def shared_head_forward(
     features: torch.Tensor,
     candidate: str,
 ) -> torch.Tensor:
-    if candidate == "late_tfgrid":
+    if candidate in {"late_tfgrid", "output_phase_tfgrid"}:
         return head(features)
     return head.forward_pooled(features)
 
@@ -470,10 +536,20 @@ def extract_shared_features(
     rows: dict[str, list[torch.Tensor]] = {candidate: [] for candidate in candidates}
     with torch.no_grad():
         for index, example in enumerate(examples, start=1):
-            maps = shared_feature_maps(model, example.waveform.to(device), config)
+            if candidates == ("output_phase_tfgrid",):
+                maps = input_phase_feature_maps(
+                    example.waveform.to(device),
+                    config,
+                )
+            else:
+                maps = shared_feature_maps(model, example.waveform.to(device), config)
             for candidate in rows:
                 rows[candidate].append(
-                    pool_shared_candidate(maps, candidate).cpu()[0]
+                    pool_shared_candidate(
+                        maps,
+                        candidate,
+                        training=True,
+                    ).cpu()[0]
                 )
             if index % 25 == 0 or index == len(examples):
                 print(f"shared_feature_rows={index}/{len(examples)}", flush=True)
@@ -511,6 +587,7 @@ def train_shared_head(
     patience: int,
     seed: int,
     candidate: str,
+    max_optimizer_steps: int = 0,
 ) -> tuple[
     torch.nn.Module,
     dict[str, Any],
@@ -518,7 +595,10 @@ def train_shared_head(
     torch.Tensor,
 ]:
     set_model_seed(seed)
-    target_mean, target_scale = target_stats(examples, "clean_target", device)
+    target_attribute = (
+        "own_target" if candidate == "output_phase_tfgrid" else "clean_target"
+    )
+    target_mean, target_scale = target_stats(examples, target_attribute, device)
     features = pooled_features.to(device)
     if candidate == "late_global":
         head: torch.nn.Module = SharedComponentHead(
@@ -530,7 +610,7 @@ def train_shared_head(
             feature_channels=feature_channels,
             frequency_bins=FREQUENCY_BINS,
         )
-    elif candidate == "late_tfgrid":
+    elif candidate in {"late_tfgrid", "output_phase_tfgrid"}:
         head = CompactTFGridSharedComponentHead(
             feature_channels=pooled_features.shape[1]
         )
@@ -548,7 +628,7 @@ def train_shared_head(
         if example.split == "surrogate_train"
     ]
     train_targets = torch.stack(
-        [example.clean_target for example in examples]
+        [getattr(example, target_attribute) for example in examples]
     ).to(device)
     generator = torch.Generator().manual_seed(seed)
     best_loss = math.inf
@@ -580,6 +660,8 @@ def train_shared_head(
             )
             optimizer.step()
             optimizer_steps += 1
+            if max_optimizer_steps and optimizer_steps >= max_optimizer_steps:
+                break
         head.eval()
         value = calibration_loss(
             head,
@@ -589,7 +671,7 @@ def train_shared_head(
                 candidate,
             ),
             examples,
-            "clean_target",
+            target_attribute,
             target_mean,
             target_scale,
         )
@@ -603,6 +685,8 @@ def train_shared_head(
             stale += 1
         if epoch >= SCREEN_MIN_EPOCHS and stale >= patience:
             break
+        if max_optimizer_steps and optimizer_steps >= max_optimizer_steps:
+            break
     if best_state is None:
         raise RuntimeError("shared head did not produce a checkpoint")
     head.load_state_dict(best_state)
@@ -614,6 +698,7 @@ def train_shared_head(
             "best_calibration_loss": best_loss,
             "epochs_ran": len(history),
             "optimizer_steps": optimizer_steps,
+            "target_attribute": target_attribute,
             "history": history,
         },
         target_mean,
@@ -630,6 +715,7 @@ def train_waveform_predictor(
     architecture: str,
     cached_spectrograms: torch.Tensor | None = None,
     full_tfgrid_checkpoint: Path | None = None,
+    max_optimizer_steps: int = 0,
 ) -> tuple[
     torch.nn.Module,
     dict[str, Any],
@@ -646,8 +732,14 @@ def train_waveform_predictor(
         predictor = FrequencyAwareWaveformComponentPredictor(
             frequency_bins=FREQUENCY_BINS
         )
+    elif architecture == "phase_frequency_aware":
+        predictor = PhaseAwareFrequencyAwareWaveformComponentPredictor(
+            frequency_bins=FREQUENCY_BINS
+        )
     elif architecture == "compact_tfgrid":
         predictor = CompactTFGridWaveformComponentPredictor()
+    elif architecture == "phase_compact_tfgrid":
+        predictor = PhaseAwareCompactTFGridWaveformComponentPredictor()
     elif architecture == "pretrained_full_tfgrid":
         if full_tfgrid_checkpoint is None:
             raise ValueError(
@@ -820,6 +912,8 @@ def train_waveform_predictor(
             optimizer.step()
             optimizer_steps += 1
             epoch_losses.append(float(loss.detach().cpu()))
+            if max_optimizer_steps and optimizer_steps >= max_optimizer_steps:
+                break
         predictor.eval()
         value = calibration_loss(
             predictor,
@@ -849,6 +943,8 @@ def train_waveform_predictor(
         else:
             stale += 1
         if epoch >= SCREEN_MIN_EPOCHS and stale >= patience:
+            break
+        if max_optimizer_steps and optimizer_steps >= max_optimizer_steps:
             break
     if best_state is None:
         raise RuntimeError("waveform predictor did not produce a checkpoint")
@@ -924,7 +1020,7 @@ def cache_waveform_spectrograms(
     spectrograms = []
     with torch.inference_mode():
         for index, example in enumerate(examples, start=1):
-            spectrograms.append(predictor.log_spectrogram(example.waveform).cpu()[0])
+            spectrograms.append(predictor.cache_features(example.waveform).cpu()[0])
             if index % 50 == 0 or index == len(examples):
                 print(f"waveform_spectrogram_rows={index}/{len(examples)}", flush=True)
     shapes = {tuple(spectrogram.shape) for spectrogram in spectrograms}
@@ -1108,21 +1204,24 @@ def paired_delta_spearman(
         for index, example in enumerate(examples)
         if example.split == "surrogate_holdout"
     ]
-    grouped: dict[tuple[str, str], dict[str, tuple[torch.Tensor, torch.Tensor]]] = {}
+    grouped: dict[
+        tuple[str, str, str],
+        dict[str, tuple[torch.Tensor, torch.Tensor]],
+    ] = {}
     for index, example in holdout:
-        grouped.setdefault((example.speaker_id, example.view), {})[example.condition] = (
-            example.own_target,
-            predictions[index],
-        )
+        grouped.setdefault(
+            (example.speaker_id, example.sample_id, example.view), {}
+        )[example.condition] = (example.own_target, predictions[index])
     exact_deltas = []
     predicted_deltas = []
     for conditions in grouped.values():
-        if set(conditions) != {"clean", "aug16k_phone"}:
-            raise ValueError("holdout clean/phone pairing failed")
-        exact_deltas.append(conditions["aug16k_phone"][0] - conditions["clean"][0])
-        predicted_deltas.append(
-            conditions["aug16k_phone"][1] - conditions["clean"][1]
-        )
+        if "clean" not in conditions or len(conditions) < 2:
+            raise ValueError("holdout clean/degraded pairing failed")
+        for condition, values in conditions.items():
+            if condition == "clean":
+                continue
+            exact_deltas.append(values[0] - conditions["clean"][0])
+            predicted_deltas.append(values[1] - conditions["clean"][1])
     exact = torch.stack(exact_deltas).numpy()
     predicted = torch.stack(predicted_deltas).numpy()
     return {
@@ -1141,19 +1240,22 @@ def paired_clean_target_stability(
         for index, example in enumerate(examples)
         if example.split == "surrogate_holdout"
     ]
-    grouped: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
+    grouped: dict[tuple[str, str, str], dict[str, torch.Tensor]] = {}
     for index, example in holdout:
-        grouped.setdefault((example.speaker_id, example.view), {})[
-            example.condition
-        ] = predictions[index]
+        grouped.setdefault(
+            (example.speaker_id, example.sample_id, example.view), {}
+        )[example.condition] = predictions[index]
     deltas = []
     for conditions in grouped.values():
-        if set(conditions) != {"clean", "aug16k_phone"}:
-            raise ValueError("holdout clean/phone pairing failed")
-        deltas.append(
-            (conditions["aug16k_phone"] - conditions["clean"]).abs()
-            / train_scale.cpu().clamp_min(1e-8)
-        )
+        if "clean" not in conditions or len(conditions) < 2:
+            raise ValueError("holdout clean/degraded pairing failed")
+        for condition, prediction in conditions.items():
+            if condition == "clean":
+                continue
+            deltas.append(
+                (prediction - conditions["clean"]).abs()
+                / train_scale.cpu().clamp_min(1e-8)
+            )
     mean_delta = torch.stack(deltas).mean(dim=0)
     return {
         name: float(mean_delta[index])
@@ -1526,9 +1628,13 @@ def gradient_smokes(
     shared_backbone_norm = gradient_norm(backbone_parameters)
     shared_head_norm = gradient_norm(list(selected_head.parameters()))
     shared_decoder_norm = gradient_norm(decoder_parameters)
+    output_conditioned = selected_candidate in {
+        "enhanced_spectral",
+        "output_phase_tfgrid",
+    }
     shared_decoder_path_valid = (
         shared_decoder_norm > 1e-8
-        if selected_candidate == "enhanced_spectral"
+        if output_conditioned
         else shared_decoder_norm == 0.0
     )
     shared_finite = all(
@@ -1615,7 +1721,7 @@ def gradient_smokes(
             "decoder_gradient_norm": shared_decoder_norm,
             "decoder_gradient_expected": (
                 "nonzero"
-                if selected_candidate == "enhanced_spectral"
+                if output_conditioned
                 else "zero"
             ),
             "component_input_gradients": shared_component_gradients,
@@ -1898,6 +2004,7 @@ def shared_external_stress_test(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     with csv_path.open(newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
+    output_conditioned = candidate == "output_phase_tfgrid"
     eligible = [
         row
         for row in rows
@@ -1905,7 +2012,32 @@ def shared_external_stress_test(
         and row["condition"] in EXTERNAL_CONDITIONS
         and row["view"] in {"cs", "sv"}
     ]
-    selected = [row for row in eligible if row["scoring_status"] == "ok"]
+    enhanced_by_key: dict[tuple[str, str, str], dict[str, str]] = {}
+    if output_conditioned:
+        for row in rows:
+            if (
+                row["source_type"] == "enhanced"
+                and row["candidate"] == EXTERNAL_PRIMARY_CANDIDATE
+                and row["condition"] in EXTERNAL_CONDITIONS
+                and row["view"] in {"cs", "sv"}
+            ):
+                key = (row["speaker_id"], row["condition"], row["view"])
+                if key in enhanced_by_key:
+                    raise ValueError(f"duplicate enhanced external row: {key}")
+                enhanced_by_key[key] = row
+
+    def external_row_is_usable(row: dict[str, str]) -> bool:
+        if row["scoring_status"] != "ok":
+            return False
+        if not output_conditioned:
+            return True
+        key = (row["speaker_id"], row["condition"], row["view"])
+        return (
+            key in enhanced_by_key
+            and enhanced_by_key[key]["scoring_status"] == "ok"
+        )
+
+    selected = [row for row in eligible if external_row_is_usable(row)]
     expected_rows = EXPECTED_EXTERNAL_SPEAKERS * 2 * len(EXTERNAL_CONDITIONS)
     coverage = external_coverage_report(eligible, selected, expected_rows)
     speaker_ids = {row["speaker_id"] for row in eligible}
@@ -1937,7 +2069,13 @@ def shared_external_stress_test(
                 target_scale,
             )
             prediction = calibrator(raw_prediction).cpu()[0]
-            reference = component_tensor(row, prefix="clean_")
+            if output_conditioned:
+                key = (row["speaker_id"], row["condition"], row["view"])
+                reference = component_tensor(enhanced_by_key[key], prefix="audio_")
+                reference_source = "exact_enhanced_S3_500"
+            else:
+                reference = component_tensor(row, prefix="clean_")
+                reference_source = "same_speaker_clean"
             predictions.append(prediction)
             references.append(reference)
             item: dict[str, Any] = {
@@ -1947,6 +2085,7 @@ def shared_external_stress_test(
                 "label": row["label"],
                 "audio_path": str(path),
                 "audio_sha256": sha256_file(path),
+                "reference_source": reference_source,
             }
             for component_index, component in enumerate(AVQI_COMPONENT_NAMES):
                 item[f"exact_{component}"] = float(reference[component_index])
@@ -2024,6 +2163,11 @@ def shared_external_stress_test(
         "slices": slices,
         "slice_coverage": slice_coverage,
         "stress_overall": primary,
+        "reference_source": (
+            "exact enhanced S3_500 waveform components"
+            if output_conditioned
+            else "same-speaker clean waveform components"
+        ),
     }
     return report, output_rows
 
@@ -2044,6 +2188,7 @@ def prediction_rows(
     for index, example in enumerate(examples):
         row: dict[str, Any] = {
             "speaker_id": example.speaker_id,
+            "sample_id": example.sample_id,
             "split": example.split,
             "condition": example.condition,
             "view": example.view,
@@ -2179,11 +2324,14 @@ def main() -> None:
         "late_frequency",
         "late_tfgrid",
         "enhanced_spectral",
+        "output_phase_tfgrid",
     }
     allowed_waveform = {
         "global_stats",
         "frequency_aware",
+        "phase_frequency_aware",
         "compact_tfgrid",
+        "phase_compact_tfgrid",
         "pretrained_full_tfgrid",
         "direct_exact_inspired",
         "direct_praat_soft_v2",
@@ -2198,6 +2346,13 @@ def main() -> None:
             "unknown waveform architectures: "
             f"{sorted(set(waveform_architectures) - allowed_waveform)}"
         )
+    if "output_phase_tfgrid" in shared_candidates and len(shared_candidates) != 1:
+        raise ValueError(
+            "output_phase_tfgrid has own-waveform targets and must be screened "
+            "separately from legacy clean-target shared heads"
+        )
+    if args.max_optimizer_steps < 0:
+        raise ValueError("max optimizer steps cannot be negative")
     uses_full_tfgrid = "pretrained_full_tfgrid" in waveform_architectures
     if uses_full_tfgrid and (
         args.full_tfgrid_checkpoint is None
@@ -2268,7 +2423,12 @@ def main() -> None:
         "routes": {
             "shared_dual_head": {
                 "candidates": list(shared_candidates),
-                "target": "same-speaker clean exact Praat components",
+                "target": (
+                    "own waveform exact Praat components; frozen before "
+                    "attachment to decoded enhanced magnitude and phase"
+                    if shared_candidates == ("output_phase_tfgrid",)
+                    else "same-speaker clean exact Praat components"
+                ),
             },
             "frozen_independent_predictor": {
                 "architectures": list(waveform_architectures),
@@ -2356,6 +2516,7 @@ def main() -> None:
             "independent_max_epochs": args.waveform_epochs,
             "minimum_epochs": SCREEN_MIN_EPOCHS,
             "early_stop_patience": args.patience,
+            "maximum_optimizer_steps_per_candidate": args.max_optimizer_steps,
         },
         "multiseed_confirmation": {
             "seeds": [args.seed + 1, args.seed + 2, args.seed + 3],
@@ -2440,6 +2601,7 @@ def main() -> None:
             args.patience,
             args.seed,
             candidate,
+            args.max_optimizer_steps,
         )
         shared_models[candidate] = head
         training["parameter_count"] = sum(
@@ -2455,10 +2617,11 @@ def main() -> None:
             device,
             candidate,
         )
+        shared_target_attribute = training["target_attribute"]
         calibrator = fit_component_calibrator(
             examples,
             raw_predictions,
-            "clean_target",
+            shared_target_attribute,
             device,
         )
         shared_raw_predictions[candidate] = raw_predictions
@@ -2475,6 +2638,7 @@ def main() -> None:
                 "calibration_scale": calibrator.scale.cpu(),
                 "calibration_bias": calibrator.bias.cpu(),
                 "candidate": candidate,
+                "target_attribute": shared_target_attribute,
                 "parameter_count": sum(
                     parameter.numel() for parameter in head.parameters()
                 ),
@@ -2498,20 +2662,37 @@ def main() -> None:
         "direct_praat_soft_v2",
         "direct_praat_hard_v2",
     }
+    magnitude_architectures = {
+        "global_stats",
+        "frequency_aware",
+        "compact_tfgrid",
+    }
+    phase_architectures = {
+        "phase_frequency_aware",
+        "phase_compact_tfgrid",
+    }
     standard_architectures = set(waveform_architectures) - cacheless_architectures
-    cached_spectrograms: torch.Tensor | None = None
-    if standard_architectures:
+    cached_magnitude_spectrograms: torch.Tensor | None = None
+    cached_phase_spectrograms: torch.Tensor | None = None
+    if standard_architectures & magnitude_architectures:
         spectrogram_template = WaveformComponentPredictor()
-        cached_spectrograms = cache_waveform_spectrograms(
+        cached_magnitude_spectrograms = cache_waveform_spectrograms(
             spectrogram_template,
             examples,
         )
-    for architecture in waveform_architectures:
-        architecture_cache = (
-            None
-            if architecture in cacheless_architectures
-            else cached_spectrograms
+    if standard_architectures & phase_architectures:
+        phase_template = PhaseAwareFrequencyAwareWaveformComponentPredictor()
+        cached_phase_spectrograms = cache_waveform_spectrograms(
+            phase_template,
+            examples,
         )
+    for architecture in waveform_architectures:
+        if architecture in cacheless_architectures:
+            architecture_cache = None
+        elif architecture in phase_architectures:
+            architecture_cache = cached_phase_spectrograms
+        else:
+            architecture_cache = cached_magnitude_spectrograms
         predictor, training, mean, scale, trained_cache = train_waveform_predictor(
             examples,
             device,
@@ -2521,6 +2702,7 @@ def main() -> None:
             architecture,
             architecture_cache,
             args.full_tfgrid_checkpoint,
+            args.max_optimizer_steps,
         )
         raw_predictions = predict_waveforms(
             predictor,
@@ -2575,24 +2757,33 @@ def main() -> None:
     shared_candidate_reports: dict[str, Any] = {}
     for candidate in pooled:
         _, scale = shared_stats[candidate]
+        output_conditioned = candidate == "output_phase_tfgrid"
+        shared_target_attribute = (
+            "own_target" if output_conditioned else "clean_target"
+        )
+        shared_primary_filter = (
+            (lambda example: True)
+            if output_conditioned
+            else (lambda example: example.condition == "aug16k_phone")
+        )
         shared_candidate_reports[candidate] = {
             "raw": route_metrics(
                 examples,
                 shared_raw_predictions[candidate],
-                "clean_target",
+                shared_target_attribute,
                 scale,
-                primary_filter=lambda example: example.condition == "aug16k_phone",
-                include_delta_gate=False,
-                include_stability_gate=True,
+                primary_filter=shared_primary_filter,
+                include_delta_gate=output_conditioned,
+                include_stability_gate=not output_conditioned,
             ),
             "calibrated": route_metrics(
                 examples,
                 shared_predictions[candidate],
-                "clean_target",
+                shared_target_attribute,
                 scale,
-                primary_filter=lambda example: example.condition == "aug16k_phone",
-                include_delta_gate=False,
-                include_stability_gate=True,
+                primary_filter=shared_primary_filter,
+                include_delta_gate=output_conditioned,
+                include_stability_gate=not output_conditioned,
             ),
         }
     waveform_architecture_reports: dict[str, Any] = {}
@@ -2637,8 +2828,18 @@ def main() -> None:
 
     def shared_predict(waveform: torch.Tensor) -> torch.Tensor:
         with torch.inference_mode():
-            maps = shared_feature_maps(generator, waveform.to(device), config)
-            pooled_features = pool_shared_candidate(maps, selected_candidate)
+            if selected_candidate == "output_phase_tfgrid":
+                maps = input_phase_feature_maps(
+                    waveform.to(device),
+                    config,
+                )
+            else:
+                maps = shared_feature_maps(generator, waveform.to(device), config)
+            pooled_features = pool_shared_candidate(
+                maps,
+                selected_candidate,
+                training=selected_candidate == "output_phase_tfgrid",
+            )
             normalized = shared_head_forward(
                 selected_head,
                 pooled_features,
@@ -2655,7 +2856,9 @@ def main() -> None:
         examples,
         shared_predict,
         shared_scale,
-        expect_degradation_sensitivity=False,
+        expect_degradation_sensitivity=(
+            selected_candidate == "output_phase_tfgrid"
+        ),
     )
     independent_anti = anti_shortcut_report(
         examples,
@@ -2682,7 +2885,11 @@ def main() -> None:
         examples,
         shared_predict,
         shared_scale,
-        "clean_target",
+        (
+            "own_target"
+            if selected_candidate == "output_phase_tfgrid"
+            else "clean_target"
+        ),
     )
     independent_segment_transfer = training_segment_transfer_report(
         examples,
