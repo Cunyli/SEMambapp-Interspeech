@@ -99,6 +99,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     prepare = read("scripts/prepare_avqi_component_v4_vctk.py")
     score = read("scripts/build_avqi_component_v4_label_bank.py")
     launcher = read("scripts/run_avqi_component_v4_data.sh")
+    screen = read("scripts/run_avqi_component_v4_screen.sh")
     diagnostic = read("scripts/evaluate_avqi_component_backprop.py")
     assert '"surrogate_train": 72' in prepare
     assert '"surrogate_calibration": 12' in prepare
@@ -114,6 +115,12 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert '"phase_frequency_aware"' in diagnostic
     assert '"phase_compact_tfgrid"' in diagnostic
     assert '"--max-optimizer-steps"' in diagnostic
+    assert 'SHARED_CANDIDATES="output_phase_tfgrid"' in screen
+    assert "frequency_aware,phase_frequency_aware,phase_compact_tfgrid" in screen
+    assert 'WAVEFORM_ARCHITECTURES="direct_praat_hard_v2"' in screen
+    assert 'EXPECTED_TRAIN_SPEAKERS="${EXPECTED_TRAIN_SPEAKERS:-197}"' in screen
+    assert 'DEPENDENCY_ARGS=(--dependency="afterok:$DEPENDENCY_JOB_ID")' in screen
+    assert "exec \"$DIAGNOSTIC_LAUNCHER\"" in screen
 
 
 def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None:
