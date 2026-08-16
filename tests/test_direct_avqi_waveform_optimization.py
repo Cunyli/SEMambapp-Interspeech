@@ -7,6 +7,8 @@ from pathlib import Path
 import soundfile as sf
 import torch
 
+from scripts.audit_avqi_waveform_guardrails import clean_reference_paths
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -105,6 +107,61 @@ def test_full_band_guardrail_uses_clean_pathological_reference() -> None:
     assert report["airflow_proxy_energy_gap_increase_db"] == 0.0
     assert report["airflow_proxy_flatness_gap_increase"] == 0.0
     assert report["pause_f1_change"] == 0.0
+
+
+def test_guardrail_reference_map_uses_view_specific_rows(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "exact.csv"
+    fieldnames = [
+        "source_type",
+        "label",
+        "scoring_status",
+        "speaker_id",
+        "view",
+        "cs_path",
+        "sv_path",
+    ]
+    rows = [
+        {
+            "source_type": "clean_reference",
+            "label": "patient",
+            "scoring_status": "ok",
+            "speaker_id": "FD11",
+            "view": "both",
+            "cs_path": "/ignored/combined_cs.wav",
+            "sv_path": "/ignored/combined_sv.wav",
+        },
+        {
+            "source_type": "clean_reference",
+            "label": "patient",
+            "scoring_status": "ok",
+            "speaker_id": "FD11",
+            "view": "cs",
+            "cs_path": "/clean/FD11_cs.wav",
+            "sv_path": "/clean/FD11_sv.wav",
+        },
+        {
+            "source_type": "clean_reference",
+            "label": "patient",
+            "scoring_status": "ok",
+            "speaker_id": "FD11",
+            "view": "sv",
+            "cs_path": "/clean/FD11_cs.wav",
+            "sv_path": "/clean/FD11_sv.wav",
+        },
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    references = clean_reference_paths(csv_path)
+
+    assert references == {
+        ("FD11", "cs"): Path("/clean/FD11_cs.wav"),
+        ("FD11", "sv"): Path("/clean/FD11_sv.wav"),
+    }
 
 
 def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:

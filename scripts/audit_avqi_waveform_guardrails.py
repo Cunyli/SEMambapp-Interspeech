@@ -94,13 +94,14 @@ def clean_reference_paths(path: Path) -> dict[tuple[str, str], Path]:
             row["source_type"] != "clean_reference"
             or row["label"] != "patient"
             or row["scoring_status"] != "ok"
+            or row["view"] not in {"cs", "sv"}
         ):
             continue
-        for view in ("cs", "sv"):
-            key = (row["speaker_id"], view)
-            if key in output:
-                raise ValueError(f"duplicate clean reference: {key}")
-            output[key] = Path(row[f"{view}_path"])
+        view = row["view"]
+        key = (row["speaker_id"], view)
+        if key in output:
+            raise ValueError(f"duplicate clean reference: {key}")
+        output[key] = Path(row[f"{view}_path"])
     return output
 
 
