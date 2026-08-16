@@ -285,6 +285,7 @@ def test_avqi_phaseaware_v4_full_tfgrid_promotion_is_frozen_and_conservative() -
 def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None:
     source = read("scripts/evaluate_direct_avqi_waveform_optimization.py")
     audit = read("scripts/audit_avqi_waveform_guardrails.py")
+    audit_runner = read("scripts/run_avqi_waveform_guardrail_audit.sh")
     assert 'CANDIDATE = "S3_500"' in source
     assert 'CONDITION = "snr10"' in source
     assert 'OPTIMIZED_COMPONENTS = ("hnr", "tilt")' in source
@@ -311,6 +312,10 @@ def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None
     assert "optimized waveform hash drift" in audit
     assert "declared audit source commit differs from repository HEAD" in audit
     assert '"generator_optimizer_steps": 0' in audit
+    assert 'SOURCE_RESULTS_CSV_SHA256="2d376668' in audit_runner
+    assert 'PREDICTOR_CHECKPOINT_SHA256="11779b5' in audit_runner
+    assert "CONFIRM_SLURM_SUBMIT" in audit_runner
+    assert 'python "$AUDIT_SCRIPT"' in audit_runner
     assert "FAIL_WAVEFORM_OPTIMIZATION" in source
 
 
