@@ -1,5 +1,5 @@
 #!/bin/bash
-# V3 predictor screen only: no generator optimizer step is implemented by this job.
+# AVQI scorer screen only: no generator optimizer step is implemented by this job.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,6 +8,7 @@ DEFAULT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT}"
 SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 PYTHON_SCRIPT="${PYTHON_SCRIPT:-$SOURCE_ROOT/scripts/evaluate_avqi_component_backprop.py}"
+ROUTE_SCOPE="${ROUTE_SCOPE:-all}"
 JOB_NAME="${JOB_NAME:-avqi-predictor-screen}"
 PARTITION="${PARTITION:-gpu-v100-32g}"
 GPU_TYPE="${GPU_TYPE:-v100}"
@@ -50,6 +51,7 @@ SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}"
 # repository inside the allocation. Preserve every resolved path and contract
 # value explicitly across the submit boundary.
 export ROOT_DIR SOURCE_ROOT PYTHON_SCRIPT
+export ROUTE_SCOPE
 export JOB_NAME PARTITION GPU_TYPE CPUS_PER_TASK MEMORY TIME_LIMIT
 export SOFTWARE_STACK_MODULE COMPILER_MODULE
 export RUN_ROOT LOG_DIR OUTPUT_DIR CHECKPOINT_DIR
@@ -132,6 +134,28 @@ if [[ -n "$VCTK_EXTERNAL_LABEL_BANK" || -n "$VCTK_EXTERNAL_LABEL_BANK_SHA256" ]]
   )
 fi
 
+ROUTE_SCOPE_ARGS=()
+SHARED_CANDIDATE_ARGS=(--shared-candidates "$SHARED_CANDIDATES")
+case "$ROUTE_SCOPE" in
+  all) ;;
+  direct_only)
+    if [[ "$MAX_OPTIMIZER_STEPS" != "0" ]]; then
+      echo "Route C direct-only evaluation requires MAX_OPTIMIZER_STEPS=0" >&2
+      exit 2
+    fi
+    if [[ -n "$FULL_TFGRID_CHECKPOINT" || -n "$FULL_TFGRID_CHECKPOINT_SHA256" ]]; then
+      echo "Route C direct-only evaluation rejects full TF-GridNet inputs" >&2
+      exit 2
+    fi
+    ROUTE_SCOPE_ARGS=(--route-scope direct_only)
+    SHARED_CANDIDATE_ARGS=()
+    ;;
+  *)
+    echo "ROUTE_SCOPE must be all or direct_only, got: $ROUTE_SCOPE" >&2
+    exit 2
+    ;;
+esac
+
 python "$PYTHON_SCRIPT" \
   --label-bank "$LABEL_BANK" \
   --label-bank-sha256 "$LABEL_BANK_SHA256" \
@@ -148,7 +172,8 @@ python "$PYTHON_SCRIPT" \
   --expected-train-speakers "$EXPECTED_TRAIN_SPEAKERS" \
   --expected-calibration-speakers "$EXPECTED_CALIBRATION_SPEAKERS" \
   --expected-holdout-speakers "$EXPECTED_HOLDOUT_SPEAKERS" \
-  --shared-candidates "$SHARED_CANDIDATES" \
+  "${ROUTE_SCOPE_ARGS[@]}" \
+  "${SHARED_CANDIDATE_ARGS[@]}" \
   --waveform-architectures "$WAVEFORM_ARCHITECTURES" \
   --max-optimizer-steps "$MAX_OPTIMIZER_STEPS" \
   "${VCTK_EXTERNAL_ARGS[@]}" \

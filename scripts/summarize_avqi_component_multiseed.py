@@ -27,6 +27,8 @@ COMPONENT_FAMILIES = {
     "tilt": "spectral_shape",
 }
 ROUTES = ("shared_dual_head", "frozen_independent_predictor")
+DIRECT_ROUTE = "direct_differentiable_estimator"
+DIRECT_ONLY_ROUTES = (DIRECT_ROUTE,)
 EXPECTED_CONFIRMATION_REPORTS = 3
 CONSENSUS_PASS_COUNT = 2
 EXPECTED_SCREEN_FORMS = {
@@ -59,6 +61,9 @@ EXPECTED_DIRECT_V4_SCREEN_FORMS = {
 EXPECTED_FULL_V4_SCREEN_FORMS = {
     "shared_dual_head": ["output_phase_tfgrid"],
     "frozen_independent_predictor": ["pretrained_full_tfgrid"],
+}
+EXPECTED_DIRECT_C_SCREEN_FORMS = {
+    DIRECT_ROUTE: ["direct_praat_hard_v2"],
 }
 
 
@@ -106,8 +111,23 @@ def selected_form(report: dict[str, Any], route: str) -> str:
     return str(route_report["selected_architecture"])
 
 
+def active_routes(report: dict[str, Any]) -> tuple[str, ...]:
+    route_scope = report["contract"].get("route_scope", "all")
+    if route_scope == "direct_only":
+        return DIRECT_ONLY_ROUTES
+    if route_scope == "all":
+        return ROUTES
+    raise ValueError(f"unknown route scope: {route_scope}")
+
+
 def validate_report_shape(report: dict[str, Any], path: Path) -> None:
-    if report.get("decision") != "COMPLETED_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE":
+    route_scope = report.get("contract", {}).get("route_scope", "all")
+    expected_decision = (
+        "COMPLETED_ROUTE_C_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE"
+        if route_scope == "direct_only"
+        else "COMPLETED_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE"
+    )
+    if report.get("decision") != expected_decision:
         raise ValueError(f"report is not a completed predictor screen: {path}")
     if report.get("generator_optimizer_steps") != 0:
         raise ValueError(f"generator update found in predictor report: {path}")
@@ -115,13 +135,62 @@ def validate_report_shape(report: dict[str, Any], path: Path) -> None:
         raise ValueError(f"formal training state is ambiguous: {path}")
     if tuple(report["contract"]["components"]) != COMPONENTS:
         raise ValueError(f"AVQI component contract differs: {path}")
-    for route in ROUTES:
+    for route in active_routes(report):
         if route not in report["routes"]:
             raise ValueError(f"missing route {route}: {path}")
+    if route_scope == "direct_only":
+        for skipped_route in ROUTES:
+            if report["routes"].get(skipped_route, {}).get("status") != (
+                "SKIPPED_USER_SCOPE"
+            ):
+                raise ValueError(
+                    f"Route C report did not skip {skipped_route}: {path}"
+                )
 
 
 def validate_screen_contract(screen: dict[str, Any], path: Path) -> None:
     contract = screen["contract"]
+    if contract.get("route_scope", "all") == "direct_only":
+        for skipped_route in ROUTES:
+            if contract["routes"][skipped_route]["status"] != "SKIPPED_USER_SCOPE":
+                raise ValueError(
+                    f"Route C contract did not skip {skipped_route}: {path}"
+                )
+        observed_forms = {
+            DIRECT_ROUTE: contract["routes"][DIRECT_ROUTE]["architectures"]
+        }
+        if observed_forms != EXPECTED_DIRECT_C_SCREEN_FORMS:
+            raise ValueError(f"Route C screen forms are incomplete: {path}")
+        route_report = screen["routes"][DIRECT_ROUTE]
+        if route_report["selection_rule"] != (
+            "lowest calibration loss before holdout evaluation"
+        ):
+            raise ValueError(f"Route C selection rule differs: {path}")
+        selected = selected_form(screen, DIRECT_ROUTE)
+        training = route_report["training"]
+        calibration_winner = min(
+            training,
+            key=lambda name: training[name]["best_calibration_loss"],
+        )
+        if selected != calibration_winner:
+            raise ValueError(
+                f"Route C selection did not follow calibration loss: {path}"
+            )
+        if any(
+            item["optimizer_steps"] != 0
+            or item["trainable_parameter_count"] != 0
+            for item in training.values()
+        ):
+            raise ValueError(f"Route C screen contains learned optimization: {path}")
+        if contract["direct_formula_budget"] != {
+            "trainable_parameters": 0,
+            "optimizer_steps": 0,
+            "maximum_optimizer_steps": 0,
+        }:
+            raise ValueError(f"Route C formula budget differs: {path}")
+        if contract["calibration"]["holdout_used_for_fit_or_selection"] is not False:
+            raise ValueError(f"holdout was used during Route C selection: {path}")
+        return
     observed_forms = {
         "shared_dual_head": contract["routes"]["shared_dual_head"][
             "candidates"
@@ -176,16 +245,22 @@ def validate_confirmation_set(
         raise ValueError("screen report does not declare exactly three seeds")
     source_hashes = screen["contract"]["source_sha256"]
     source_commit = screen["contract"]["source_commit"]
-    locked_contract_keys = (
+    locked_contract_keys = [
         "anti_shortcut",
         "gates",
         "matched_external_primary_candidate",
-        "matched_training_budget",
-    )
+    ]
+    if screen["contract"].get("route_scope", "all") == "direct_only":
+        locked_contract_keys.append("direct_formula_budget")
+    else:
+        locked_contract_keys.append("matched_training_budget")
+    screen_routes = active_routes(screen)
     observed_seeds = []
     for report, path in zip(confirmations, paths, strict=True):
         validate_report_shape(report, path)
         contract = report["contract"]
+        if active_routes(report) != screen_routes:
+            raise ValueError(f"route scope differs: {path}")
         if contract["source_sha256"] != source_hashes:
             raise ValueError(f"source hashes differ: {path}")
         if contract["source_commit"] != source_commit:
@@ -195,17 +270,23 @@ def validate_confirmation_set(
                 raise ValueError(f"locked contract key {key} differs: {path}")
         seed = int(contract["architecture_screen_seed"])
         observed_seeds.append(seed)
-        for route in ROUTES:
+        for route in screen_routes:
             if selected_form(report, route) != selected_form(screen, route):
                 raise ValueError(f"{route} architecture was not locked: {path}")
-        if contract["routes"]["shared_dual_head"]["candidates"] != [
-            selected_form(screen, "shared_dual_head")
-        ]:
-            raise ValueError(f"shared candidate list was not locked: {path}")
-        if contract["routes"]["frozen_independent_predictor"][
-            "architectures"
-        ] != [selected_form(screen, "frozen_independent_predictor")]:
-            raise ValueError(f"independent architecture was not locked: {path}")
+        if screen_routes == DIRECT_ONLY_ROUTES:
+            if contract["routes"][DIRECT_ROUTE]["architectures"] != [
+                selected_form(screen, DIRECT_ROUTE)
+            ]:
+                raise ValueError(f"Route C estimator was not locked: {path}")
+        else:
+            if contract["routes"]["shared_dual_head"]["candidates"] != [
+                selected_form(screen, "shared_dual_head")
+            ]:
+                raise ValueError(f"shared candidate list was not locked: {path}")
+            if contract["routes"]["frozen_independent_predictor"][
+                "architectures"
+            ] != [selected_form(screen, "frozen_independent_predictor")]:
+                raise ValueError(f"independent architecture was not locked: {path}")
     if sorted(observed_seeds) != sorted(expected_seeds):
         raise ValueError(
             f"confirmation seeds differ: expected {expected_seeds}, "
@@ -248,16 +329,31 @@ def route_consensus(
     }
 
 
-def promotion_decision(routes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def promotion_decision(
+    routes: dict[str, dict[str, Any]],
+    route_names: tuple[str, ...] = ROUTES,
+) -> dict[str, Any]:
     reliable = [
-        route for route in ROUTES if routes[route]["decision"] == "RELIABLE"
+        route for route in route_names if routes[route]["decision"] == "RELIABLE"
     ]
     if not reliable:
         return {
             "decision": "NO_GO_AVQI_BACKPROP",
             "routes": [],
             "components": [],
-            "reason": "neither route has stable coverage across two concept families",
+            "reason": (
+                "no in-scope route has stable coverage across two concept families"
+            ),
+        }
+    if route_names == DIRECT_ONLY_ROUTES:
+        return {
+            "decision": "GO_BOUNDED_ROUTE_C_WAVEFORM_PILOT",
+            "routes": [DIRECT_ROUTE],
+            "components": routes[DIRECT_ROUTE]["consensus_components"],
+            "reason": (
+                "Route C passed the three-seed scorer gate; this authorizes only "
+                "a bounded waveform pilot"
+            ),
         }
     if len(reliable) == 1:
         route = reliable[0]
@@ -296,7 +392,7 @@ def markdown_summary(report: dict[str, Any]) -> str:
         "| Route | Locked form | Stable components | Decision |",
         "|---|---|---|---|",
     ]
-    for route in ROUTES:
+    for route in report["active_routes"]:
         route_report = report["routes"][route]
         components = ", ".join(route_report["consensus_components"]) or "none"
         lines.append(
@@ -329,12 +425,17 @@ def main() -> None:
         confirmations,
         args.confirmation_reports,
     )
+    route_names = active_routes(screen)
     routes = {
         route: route_consensus(confirmations, route)
-        for route in ROUTES
+        for route in route_names
     }
     report = {
-        "schema_version": "avqi-component-multiseed-consensus-v1",
+        "schema_version": (
+            "avqi-component-multiseed-consensus-v2"
+            if route_names == DIRECT_ONLY_ROUTES
+            else "avqi-component-multiseed-consensus-v1"
+        ),
         "screen_report": str(args.screen_report.resolve()),
         "confirmation_reports": [
             str(path.resolve()) for path in args.confirmation_reports
@@ -349,9 +450,12 @@ def main() -> None:
         "consensus_rule": (
             "component passes its complete gate in at least two of three locked seeds"
         ),
+        "route_scope": screen["contract"].get("route_scope", "all"),
+        "active_routes": list(route_names),
         "routes": routes,
-        "promotion": promotion_decision(routes),
+        "promotion": promotion_decision(routes, route_names),
         "generator_optimizer_steps": 0,
+        "bounded_waveform_pilot_submitted": False,
         "formal_pathology_training_submitted": False,
     }
     args.output_dir.mkdir(parents=True)
@@ -364,6 +468,8 @@ def main() -> None:
         "routes": report["promotion"]["routes"],
         "components": report["promotion"]["components"],
         "generator_optimizer_steps": 0,
+        "bounded_waveform_pilot_submitted": False,
+        "formal_pathology_training_submitted": False,
         "artifact_sha256": {
             report_path.name: sha256_file(report_path),
             summary_path.name: sha256_file(summary_path),

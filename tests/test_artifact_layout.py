@@ -29,15 +29,27 @@ def test_repository_documents_compact_artifact_contract() -> None:
 
 def test_avqi_diagnostic_separates_models_from_reports() -> None:
     source = read("scripts/evaluate_avqi_component_backprop.py")
+    direct_source = read("scripts/evaluate_avqi_component_direct_c.py")
     launcher = read("scripts/slurm_avqi_component_backprop_diagnostic.sh")
     multiseed = read("scripts/summarize_avqi_component_multiseed.py")
     assert 'parser.add_argument("--checkpoint-dir"' in source
     assert 'parser.add_argument("--config-sha256"' in source
     assert 'parser.add_argument("--source-commit"' in source
+    assert 'choices=("direct_only",)' in direct_source
+    assert 'ROUTE_KEY = "direct_differentiable_estimator"' in direct_source
+    assert '"shared_dual_head": {"status": "SKIPPED_USER_SCOPE"}' in direct_source
+    assert (
+        '"frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"}'
+        in direct_source
+    )
+    assert "train_shared_head" not in direct_source
+    assert 'training["optimizer_steps"] != 0' in direct_source
     assert 'args.output_dir / "checkpoints"' not in source
     assert '--checkpoint-dir "$CHECKPOINT_DIR"' in launcher
     assert '--config-sha256 "$CONFIG_SHA256"' in launcher
     assert '--source-commit "$SOURCE_COMMIT"' in launcher
+    assert 'ROUTE_SCOPE="${ROUTE_SCOPE:-all}"' in launcher
+    assert "SHARED_CANDIDATE_ARGS=()" in launcher
     assert "export ROOT_DIR SOURCE_ROOT PYTHON_SCRIPT" in launcher
     assert "export RUN_ROOT LOG_DIR OUTPUT_DIR CHECKPOINT_DIR" in launcher
     assert '"late_tfgrid"' in source
@@ -146,9 +158,10 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert "exec bash \"$DIAGNOSTIC_LAUNCHER\"" in screen
     assert "CONFIRMATION_SEEDS=(20260816 20260817 20260818)" in confirm
     assert 'CONFIRM_KIND="${CONFIRM_KIND:-phase}"' in confirm
-    assert 'direct:direct_praat_hard_v2' in confirm
+    assert 'ROUTE_SCOPE" != "direct_only"' in confirm
+    assert '.routes.direct_differentiable_estimator.selected_architecture' in confirm
     assert 'full:pretrained_full_tfgrid' in confirm
-    assert 'CONFIRM_RUN_STEM="avqi_component_direct_hard_v4_confirm"' in confirm
+    assert 'CONFIRM_RUN_STEM="avqi_component_direct_c_v5_confirm"' in confirm
     assert 'SHARED_CANDIDATES="$(jq -er' in confirm
     assert 'WAVEFORM_ARCHITECTURES="$(jq -er' in confirm
     assert 'contract.source_commit' in confirm
@@ -371,6 +384,21 @@ def test_avqi_multiseed_entry_point_runs_from_repository_root() -> None:
     assert "three locked AVQI-component predictor confirmations" in result.stdout
 
 
+def test_avqi_route_c_entry_point_runs_from_repository_root() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/evaluate_avqi_component_direct_c.py",
+            "--help",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "Route C-only AVQI component screen" in result.stdout
+
+
 def test_avqi_multiseed_consensus_uses_two_of_three_complete_passes() -> None:
     namespace = runpy.run_path(
         REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
@@ -530,6 +558,71 @@ def test_avqi_multiseed_accepts_pretrained_full_tfgrid_screen() -> None:
         screen,
         Path("full-tfgrid-v4-screen.json"),
     )
+
+
+def test_avqi_multiseed_accepts_route_c_only_screen() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
+    )
+    screen = {
+        "contract": {
+            "route_scope": "direct_only",
+            "routes": {
+                "shared_dual_head": {
+                    "status": "SKIPPED_USER_SCOPE",
+                    "candidates": [],
+                },
+                "frozen_independent_predictor": {
+                    "status": "SKIPPED_USER_SCOPE",
+                    "architectures": [],
+                },
+                "direct_differentiable_estimator": {
+                    "architectures": ["direct_praat_hard_v2"]
+                },
+            },
+            "direct_formula_budget": {
+                "trainable_parameters": 0,
+                "optimizer_steps": 0,
+                "maximum_optimizer_steps": 0,
+            },
+            "calibration": {"holdout_used_for_fit_or_selection": False},
+        },
+        "routes": {
+            "shared_dual_head": {"status": "SKIPPED_USER_SCOPE"},
+            "frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"},
+            "direct_differentiable_estimator": {
+                "selected_architecture": "direct_praat_hard_v2",
+                "selection_rule": "lowest calibration loss before holdout evaluation",
+                "training": {
+                    "direct_praat_hard_v2": {
+                        "best_calibration_loss": 0.06,
+                        "optimizer_steps": 0,
+                        "trainable_parameter_count": 0,
+                    }
+                },
+            },
+        },
+    }
+    namespace["validate_screen_contract"](
+        screen,
+        Path("route-c-screen.json"),
+    )
+
+
+def test_avqi_multiseed_route_c_authorizes_only_bounded_waveform_pilot() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
+    )
+    direct_route = namespace["DIRECT_ROUTE"]
+    routes = {
+        direct_route: {
+            "decision": "RELIABLE",
+            "consensus_components": ["hnr", "tilt"],
+        }
+    }
+    promotion = namespace["promotion_decision"](routes, (direct_route,))
+    assert promotion["decision"] == "GO_BOUNDED_ROUTE_C_WAVEFORM_PILOT"
+    assert promotion["components"] == ["hnr", "tilt"]
 
 
 def test_avqi_multiseed_promotion_uses_common_components_for_two_routes() -> None:

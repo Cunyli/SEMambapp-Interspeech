@@ -7,21 +7,22 @@ SELF_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 DIAGNOSTIC_LAUNCHER="$SOURCE_ROOT/scripts/slurm_avqi_component_backprop_diagnostic.sh"
-DATA_RUN_ROOT="${DATA_RUN_ROOT:-$ROOT_DIR/runs/avqi_component_phaseaware_v4_data_20260816_02}"
-LABEL_RECEIPT="${LABEL_RECEIPT:-$DATA_RUN_ROOT/outputs/label_bank/receipt.json}"
 CONFIRM_KIND="${CONFIRM_KIND:-phase}"
 case "$CONFIRM_KIND" in
   phase)
+    DEFAULT_DATA_RUN_ROOT="$ROOT_DIR/runs/avqi_component_phaseaware_v4_data_20260816_02"
     DEFAULT_SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_phaseaware_v4_screen_20260816_01"
     CONFIRM_RUN_STEM="avqi_component_phaseaware_v4_confirm"
     CONFIRM_JOB_PREFIX="avqi-v4-p"
     ;;
   direct)
-    DEFAULT_SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_direct_hard_v4_screen_20260816_01"
-    CONFIRM_RUN_STEM="avqi_component_direct_hard_v4_confirm"
-    CONFIRM_JOB_PREFIX="avqi-v4-d"
+    DEFAULT_DATA_RUN_ROOT="$ROOT_DIR/runs/avqi_component_direct_c_v5_data_20260816_02"
+    DEFAULT_SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_direct_c_v5_screen_20260817_01"
+    CONFIRM_RUN_STEM="avqi_component_direct_c_v5_confirm"
+    CONFIRM_JOB_PREFIX="avqi-v5-c"
     ;;
   full)
+    DEFAULT_DATA_RUN_ROOT="$ROOT_DIR/runs/avqi_component_phaseaware_v4_data_20260816_02"
     DEFAULT_SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_pretrained_full_tfgrid_v4_screen_20260816_01"
     CONFIRM_RUN_STEM="avqi_component_pretrained_full_tfgrid_v4_confirm"
     CONFIRM_JOB_PREFIX="avqi-v4-f"
@@ -31,6 +32,8 @@ case "$CONFIRM_KIND" in
     exit 2
     ;;
 esac
+DATA_RUN_ROOT="${DATA_RUN_ROOT:-$DEFAULT_DATA_RUN_ROOT}"
+LABEL_RECEIPT="${LABEL_RECEIPT:-$DATA_RUN_ROOT/outputs/label_bank/receipt.json}"
 SCREEN_RUN_ROOT="${SCREEN_RUN_ROOT:-$DEFAULT_SCREEN_RUN_ROOT}"
 SCREEN_REPORT="${SCREEN_REPORT:-$SCREEN_RUN_ROOT/outputs/diagnostic_report.json}"
 DEPENDENCY_JOB_ID="${DEPENDENCY_JOB_ID:-}"
@@ -115,10 +118,16 @@ for path in "$SCREEN_REPORT" "$LABEL_RECEIPT" "$DIAGNOSTIC_LAUNCHER"; do
     exit 2
   fi
 done
-if [[ "$(jq -er '.decision' "$SCREEN_REPORT")" != "COMPLETED_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE" ]]; then
-  echo "Screen report is not complete" >&2
-  exit 2
-fi
+SCREEN_DECISION="$(jq -er '.decision' "$SCREEN_REPORT")"
+case "$CONFIRM_KIND:$SCREEN_DECISION" in
+  direct:COMPLETED_ROUTE_C_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE) ;;
+  phase:COMPLETED_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE) ;;
+  full:COMPLETED_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE) ;;
+  *)
+    echo "Screen report is not complete for $CONFIRM_KIND: $SCREEN_DECISION" >&2
+    exit 2
+    ;;
+esac
 if [[ "$(jq -er '.generator_optimizer_steps' "$SCREEN_REPORT")" != "0" ]]; then
   echo "Screen report contains generator updates" >&2
   exit 2
@@ -128,21 +137,45 @@ if [[ "$(jq -er '.contract.source_commit' "$SCREEN_REPORT")" != "$SOURCE_COMMIT"
   exit 2
 fi
 
-SHARED_CANDIDATES="$(jq -er '.routes.shared_dual_head.selected_candidate' "$SCREEN_REPORT")"
-WAVEFORM_ARCHITECTURES="$(jq -er '.routes.frozen_independent_predictor.selected_architecture' "$SCREEN_REPORT")"
-if [[ "$SHARED_CANDIDATES" != "output_phase_tfgrid" ]]; then
-  echo "Unexpected locked shared candidate: $SHARED_CANDIDATES" >&2
+ROUTE_SCOPE="$(jq -er '.contract.route_scope // "all"' "$SCREEN_REPORT")"
+PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_component_backprop.py"
+if [[ "$CONFIRM_KIND" == "direct" ]]; then
+  if [[ "$ROUTE_SCOPE" != "direct_only" ]]; then
+    echo "Direct confirmation requires a direct_only screen" >&2
+    exit 2
+  fi
+  SHARED_CANDIDATES=""
+  WAVEFORM_ARCHITECTURES="$(jq -er '.routes.direct_differentiable_estimator.selected_architecture' "$SCREEN_REPORT")"
+  PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_component_direct_c.py"
+  MAX_OPTIMIZER_STEPS=0
+  if [[ "$WAVEFORM_ARCHITECTURES" != "direct_praat_hard_v2" ]]; then
+    echo "Unexpected locked Route C estimator: $WAVEFORM_ARCHITECTURES" >&2
+    exit 2
+  fi
+else
+  if [[ "$ROUTE_SCOPE" != "all" ]]; then
+    echo "$CONFIRM_KIND confirmation requires the two-route screen contract" >&2
+    exit 2
+  fi
+  SHARED_CANDIDATES="$(jq -er '.routes.shared_dual_head.selected_candidate' "$SCREEN_REPORT")"
+  WAVEFORM_ARCHITECTURES="$(jq -er '.routes.frozen_independent_predictor.selected_architecture' "$SCREEN_REPORT")"
+  if [[ "$SHARED_CANDIDATES" != "output_phase_tfgrid" ]]; then
+    echo "Unexpected locked shared candidate: $SHARED_CANDIDATES" >&2
+    exit 2
+  fi
+  case "$CONFIRM_KIND:$WAVEFORM_ARCHITECTURES" in
+    phase:frequency_aware|phase:phase_frequency_aware|phase:phase_compact_tfgrid) ;;
+    full:pretrained_full_tfgrid) ;;
+    *)
+      echo "Unexpected locked $CONFIRM_KIND architecture: $WAVEFORM_ARCHITECTURES" >&2
+      exit 2
+      ;;
+  esac
+fi
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+  echo "Missing scorer source: $PYTHON_SCRIPT" >&2
   exit 2
 fi
-case "$CONFIRM_KIND:$WAVEFORM_ARCHITECTURES" in
-  phase:frequency_aware|phase:phase_frequency_aware|phase:phase_compact_tfgrid) ;;
-  direct:direct_praat_hard_v2) ;;
-  full:pretrained_full_tfgrid) ;;
-  *)
-    echo "Unexpected locked $CONFIRM_KIND architecture: $WAVEFORM_ARCHITECTURES" >&2
-    exit 2
-    ;;
-esac
 
 LABEL_BANK="$(jq -er '.internal_label_bank' "$LABEL_RECEIPT")"
 LABEL_BANK_SHA256="$(jq -er '.internal_label_bank_sha256' "$LABEL_RECEIPT")"
@@ -161,6 +194,6 @@ export SHARED_CANDIDATES WAVEFORM_ARCHITECTURES LABEL_BANK LABEL_BANK_SHA256
 export VCTK_EXTERNAL_LABEL_BANK VCTK_EXTERNAL_LABEL_BANK_SHA256 CONFIG
 export CHECKPOINT EXTERNAL_EXACT_CSV CONFIG_SHA256 CHECKPOINT_SHA256
 export EXTERNAL_EXACT_CSV_SHA256 SEED JOB_NAME RUN_ROOT LOG_DIR OUTPUT_DIR
-export CHECKPOINT_DIR
+export CHECKPOINT_DIR ROUTE_SCOPE PYTHON_SCRIPT MAX_OPTIMIZER_STEPS
 
 exec bash "$DIAGNOSTIC_LAUNCHER"

@@ -19,10 +19,10 @@ case "$CONSENSUS_KIND" in
     JOB_NAME="avqi-v4-pcons"
     ;;
   direct)
-    SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_direct_hard_v4_screen_20260816_01"
-    CONFIRM_RUN_STEM="avqi_component_direct_hard_v4_confirm"
-    RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_hard_v4_multiseed_20260816_01}"
-    JOB_NAME="avqi-v4-dcons"
+    SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_direct_c_v5_screen_20260817_01"
+    CONFIRM_RUN_STEM="avqi_component_direct_c_v5_confirm"
+    RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_c_v5_multiseed_20260817_01}"
+    JOB_NAME="avqi-v5-ccons"
     ;;
   full)
     SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_pretrained_full_tfgrid_v4_screen_20260816_01"

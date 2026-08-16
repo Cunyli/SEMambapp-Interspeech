@@ -7,8 +7,6 @@ SELF_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 DIAGNOSTIC_LAUNCHER="$SOURCE_ROOT/scripts/slurm_avqi_component_backprop_diagnostic.sh"
-DATA_RUN_ROOT="${DATA_RUN_ROOT:-$ROOT_DIR/runs/avqi_component_phaseaware_v4_data_20260816_02}"
-LABEL_RECEIPT="${LABEL_RECEIPT:-$DATA_RUN_ROOT/outputs/label_bank/receipt.json}"
 SCREEN_KIND="${SCREEN_KIND:-phase}"
 DEPENDENCY_JOB_ID="${DEPENDENCY_JOB_ID:-}"
 SEED="${SEED:-20260815}"
@@ -22,23 +20,33 @@ EXPECTED_TRAIN_SPEAKERS="${EXPECTED_TRAIN_SPEAKERS:-197}"
 EXPECTED_CALIBRATION_SPEAKERS="${EXPECTED_CALIBRATION_SPEAKERS:-26}"
 EXPECTED_HOLDOUT_SPEAKERS="${EXPECTED_HOLDOUT_SPEAKERS:-26}"
 MAX_OPTIMIZER_STEPS="${MAX_OPTIMIZER_STEPS:-2000}"
+ROUTE_SCOPE="all"
 SHARED_CANDIDATES="output_phase_tfgrid"
+PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_component_backprop.py"
 FULL_TFGRID_CHECKPOINT="${FULL_TFGRID_CHECKPOINT:-}"
 
 case "$SCREEN_KIND" in
   phase)
+    DEFAULT_DATA_RUN_ROOT="$ROOT_DIR/runs/avqi_component_phaseaware_v4_data_20260816_02"
     JOB_NAME="avqi-v4-phase"
     WAVEFORM_ARCHITECTURES="frequency_aware,phase_frequency_aware,phase_compact_tfgrid"
     RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_phaseaware_v4_screen_20260816_01}"
     CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_component_phaseaware_v4_screen_20260816_01}"
     ;;
   direct)
-    JOB_NAME="avqi-v4-direct"
+    DEFAULT_DATA_RUN_ROOT="$ROOT_DIR/runs/avqi_component_direct_c_v5_data_20260816_02"
+    JOB_NAME="avqi-v5-direct-c"
+    ROUTE_SCOPE="direct_only"
+    SHARED_CANDIDATES=""
+    PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_component_direct_c.py"
+    FULL_TFGRID_CHECKPOINT=""
     WAVEFORM_ARCHITECTURES="direct_praat_hard_v2"
-    RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_hard_v4_screen_20260816_01}"
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_component_direct_hard_v4_screen_20260816_01}"
+    MAX_OPTIMIZER_STEPS=0
+    RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_c_v5_screen_20260817_01}"
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_component_direct_c_v5_screen_20260817_01}"
     ;;
   full_tfgrid)
+    DEFAULT_DATA_RUN_ROOT="$ROOT_DIR/runs/avqi_component_phaseaware_v4_data_20260816_02"
     JOB_NAME="avqi-v4-fullgrid"
     WAVEFORM_ARCHITECTURES="pretrained_full_tfgrid"
     RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_pretrained_full_tfgrid_v4_screen_20260816_01}"
@@ -50,6 +58,9 @@ case "$SCREEN_KIND" in
     exit 2
     ;;
 esac
+
+DATA_RUN_ROOT="${DATA_RUN_ROOT:-$DEFAULT_DATA_RUN_ROOT}"
+LABEL_RECEIPT="${LABEL_RECEIPT:-$DATA_RUN_ROOT/outputs/label_bank/receipt.json}"
 
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
@@ -63,7 +74,7 @@ if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
 fi
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}"
 
-REQUIRED_PATHS=("$DIAGNOSTIC_LAUNCHER" "$CONFIG" "$CHECKPOINT" "$EXTERNAL_EXACT_CSV")
+REQUIRED_PATHS=("$DIAGNOSTIC_LAUNCHER" "$PYTHON_SCRIPT" "$CONFIG" "$CHECKPOINT" "$EXTERNAL_EXACT_CSV")
 if [[ "$SCREEN_KIND" == "full_tfgrid" ]]; then
   REQUIRED_PATHS+=("$FULL_TFGRID_CHECKPOINT")
 fi
@@ -80,7 +91,7 @@ export TIME_LIMIT EXPECTED_TRAIN_SPEAKERS EXPECTED_CALIBRATION_SPEAKERS
 export EXPECTED_HOLDOUT_SPEAKERS MAX_OPTIMIZER_STEPS SHARED_CANDIDATES
 export WAVEFORM_ARCHITECTURES JOB_NAME RUN_ROOT CHECKPOINT_DIR LOG_DIR OUTPUT_DIR
 export CONFIG CHECKPOINT EXTERNAL_EXACT_CSV SOURCE_COMMIT
-export FULL_TFGRID_CHECKPOINT
+export FULL_TFGRID_CHECKPOINT ROUTE_SCOPE PYTHON_SCRIPT
 
 mkdir -p "$LOG_DIR"
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
