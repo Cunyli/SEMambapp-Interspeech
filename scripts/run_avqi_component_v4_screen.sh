@@ -23,6 +23,7 @@ EXPECTED_CALIBRATION_SPEAKERS="${EXPECTED_CALIBRATION_SPEAKERS:-26}"
 EXPECTED_HOLDOUT_SPEAKERS="${EXPECTED_HOLDOUT_SPEAKERS:-26}"
 MAX_OPTIMIZER_STEPS="${MAX_OPTIMIZER_STEPS:-2000}"
 SHARED_CANDIDATES="output_phase_tfgrid"
+FULL_TFGRID_CHECKPOINT="${FULL_TFGRID_CHECKPOINT:-}"
 
 case "$SCREEN_KIND" in
   phase)
@@ -37,8 +38,15 @@ case "$SCREEN_KIND" in
     RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_hard_v4_screen_20260816_01}"
     CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_component_direct_hard_v4_screen_20260816_01}"
     ;;
+  full_tfgrid)
+    JOB_NAME="avqi-v4-fullgrid"
+    WAVEFORM_ARCHITECTURES="pretrained_full_tfgrid"
+    RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_pretrained_full_tfgrid_v4_screen_20260816_01}"
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_component_pretrained_full_tfgrid_v4_screen_20260816_01}"
+    FULL_TFGRID_CHECKPOINT="${FULL_TFGRID_CHECKPOINT:-/scratch/work/lil14/Hybrid_Unise/checkpoints/fusion_init_DISC-step122000_GEN-best-valnll2.358177-step092000/hybrid_unise_DISC_latest_step122000_epoch27.ckpt}"
+    ;;
   *)
-    echo "SCREEN_KIND must be phase or direct, got: $SCREEN_KIND" >&2
+    echo "SCREEN_KIND must be phase, direct, or full_tfgrid, got: $SCREEN_KIND" >&2
     exit 2
     ;;
 esac
@@ -55,7 +63,11 @@ if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
 fi
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}"
 
-for path in "$DIAGNOSTIC_LAUNCHER" "$CONFIG" "$CHECKPOINT" "$EXTERNAL_EXACT_CSV"; do
+REQUIRED_PATHS=("$DIAGNOSTIC_LAUNCHER" "$CONFIG" "$CHECKPOINT" "$EXTERNAL_EXACT_CSV")
+if [[ "$SCREEN_KIND" == "full_tfgrid" ]]; then
+  REQUIRED_PATHS+=("$FULL_TFGRID_CHECKPOINT")
+fi
+for path in "${REQUIRED_PATHS[@]}"; do
   if [[ ! -f "$path" ]]; then
     echo "Missing required source: $path" >&2
     exit 2
@@ -68,6 +80,7 @@ export TIME_LIMIT EXPECTED_TRAIN_SPEAKERS EXPECTED_CALIBRATION_SPEAKERS
 export EXPECTED_HOLDOUT_SPEAKERS MAX_OPTIMIZER_STEPS SHARED_CANDIDATES
 export WAVEFORM_ARCHITECTURES JOB_NAME RUN_ROOT CHECKPOINT_DIR LOG_DIR OUTPUT_DIR
 export CONFIG CHECKPOINT EXTERNAL_EXACT_CSV SOURCE_COMMIT
+export FULL_TFGRID_CHECKPOINT
 
 mkdir -p "$LOG_DIR"
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
@@ -87,6 +100,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     exit 2
   fi
   sbatch \
+    --parsable \
     --job-name="$JOB_NAME" \
     --partition="$PARTITION" \
     --nodes=1 \
@@ -136,8 +150,13 @@ fi
 CONFIG_SHA256="$(sha256sum "$CONFIG" | awk '{print $1}')"
 CHECKPOINT_SHA256="$(sha256sum "$CHECKPOINT" | awk '{print $1}')"
 EXTERNAL_EXACT_CSV_SHA256="$(sha256sum "$EXTERNAL_EXACT_CSV" | awk '{print $1}')"
+FULL_TFGRID_CHECKPOINT_SHA256=""
+if [[ "$SCREEN_KIND" == "full_tfgrid" ]]; then
+  FULL_TFGRID_CHECKPOINT_SHA256="$(sha256sum "$FULL_TFGRID_CHECKPOINT" | awk '{print $1}')"
+fi
 export LABEL_BANK LABEL_BANK_SHA256 VCTK_EXTERNAL_LABEL_BANK
 export VCTK_EXTERNAL_LABEL_BANK_SHA256 CONFIG_SHA256 CHECKPOINT_SHA256
 export EXTERNAL_EXACT_CSV_SHA256
+export FULL_TFGRID_CHECKPOINT FULL_TFGRID_CHECKPOINT_SHA256
 
 exec "$DIAGNOSTIC_LAUNCHER"

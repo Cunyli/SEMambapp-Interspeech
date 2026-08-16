@@ -1566,6 +1566,101 @@ def training_segment_transfer_report(
     }
 
 
+def independent_gradient_smoke(
+    generator: SEMambapp,
+    config: dict[str, Any],
+    waveform_predictor: torch.nn.Module,
+    waveform_mean: torch.Tensor,
+    waveform_scale: torch.Tensor,
+    waveform_calibrator: ComponentAffineCalibrator,
+    examples: list[Example],
+    device: torch.device,
+) -> dict[str, Any]:
+    """Verify one frozen scorer's gradients through the decoded waveform path."""
+    example = next(
+        item
+        for item in examples
+        if item.split == "surrogate_holdout"
+        and item.condition == "aug16k_phone"
+        and item.view == "sv"
+        and item.label == "patient"
+    )
+    waveform = fixed_segment(example.waveform).to(device)
+    clean_target = example.clean_target.to(device).unsqueeze(0)
+    backbone_parameters = [
+        parameter
+        for name, parameter in generator.named_parameters()
+        if name.startswith("dense_encoder") or name.startswith("TSMamba")
+    ]
+    decoder_parameters = [
+        parameter
+        for name, parameter in generator.named_parameters()
+        if name.startswith("mask_decoder") or name.startswith("phase_decoder")
+    ]
+
+    generator.zero_grad(set_to_none=True)
+    waveform_predictor.zero_grad(set_to_none=True)
+    freeze_module_for_input_gradient(waveform_predictor)
+    enhanced = enhance_waveform(generator, waveform, config)
+    normalized_prediction = waveform_predictor(enhanced)
+    normalized_prediction = calibrated_normalized_prediction(
+        normalized_prediction,
+        waveform_mean,
+        waveform_scale,
+        waveform_calibrator,
+    )
+    loss = standardized_component_loss(
+        normalized_prediction,
+        clean_target,
+        waveform_mean,
+        waveform_scale,
+    )
+    loss.backward()
+    backbone_norm = gradient_norm(backbone_parameters)
+    decoder_norm = gradient_norm(decoder_parameters)
+    predictor_gradients_absent = all(
+        parameter.grad is None for parameter in waveform_predictor.parameters()
+    )
+    finite = all(
+        math.isfinite(value) for value in (backbone_norm, decoder_norm)
+    )
+
+    with torch.no_grad():
+        predictor_input = enhance_waveform(generator, waveform, config)
+
+    def component_prediction(output_waveform: torch.Tensor) -> torch.Tensor:
+        normalized = waveform_predictor(output_waveform)
+        return calibrated_normalized_prediction(
+            normalized,
+            waveform_mean,
+            waveform_scale,
+            waveform_calibrator,
+        )
+
+    component_gradients = component_input_gradient_report(
+        predictor_input,
+        component_prediction,
+    )
+    return {
+        "loss": float(loss.detach().cpu()),
+        "backbone_gradient_norm": backbone_norm,
+        "decoder_gradient_norm": decoder_norm,
+        "predictor_gradients_absent": predictor_gradients_absent,
+        "component_input_gradients": component_gradients,
+        "input_gradient_execution_mode": (
+            "eval_except_zero_dropout_recurrent_modules"
+        ),
+        "decision": (
+            "PASS"
+            if finite
+            and backbone_norm > 1e-8
+            and decoder_norm > 1e-8
+            and predictor_gradients_absent
+            else "FAIL"
+        ),
+    }
+
+
 def gradient_smokes(
     generator: SEMambapp,
     config: dict[str, Any],
@@ -1671,49 +1766,15 @@ def gradient_smokes(
         shared_component_prediction,
     )
 
-    generator.zero_grad(set_to_none=True)
-    waveform_predictor.zero_grad(set_to_none=True)
-    freeze_module_for_input_gradient(waveform_predictor)
-    enhanced = enhance_waveform(generator, waveform, config)
-    normalized_prediction = waveform_predictor(enhanced)
-    normalized_prediction = calibrated_normalized_prediction(
-        normalized_prediction,
+    independent_report = independent_gradient_smoke(
+        generator,
+        config,
+        waveform_predictor,
         waveform_mean,
         waveform_scale,
         waveform_calibrator,
-    )
-    independent_loss = standardized_component_loss(
-        normalized_prediction,
-        clean_target,
-        waveform_mean,
-        waveform_scale,
-    )
-    independent_loss.backward()
-    independent_backbone_norm = gradient_norm(backbone_parameters)
-    independent_decoder_norm = gradient_norm(decoder_parameters)
-    predictor_gradients_absent = all(
-        parameter.grad is None for parameter in waveform_predictor.parameters()
-    )
-    independent_finite = all(
-        math.isfinite(value)
-        for value in (independent_backbone_norm, independent_decoder_norm)
-    )
-
-    with torch.no_grad():
-        independent_input = enhance_waveform(generator, waveform, config)
-
-    def independent_component_prediction(output_waveform: torch.Tensor) -> torch.Tensor:
-        normalized = waveform_predictor(output_waveform)
-        return calibrated_normalized_prediction(
-            normalized,
-            waveform_mean,
-            waveform_scale,
-            waveform_calibrator,
-        )
-
-    independent_component_gradients = component_input_gradient_report(
-        independent_input,
-        independent_component_prediction,
+        examples,
+        device,
     )
     return {
         "shared_dual_head": {
@@ -1740,24 +1801,7 @@ def gradient_smokes(
                 else "FAIL"
             ),
         },
-        "frozen_independent_predictor": {
-            "loss": float(independent_loss.detach().cpu()),
-            "backbone_gradient_norm": independent_backbone_norm,
-            "decoder_gradient_norm": independent_decoder_norm,
-            "predictor_gradients_absent": predictor_gradients_absent,
-            "component_input_gradients": independent_component_gradients,
-            "input_gradient_execution_mode": (
-                "eval_except_zero_dropout_recurrent_modules"
-            ),
-            "decision": (
-                "PASS"
-                if independent_finite
-                and independent_backbone_norm > 1e-8
-                and independent_decoder_norm > 1e-8
-                and predictor_gradients_absent
-                else "FAIL"
-            ),
-        },
+        "frozen_independent_predictor": independent_report,
     }
 
 
@@ -2942,16 +2986,6 @@ def main() -> None:
     waveform_calibrator = waveform_calibrators[selected_architecture]
     freeze_module(waveform_predictor)
 
-    def independent_predict(waveform: torch.Tensor) -> torch.Tensor:
-        with torch.inference_mode():
-            normalized = waveform_predictor(waveform.to(device))
-            raw = denormalize_components(
-                normalized,
-                waveform_mean,
-                waveform_scale,
-            )
-            return waveform_calibrator(raw).cpu()[0]
-
     def shared_predict(waveform: torch.Tensor) -> torch.Tensor:
         with torch.inference_mode():
             if selected_candidate == "output_phase_tfgrid":
@@ -2986,12 +3020,6 @@ def main() -> None:
             selected_candidate == "output_phase_tfgrid"
         ),
     )
-    independent_anti = anti_shortcut_report(
-        examples,
-        independent_predict,
-        waveform_scale,
-        expect_degradation_sensitivity=True,
-    )
     gradients = gradient_smokes(
         generator,
         config,
@@ -3017,22 +3045,135 @@ def main() -> None:
             else "clean_target"
         ),
     )
-    independent_segment_transfer = training_segment_transfer_report(
-        examples,
-        independent_predict,
-        waveform_scale,
-        "own_target",
-    )
     surrogate_speaker_ids = {example.speaker_id for example in examples}
-    independent_external, independent_external_rows = external_stress_test(
-        args.external_exact_csv,
-        waveform_predictor,
-        waveform_mean,
-        waveform_scale,
-        waveform_calibrator,
-        surrogate_speaker_ids,
-        device,
+    independent_anti_by_architecture: dict[str, dict[str, Any]] = {}
+    independent_gradient_by_architecture: dict[str, dict[str, Any]] = {}
+    independent_segment_transfer_by_architecture: dict[
+        str, dict[str, Any]
+    ] = {}
+    independent_external_by_architecture: dict[str, dict[str, Any]] = {}
+    independent_external_rows_by_architecture: dict[
+        str, list[dict[str, Any]]
+    ] = {}
+    independent_vctk_external_by_architecture: dict[
+        str, dict[str, Any] | None
+    ] = {}
+    independent_vctk_rows_by_architecture: dict[
+        str, list[dict[str, Any]]
+    ] = {}
+    independent_eligible_by_architecture: dict[str, list[str]] = {}
+    independent_decision_by_architecture: dict[str, str] = {}
+    for architecture, candidate_predictor in waveform_models.items():
+        candidate_mean, candidate_scale = waveform_stats[architecture]
+        candidate_calibrator = waveform_calibrators[architecture]
+        freeze_module(candidate_predictor)
+
+        def candidate_waveform_predict(
+            waveform: torch.Tensor,
+            current_predictor: torch.nn.Module = candidate_predictor,
+            current_mean: torch.Tensor = candidate_mean,
+            current_scale: torch.Tensor = candidate_scale,
+            current_calibrator: ComponentAffineCalibrator = candidate_calibrator,
+        ) -> torch.Tensor:
+            with torch.inference_mode():
+                normalized = current_predictor(waveform.to(device))
+                raw = denormalize_components(
+                    normalized,
+                    current_mean,
+                    current_scale,
+                )
+                return current_calibrator(raw).cpu()[0]
+
+        candidate_anti = anti_shortcut_report(
+            examples,
+            candidate_waveform_predict,
+            candidate_scale,
+            expect_degradation_sensitivity=True,
+        )
+        candidate_segment_transfer = training_segment_transfer_report(
+            examples,
+            candidate_waveform_predict,
+            candidate_scale,
+            "own_target",
+        )
+        if architecture == selected_architecture:
+            candidate_gradient = gradients["frozen_independent_predictor"]
+        else:
+            candidate_gradient = independent_gradient_smoke(
+                generator,
+                config,
+                candidate_predictor,
+                candidate_mean,
+                candidate_scale,
+                candidate_calibrator,
+                examples,
+                device,
+            )
+        candidate_external, candidate_external_rows = external_stress_test(
+            args.external_exact_csv,
+            candidate_predictor,
+            candidate_mean,
+            candidate_scale,
+            candidate_calibrator,
+            surrogate_speaker_ids,
+            device,
+        )
+        independent_external_by_architecture[architecture] = candidate_external
+        independent_external_rows_by_architecture[architecture] = (
+            candidate_external_rows
+        )
+        if uses_vctk_external:
+            candidate_vctk, candidate_vctk_rows = vctk_external_test(
+                args.vctk_external_label_bank,
+                candidate_waveform_predict,
+                candidate_scale,
+                surrogate_speaker_ids,
+            )
+        else:
+            candidate_vctk = None
+            candidate_vctk_rows = []
+        independent_vctk_external_by_architecture[architecture] = candidate_vctk
+        independent_vctk_rows_by_architecture[architecture] = (
+            candidate_vctk_rows
+        )
+        candidate_metrics = waveform_architecture_reports[architecture][
+            "calibrated"
+        ]
+        candidate_eligible = eligible_components(
+            candidate_metrics,
+            candidate_external,
+            candidate_anti,
+            candidate_gradient,
+            candidate_segment_transfer,
+            candidate_vctk,
+        )
+        independent_anti_by_architecture[architecture] = candidate_anti
+        independent_gradient_by_architecture[architecture] = candidate_gradient
+        independent_segment_transfer_by_architecture[architecture] = (
+            candidate_segment_transfer
+        )
+        independent_eligible_by_architecture[architecture] = candidate_eligible
+        independent_decision_by_architecture[architecture] = (
+            "ELIGIBLE_FOR_MULTISEED_CONFIRMATION"
+            if route_has_minimum_component_coverage(candidate_eligible)
+            else "NO_GO_GENERATOR_TRAINING"
+        )
+    independent_anti = independent_anti_by_architecture[selected_architecture]
+    independent_segment_transfer = (
+        independent_segment_transfer_by_architecture[selected_architecture]
     )
+    independent_external = independent_external_by_architecture[
+        selected_architecture
+    ]
+    independent_external_rows = independent_external_rows_by_architecture[
+        selected_architecture
+    ]
+    independent_vctk_external = independent_vctk_external_by_architecture[
+        selected_architecture
+    ]
+    independent_vctk_external_rows = independent_vctk_rows_by_architecture[
+        selected_architecture
+    ]
     shared_external, shared_external_rows = shared_external_stress_test(
         args.external_exact_csv,
         generator,
@@ -3052,19 +3193,9 @@ def main() -> None:
             shared_scale,
             surrogate_speaker_ids,
         )
-        independent_vctk_external, independent_vctk_external_rows = (
-            vctk_external_test(
-                args.vctk_external_label_bank,
-                independent_predict,
-                waveform_scale,
-                surrogate_speaker_ids,
-            )
-        )
     else:
         shared_vctk_external = None
-        independent_vctk_external = None
         shared_vctk_external_rows = []
-        independent_vctk_external_rows = []
 
     shared_metrics = shared_candidate_reports[selected_candidate]["calibrated"]
     independent_metrics = waveform_architecture_reports[selected_architecture][
@@ -3078,14 +3209,9 @@ def main() -> None:
         shared_segment_transfer,
         shared_vctk_external,
     )
-    independent_decision = route_decision(
-        independent_metrics,
-        independent_external,
-        independent_anti,
-        gradients["frozen_independent_predictor"],
-        independent_segment_transfer,
-        independent_vctk_external,
-    )
+    independent_decision = independent_decision_by_architecture[
+        selected_architecture
+    ]
     shared_eligible_components = eligible_components(
         shared_metrics,
         shared_external,
@@ -3094,14 +3220,9 @@ def main() -> None:
         shared_segment_transfer,
         shared_vctk_external,
     )
-    independent_eligible_components = eligible_components(
-        independent_metrics,
-        independent_external,
-        independent_anti,
-        gradients["frozen_independent_predictor"],
-        independent_segment_transfer,
-        independent_vctk_external,
-    )
+    independent_eligible_components = independent_eligible_by_architecture[
+        selected_architecture
+    ]
     if (
         independent_decision == "ELIGIBLE_FOR_MULTISEED_CONFIRMATION"
         and shared_decision != independent_decision
@@ -3178,6 +3299,39 @@ def main() -> None:
                 "gradient": gradients["frozen_independent_predictor"],
                 "external_enhancement_stress": independent_external,
                 "vctk_external_own_target_stress": independent_vctk_external,
+                "external_evaluation_by_architecture": {
+                    architecture: {
+                        "pathology": independent_external_by_architecture[
+                            architecture
+                        ],
+                        "vctk": independent_vctk_external_by_architecture[
+                            architecture
+                        ],
+                    }
+                    for architecture in waveform_models
+                },
+                "qualification_by_architecture": {
+                    architecture: {
+                        "anti_shortcut": independent_anti_by_architecture[
+                            architecture
+                        ],
+                        "training_segment_transfer": (
+                            independent_segment_transfer_by_architecture[
+                                architecture
+                            ]
+                        ),
+                        "gradient": independent_gradient_by_architecture[
+                            architecture
+                        ],
+                        "eligible_components": (
+                            independent_eligible_by_architecture[architecture]
+                        ),
+                        "decision": independent_decision_by_architecture[
+                            architecture
+                        ],
+                    }
+                    for architecture in waveform_models
+                },
                 "eligible_components": independent_eligible_components,
                 "decision": independent_decision,
             },
@@ -3212,6 +3366,12 @@ def main() -> None:
         args.output_dir / "external_independent_predictions.csv",
         independent_external_rows,
     )
+    for architecture, rows in independent_external_rows_by_architecture.items():
+        write_csv(
+            args.output_dir
+            / f"external_independent_{architecture}_predictions.csv",
+            rows,
+        )
     write_csv(
         args.output_dir / "external_shared_predictions.csv",
         shared_external_rows,
@@ -3221,6 +3381,12 @@ def main() -> None:
             args.output_dir / "vctk_external_independent_predictions.csv",
             independent_vctk_external_rows,
         )
+        for architecture, rows in independent_vctk_rows_by_architecture.items():
+            write_csv(
+                args.output_dir
+                / f"vctk_external_independent_{architecture}_predictions.csv",
+                rows,
+            )
         write_csv(
             args.output_dir / "vctk_external_shared_predictions.csv",
             shared_vctk_external_rows,
@@ -3249,6 +3415,19 @@ def main() -> None:
                     (
                         "vctk_external_independent_predictions.csv",
                         "vctk_external_shared_predictions.csv",
+                    )
+                    if uses_vctk_external
+                    else ()
+                ),
+                *tuple(
+                    f"external_independent_{architecture}_predictions.csv"
+                    for architecture in waveform_models
+                ),
+                *(
+                    tuple(
+                        "vctk_external_independent_"
+                        f"{architecture}_predictions.csv"
+                        for architecture in waveform_models
                     )
                     if uses_vctk_external
                     else ()

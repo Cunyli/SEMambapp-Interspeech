@@ -101,6 +101,8 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     launcher = read("scripts/run_avqi_component_v4_data.sh")
     screen = read("scripts/run_avqi_component_v4_screen.sh")
     confirm = read("scripts/run_avqi_component_v4_confirm.sh")
+    promotion = read("scripts/evaluate_avqi_component_v4_phase_promotion.py")
+    promotion_runner = read("scripts/run_avqi_component_v4_phase_promotion.sh")
     diagnostic = read("scripts/evaluate_avqi_component_backprop.py")
     assert '"surrogate_train": 72' in prepare
     assert '"surrogate_calibration": 12' in prepare
@@ -117,9 +119,13 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert '"phase_compact_tfgrid"' in diagnostic
     assert '"--max-optimizer-steps"' in diagnostic
     assert '"head_gradients_absent": head_gradients_absent' in diagnostic
+    assert '"qualification_by_architecture"' in diagnostic
+    assert "independent_gradient_smoke" in diagnostic
     assert 'SHARED_CANDIDATES="output_phase_tfgrid"' in screen
     assert "frequency_aware,phase_frequency_aware,phase_compact_tfgrid" in screen
     assert 'WAVEFORM_ARCHITECTURES="direct_praat_hard_v2"' in screen
+    assert 'WAVEFORM_ARCHITECTURES="pretrained_full_tfgrid"' in screen
+    assert 'SCREEN_KIND" == "full_tfgrid"' in screen
     assert 'EXPECTED_TRAIN_SPEAKERS="${EXPECTED_TRAIN_SPEAKERS:-197}"' in screen
     assert 'SEED="${SEED:-20260815}"' in screen
     assert 'DEPENDENCY_ARGS=(--dependency="afterok:$DEPENDENCY_JOB_ID")' in screen
@@ -129,6 +135,134 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'WAVEFORM_ARCHITECTURES="$(jq -er' in confirm
     assert 'contract.source_commit' in confirm
     assert "exec \"$DIAGNOSTIC_LAUNCHER\"" in confirm
+    assert 'PROMOTE_DECISION = "PROMOTE_PRETRAINED_FULL_TFGRID_SCREEN"' in promotion
+    assert "all_required_slice_medians_non_regressed" in promotion
+    assert '"generator_optimizer_steps": 0' in promotion
+    assert "PROMOTE_PRETRAINED_FULL_TFGRID_SCREEN" in promotion_runner
+    assert "env -u SLURM_JOB_ID" in promotion_runner
+    assert 'SCREEN_KIND=full_tfgrid' in promotion_runner
+    assert "full_tfgrid_submission.json" in promotion_runner
+
+
+def test_avqi_phaseaware_v4_full_tfgrid_promotion_is_frozen_and_conservative() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "evaluate_avqi_component_v4_phase_promotion.py"
+    )
+    components = (
+        "cpps",
+        "hnr",
+        "shimmer_percent",
+        "shimmer_db",
+        "slope",
+        "tilt",
+    )
+    architectures = (
+        "frequency_aware",
+        "phase_frequency_aware",
+        "phase_compact_tfgrid",
+    )
+
+    def metrics(nmae: float) -> dict[str, dict[str, float]]:
+        return {
+            component: {"normalized_mae": nmae}
+            for component in components
+        }
+
+    def coverage() -> dict[str, str]:
+        return {"decision": "PASS"}
+
+    def pathology_report(nmae: float) -> dict[str, object]:
+        slice_names = (
+            "view=cs",
+            "view=sv",
+            "label=healthy",
+            "label=patient",
+            "view=sv&sample_group=pathological_severe",
+            "condition=snr10",
+        )
+        return {
+            "slices": {name: metrics(nmae) for name in slice_names},
+            "slice_coverage": {name: coverage() for name in slice_names},
+        }
+
+    def vctk_report(nmae: float) -> dict[str, object]:
+        slice_names = tuple(
+            f"condition={condition}"
+            for condition in ("clean", "rir_only", "snr20", "snr10")
+        )
+        return {
+            "primary": metrics(nmae),
+            "primary_coverage": coverage(),
+            "slices": {name: metrics(nmae) for name in slice_names},
+            "slice_coverage": {name: coverage() for name in slice_names},
+        }
+
+    nmae = {
+        "frequency_aware": 0.40,
+        "phase_frequency_aware": 0.35,
+        "phase_compact_tfgrid": 0.25,
+    }
+    screen = {
+        "decision": "COMPLETED_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE",
+        "generator_optimizer_steps": 0,
+        "formal_pathology_training_submitted": False,
+        "contract": {
+            "components": list(components),
+            "routes": {
+                "frozen_independent_predictor": {
+                    "architectures": list(architectures)
+                }
+            },
+        },
+        "routes": {
+            "frozen_independent_predictor": {
+                "selected_architecture": "phase_compact_tfgrid",
+                "training": {
+                    "frequency_aware": {"best_calibration_loss": 0.10},
+                    "phase_frequency_aware": {"best_calibration_loss": 0.09},
+                    "phase_compact_tfgrid": {"best_calibration_loss": 0.08},
+                },
+                "all_architecture_metrics": {
+                    architecture: {
+                        "calibrated": {
+                            "primary": metrics(nmae[architecture]),
+                            "slices": {
+                                name: metrics(nmae[architecture])
+                                for name in ("cs", "sv", "healthy", "patient")
+                            },
+                        }
+                    }
+                    for architecture in architectures
+                },
+                "external_evaluation_by_architecture": {
+                    architecture: {
+                        "pathology": pathology_report(nmae[architecture]),
+                        "vctk": vctk_report(nmae[architecture]),
+                    }
+                    for architecture in architectures
+                },
+                "qualification_by_architecture": {
+                    "frequency_aware": {"eligible_components": ["hnr"]},
+                    "phase_frequency_aware": {"eligible_components": ["hnr"]},
+                    "phase_compact_tfgrid": {
+                        "eligible_components": ["hnr", "tilt"]
+                    },
+                },
+            }
+        },
+    }
+    promoted = namespace["evaluate_promotion"](screen)
+    assert promoted["decision"] == "PROMOTE_PRETRAINED_FULL_TFGRID_SCREEN"
+    assert all(promoted["gates"].values())
+
+    screen["routes"]["frozen_independent_predictor"][
+        "external_evaluation_by_architecture"
+    ]["phase_compact_tfgrid"]["vctk"]["slices"]["condition=snr10"] = metrics(
+        0.45
+    )
+    rejected = namespace["evaluate_promotion"](screen)
+    assert rejected["decision"] == "KEEP_COMPACT_NO_FULL_TFGRID"
+    assert not rejected["gates"]["all_required_slice_medians_non_regressed"]
 
 
 def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None:
