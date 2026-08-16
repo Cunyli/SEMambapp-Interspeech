@@ -66,6 +66,23 @@ SELECTED_TOTAL_RELATIVE_REDUCTION_GATE = 0.10
 NONSELECTED_MEDIAN_INCREASE_GATE = 0.05
 MINIMUM_COSINE_GATE = 0.99
 MAXIMUM_CLIP_FRACTION = 1e-4
+FRAME_LENGTH = 400
+FRAME_HOP = 160
+FULL_BAND_FREQUENCY_RANGES = {
+    "low_20_80hz": (20.0, 80.0),
+    "low_80_300hz": (80.0, 300.0),
+}
+AIRFLOW_PROXY_FREQUENCY_RANGE = (500.0, 4_000.0)
+LOW_ENERGY_QUANTILE = 0.25
+PATHOLOGY_DB_MEDIAN_GAP_INCREASE_MAX = 0.50
+PATHOLOGY_DB_WORST_GAP_INCREASE_MAX = 1.50
+AIRFLOW_FLATNESS_MEDIAN_GAP_INCREASE_MAX = 0.05
+AIRFLOW_FLATNESS_WORST_GAP_INCREASE_MAX = 0.10
+PAUSE_F1_MEDIAN_DECREASE_MAX = 0.05
+PAUSE_F1_WORST_DECREASE_MAX = 0.15
+GUARDRAIL_PASS_FRACTION_MIN = 2.0 / 3.0
+DENOISING_MEDIAN_CHANGE_MIN_DB = -0.10
+DENOISING_WORST_CHANGE_MIN_DB = -0.50
 STEP_VERSIONS = {
     "highpass": "praat",
     "read_and_resample": "praat",
@@ -87,6 +104,7 @@ class Case:
     view: str
     sample_group: str
     path: Path
+    reference_path: Path
     target: torch.Tensor
     exact_before: torch.Tensor
 
@@ -195,16 +213,32 @@ def load_cases(
     if speakers_per_severity <= 0 or speaker_offset < 0:
         raise ValueError("speaker count must be positive and offset non-negative")
     with path.open(newline="", encoding="utf-8-sig") as handle:
-        rows = [
-            row
-            for row in csv.DictReader(handle)
-            if row["candidate"] == CANDIDATE
-            and row["condition"] == CONDITION
-            and row["view"] in VIEWS
-            and row["sample_group"] in SEVERITY_GROUPS
-            and row["label"] == "patient"
-            and row["scoring_status"] == "ok"
-        ]
+        all_rows = list(csv.DictReader(handle))
+    rows = [
+        row
+        for row in all_rows
+        if row["source_type"] == "enhanced"
+        and row["candidate"] == CANDIDATE
+        and row["condition"] == CONDITION
+        and row["view"] in VIEWS
+        and row["sample_group"] in SEVERITY_GROUPS
+        and row["label"] == "patient"
+        and row["scoring_status"] == "ok"
+    ]
+    clean_rows = [
+        row
+        for row in all_rows
+        if row["source_type"] == "clean_reference"
+        and row["sample_group"] in SEVERITY_GROUPS
+        and row["label"] == "patient"
+        and row["scoring_status"] == "ok"
+    ]
+    clean_by_speaker: dict[str, dict[str, str]] = {}
+    for row in clean_rows:
+        speaker_id = row["speaker_id"]
+        if speaker_id in clean_by_speaker:
+            raise ValueError(f"duplicate clean reference row: {speaker_id}")
+        clean_by_speaker[speaker_id] = row
     selected_speakers: dict[str, list[str]] = {}
     for group in SEVERITY_GROUPS:
         speakers = sorted(
@@ -217,6 +251,17 @@ def load_cases(
                 f"{len(speakers)}"
             )
         selected_speakers[group] = speakers[speaker_offset:stop]
+    required_clean_speakers = {
+        speaker_id
+        for speakers in selected_speakers.values()
+        for speaker_id in speakers
+    }
+    missing_clean_speakers = required_clean_speakers - set(clean_by_speaker)
+    if missing_clean_speakers:
+        raise ValueError(
+            "missing same-speaker clean pathological references: "
+            f"{sorted(missing_clean_speakers)}"
+        )
     selected = [
         row
         for row in rows
@@ -241,6 +286,9 @@ def load_cases(
             view=row["view"],
             sample_group=row["sample_group"],
             path=Path(row[f"{row['view']}_path"]),
+            reference_path=Path(
+                clean_by_speaker[row["speaker_id"]][f"{row['view']}_path"]
+            ),
             target=component_tensor(row, "clean_"),
             exact_before=component_tensor(row, "audio_"),
         )
@@ -250,7 +298,12 @@ def load_cases(
         raise ValueError(
             f"fixed panel differs: expected {expected_cases}, found {len(cases)}"
         )
-    missing = [str(case.path) for case in cases if not case.path.is_file()]
+    missing = [
+        str(path)
+        for case in cases
+        for path in (case.path, case.reference_path)
+        if not path.is_file()
+    ]
     if missing:
         raise FileNotFoundError(f"missing fixed-panel waveforms: {missing[:3]}")
     return cases
@@ -347,6 +400,277 @@ def waveform_safety(
             (candidate.abs() >= 0.9989).to(torch.float32).mean()
         ),
     }
+
+
+def align_reference_waveforms(
+    reference: torch.Tensor,
+    base: torch.Tensor,
+    candidate: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Tail-crop only for metrics; never shift or filter the waveforms."""
+    waveforms = [item.reshape(-1) for item in (reference, base, candidate)]
+    minimum_samples = min(item.numel() for item in waveforms)
+    maximum_samples = max(item.numel() for item in waveforms)
+    if minimum_samples < FRAME_LENGTH:
+        raise ValueError("waveform is too short for full-band guardrails")
+    trim_samples = maximum_samples - minimum_samples
+    if trim_samples > FRAME_LENGTH:
+        raise ValueError(
+            f"reference alignment would discard {trim_samples} samples"
+        )
+    aligned = tuple(item[:minimum_samples] for item in waveforms)
+    return aligned[0], aligned[1], aligned[2], trim_samples
+
+
+def waveform_frames(waveform: torch.Tensor) -> torch.Tensor:
+    waveform = waveform.reshape(-1)
+    if waveform.numel() < FRAME_LENGTH:
+        raise ValueError("waveform is too short for framing")
+    return waveform.unfold(0, FRAME_LENGTH, FRAME_HOP)
+
+
+def frame_power_spectrum(frames: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    window = torch.hann_window(
+        FRAME_LENGTH,
+        device=frames.device,
+        dtype=frames.dtype,
+    )
+    spectrum = torch.fft.rfft(frames * window, n=512, dim=-1)
+    frequencies = torch.fft.rfftfreq(
+        512,
+        d=1.0 / SAMPLE_RATE,
+        device=frames.device,
+    )
+    return spectrum.abs().square(), frequencies
+
+
+def band_energy_db(
+    power: torch.Tensor,
+    frequencies: torch.Tensor,
+    lower_hz: float,
+    upper_hz: float,
+    frame_mask: torch.Tensor | None = None,
+) -> float:
+    frequency_mask = (frequencies >= lower_hz) & (frequencies < upper_hz)
+    if not bool(frequency_mask.any()):
+        raise ValueError(f"empty frequency band: {lower_hz}-{upper_hz} Hz")
+    selected = power if frame_mask is None else power[frame_mask]
+    if selected.shape[0] == 0:
+        raise ValueError("empty frame mask for band energy")
+    energy = selected[:, frequency_mask].mean().clamp_min(1e-12)
+    return float(10.0 * torch.log10(energy))
+
+
+def spectral_flatness(
+    power: torch.Tensor,
+    frequencies: torch.Tensor,
+    lower_hz: float,
+    upper_hz: float,
+    frame_mask: torch.Tensor,
+) -> float:
+    frequency_mask = (frequencies >= lower_hz) & (frequencies < upper_hz)
+    selected = power[frame_mask][:, frequency_mask].clamp_min(1e-12)
+    if selected.shape[0] == 0 or selected.shape[1] == 0:
+        raise ValueError("empty airflow-proxy spectrum")
+    per_frame = torch.exp(torch.log(selected).mean(dim=-1)) / selected.mean(
+        dim=-1
+    ).clamp_min(1e-12)
+    return float(per_frame.median())
+
+
+def pause_f1(reference_pause: torch.Tensor, estimate_pause: torch.Tensor) -> float:
+    true_positive = (reference_pause & estimate_pause).sum().to(torch.float32)
+    denominator = (
+        reference_pause.sum() + estimate_pause.sum()
+    ).to(torch.float32)
+    return float(2.0 * true_positive / denominator.clamp_min(1.0))
+
+
+def snr_db(reference: torch.Tensor, estimate: torch.Tensor) -> float:
+    signal = reference.square().mean().clamp_min(1e-12)
+    error = (estimate - reference).square().mean().clamp_min(1e-12)
+    return float(10.0 * torch.log10(signal / error))
+
+
+def si_sdr_db(reference: torch.Tensor, estimate: torch.Tensor) -> float:
+    reference = reference - reference.mean()
+    estimate = estimate - estimate.mean()
+    scale = torch.dot(estimate, reference) / torch.dot(
+        reference, reference
+    ).clamp_min(1e-12)
+    projected = scale * reference
+    residual = estimate - projected
+    ratio = projected.square().sum().clamp_min(1e-12) / residual.square().sum().clamp_min(
+        1e-12
+    )
+    return float(10.0 * torch.log10(ratio))
+
+
+def full_band_pathology_guardrails(
+    reference: torch.Tensor,
+    base: torch.Tensor,
+    candidate: torch.Tensor,
+) -> dict[str, float | int]:
+    reference, base, candidate, trim_samples = align_reference_waveforms(
+        reference,
+        base,
+        candidate,
+    )
+    reference_frames = waveform_frames(reference)
+    base_frames = waveform_frames(base)
+    candidate_frames = waveform_frames(candidate)
+    reference_power, frequencies = frame_power_spectrum(reference_frames)
+    base_power, _ = frame_power_spectrum(base_frames)
+    candidate_power, _ = frame_power_spectrum(candidate_frames)
+    output: dict[str, float | int] = {
+        "guardrail_aligned_samples": reference.numel(),
+        "guardrail_tail_trim_samples": trim_samples,
+    }
+    for name, (lower_hz, upper_hz) in FULL_BAND_FREQUENCY_RANGES.items():
+        reference_db = band_energy_db(
+            reference_power,
+            frequencies,
+            lower_hz,
+            upper_hz,
+        )
+        base_db = band_energy_db(
+            base_power,
+            frequencies,
+            lower_hz,
+            upper_hz,
+        )
+        candidate_db = band_energy_db(
+            candidate_power,
+            frequencies,
+            lower_hz,
+            upper_hz,
+        )
+        before_gap = abs(base_db - reference_db)
+        after_gap = abs(candidate_db - reference_db)
+        output[f"{name}_gap_before_db"] = before_gap
+        output[f"{name}_gap_after_db"] = after_gap
+        output[f"{name}_gap_increase_db"] = after_gap - before_gap
+
+    reference_frame_power = reference_frames.square().mean(dim=-1)
+    base_frame_power = base_frames.square().mean(dim=-1)
+    candidate_frame_power = candidate_frames.square().mean(dim=-1)
+    pause_threshold = torch.quantile(
+        reference_frame_power,
+        LOW_ENERGY_QUANTILE,
+    )
+    reference_pause = reference_frame_power <= pause_threshold
+    base_pause = base_frame_power <= pause_threshold
+    candidate_pause = candidate_frame_power <= pause_threshold
+    reference_pause_db = float(
+        10.0
+        * torch.log10(
+            reference_frame_power[reference_pause].mean().clamp_min(1e-12)
+        )
+    )
+    base_pause_db = float(
+        10.0
+        * torch.log10(base_frame_power[reference_pause].mean().clamp_min(1e-12))
+    )
+    candidate_pause_db = float(
+        10.0
+        * torch.log10(
+            candidate_frame_power[reference_pause].mean().clamp_min(1e-12)
+        )
+    )
+    pause_gap_before = abs(base_pause_db - reference_pause_db)
+    pause_gap_after = abs(candidate_pause_db - reference_pause_db)
+    pause_f1_before = pause_f1(reference_pause, base_pause)
+    pause_f1_after = pause_f1(reference_pause, candidate_pause)
+    output.update(
+        {
+            "reference_low_energy_frame_fraction": float(
+                reference_pause.to(torch.float32).mean()
+            ),
+            "pause_energy_gap_before_db": pause_gap_before,
+            "pause_energy_gap_after_db": pause_gap_after,
+            "pause_energy_gap_increase_db": pause_gap_after - pause_gap_before,
+            "pause_f1_before": pause_f1_before,
+            "pause_f1_after": pause_f1_after,
+            "pause_f1_change": pause_f1_after - pause_f1_before,
+        }
+    )
+
+    airflow_lower, airflow_upper = AIRFLOW_PROXY_FREQUENCY_RANGE
+    reference_airflow_db = band_energy_db(
+        reference_power,
+        frequencies,
+        airflow_lower,
+        airflow_upper,
+        reference_pause,
+    )
+    base_airflow_db = band_energy_db(
+        base_power,
+        frequencies,
+        airflow_lower,
+        airflow_upper,
+        reference_pause,
+    )
+    candidate_airflow_db = band_energy_db(
+        candidate_power,
+        frequencies,
+        airflow_lower,
+        airflow_upper,
+        reference_pause,
+    )
+    reference_flatness = spectral_flatness(
+        reference_power,
+        frequencies,
+        airflow_lower,
+        airflow_upper,
+        reference_pause,
+    )
+    base_flatness = spectral_flatness(
+        base_power,
+        frequencies,
+        airflow_lower,
+        airflow_upper,
+        reference_pause,
+    )
+    candidate_flatness = spectral_flatness(
+        candidate_power,
+        frequencies,
+        airflow_lower,
+        airflow_upper,
+        reference_pause,
+    )
+    airflow_gap_before = abs(base_airflow_db - reference_airflow_db)
+    airflow_gap_after = abs(candidate_airflow_db - reference_airflow_db)
+    flatness_gap_before = abs(base_flatness - reference_flatness)
+    flatness_gap_after = abs(candidate_flatness - reference_flatness)
+    output.update(
+        {
+            "airflow_proxy_energy_gap_before_db": airflow_gap_before,
+            "airflow_proxy_energy_gap_after_db": airflow_gap_after,
+            "airflow_proxy_energy_gap_increase_db": (
+                airflow_gap_after - airflow_gap_before
+            ),
+            "airflow_proxy_flatness_gap_before": flatness_gap_before,
+            "airflow_proxy_flatness_gap_after": flatness_gap_after,
+            "airflow_proxy_flatness_gap_increase": (
+                flatness_gap_after - flatness_gap_before
+            ),
+        }
+    )
+    snr_before = snr_db(reference, base)
+    snr_after = snr_db(reference, candidate)
+    si_sdr_before = si_sdr_db(reference, base)
+    si_sdr_after = si_sdr_db(reference, candidate)
+    output.update(
+        {
+            "snr_before_db": snr_before,
+            "snr_after_db": snr_after,
+            "snr_change_db": snr_after - snr_before,
+            "si_sdr_before_db": si_sdr_before,
+            "si_sdr_after_db": si_sdr_after,
+            "si_sdr_change_db": si_sdr_after - si_sdr_before,
+        }
+    )
+    return output
 
 
 def optimize_waveform(
@@ -547,6 +871,220 @@ def aggregate_component(
     }
 
 
+def aggregate_upper_bounded_change(
+    rows: list[dict[str, Any]],
+    field: str,
+    median_max: float,
+    worst_max: float,
+) -> dict[str, Any]:
+    values = np.array([row[field] for row in rows], dtype=np.float64)
+    gates = {
+        "median_within_tolerance": float(np.median(values)) <= median_max,
+        "worst_within_tolerance": float(np.max(values)) <= worst_max,
+        "case_fraction_within_tolerance_ge_two_thirds": (
+            float(np.mean(values <= median_max)) >= GUARDRAIL_PASS_FRACTION_MIN
+        ),
+    }
+    return {
+        "rows": len(rows),
+        "median": float(np.median(values)),
+        "worst": float(np.max(values)),
+        "case_fraction_within_tolerance": float(np.mean(values <= median_max)),
+        "median_max": median_max,
+        "worst_max": worst_max,
+        "gates": gates,
+        "decision": "PASS" if all(gates.values()) else "FAIL",
+    }
+
+
+def aggregate_pathology_guardrails(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    metrics = {
+        field: aggregate_upper_bounded_change(
+            rows,
+            field,
+            PATHOLOGY_DB_MEDIAN_GAP_INCREASE_MAX,
+            PATHOLOGY_DB_WORST_GAP_INCREASE_MAX,
+        )
+        for field in (
+            "low_20_80hz_gap_increase_db",
+            "low_80_300hz_gap_increase_db",
+            "pause_energy_gap_increase_db",
+            "airflow_proxy_energy_gap_increase_db",
+        )
+    }
+    metrics["airflow_proxy_flatness_gap_increase"] = (
+        aggregate_upper_bounded_change(
+            rows,
+            "airflow_proxy_flatness_gap_increase",
+            AIRFLOW_FLATNESS_MEDIAN_GAP_INCREASE_MAX,
+            AIRFLOW_FLATNESS_WORST_GAP_INCREASE_MAX,
+        )
+    )
+    pause_rows = [
+        {"pause_f1_decrease": -float(row["pause_f1_change"])}
+        for row in rows
+    ]
+    metrics["pause_f1_decrease"] = aggregate_upper_bounded_change(
+        pause_rows,
+        "pause_f1_decrease",
+        PAUSE_F1_MEDIAN_DECREASE_MAX,
+        PAUSE_F1_WORST_DECREASE_MAX,
+    )
+    return {
+        "metrics": metrics,
+        "decision": (
+            "PASS"
+            if all(metric["decision"] == "PASS" for metric in metrics.values())
+            else "FAIL"
+        ),
+        "interpretation_limit": (
+            "Airflow is represented by low-energy 500-4000 Hz energy and "
+            "spectral-flatness proxies, not a clinical airflow label."
+        ),
+    }
+
+
+def aggregate_denoising(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    for name, field in {
+        "snr": "snr_change_db",
+        "si_sdr": "si_sdr_change_db",
+    }.items():
+        values = np.array([row[field] for row in rows], dtype=np.float64)
+        gates = {
+            "median_change_ge_minus_0_10_db": (
+                float(np.median(values)) >= DENOISING_MEDIAN_CHANGE_MIN_DB
+            ),
+            "worst_change_ge_minus_0_50_db": (
+                float(np.min(values)) >= DENOISING_WORST_CHANGE_MIN_DB
+            ),
+            "case_fraction_non_regressed_ge_two_thirds": (
+                float(np.mean(values >= DENOISING_MEDIAN_CHANGE_MIN_DB))
+                >= GUARDRAIL_PASS_FRACTION_MIN
+            ),
+        }
+        metrics[name] = {
+            "rows": len(rows),
+            "median_change_db": float(np.median(values)),
+            "worst_change_db": float(np.min(values)),
+            "case_fraction_non_regressed": float(
+                np.mean(values >= DENOISING_MEDIAN_CHANGE_MIN_DB)
+            ),
+            "gates": gates,
+            "decision": "PASS" if all(gates.values()) else "FAIL",
+        }
+    return {
+        "metrics": metrics,
+        "decision": (
+            "PASS"
+            if all(metric["decision"] == "PASS" for metric in metrics.values())
+            else "FAIL"
+        ),
+    }
+
+
+def nonselected_normalized_gap_increase(
+    rows: list[dict[str, Any]],
+    target_scale: torch.Tensor,
+) -> float:
+    nonselected = [
+        component
+        for component in AVQI_COMPONENT_NAMES
+        if component not in OPTIMIZED_COMPONENTS
+    ]
+    values = [
+        np.mean(
+            [
+                (
+                    row[f"exact_absolute_gap_after_{component}"]
+                    - row[f"exact_absolute_gap_before_{component}"]
+                )
+                / float(target_scale[AVQI_COMPONENT_NAMES.index(component)])
+                for component in nonselected
+            ]
+        )
+        for row in rows
+    ]
+    return float(np.median(np.asarray(values, dtype=np.float64)))
+
+
+def slice_reports(
+    rows: list[dict[str, Any]],
+    target_scale: torch.Tensor,
+) -> dict[str, Any]:
+    predicates = {
+        "view=cs": lambda row: row["view"] == "cs",
+        "view=sv": lambda row: row["view"] == "sv",
+        "severity=pathological_mild": (
+            lambda row: row["sample_group"] == "pathological_mild"
+        ),
+        "severity=pathological_severe": (
+            lambda row: row["sample_group"] == "pathological_severe"
+        ),
+    }
+    output: dict[str, Any] = {}
+    for slice_name, predicate in predicates.items():
+        selected = [row for row in rows if predicate(row)]
+        if not selected:
+            raise ValueError(f"empty required waveform slice: {slice_name}")
+        components: dict[str, Any] = {}
+        for component in OPTIMIZED_COMPONENTS:
+            aggregate = aggregate_component(
+                selected,
+                component,
+                "exact",
+                float(target_scale[AVQI_COMPONENT_NAMES.index(component)]),
+            )
+            gates = {
+                "exact_improvement_fraction_ge_two_thirds": (
+                    aggregate["improvement_fraction"]
+                    >= EXACT_IMPROVEMENT_FRACTION_GATE
+                ),
+                "exact_median_normalized_reduction_ge_0_02": (
+                    aggregate["median_normalized_gap_reduction"]
+                    >= NORMALIZED_GAP_REDUCTION_GATE
+                ),
+            }
+            components[component] = {
+                "aggregate": aggregate,
+                "gates": gates,
+                "decision": "PASS" if all(gates.values()) else "FAIL",
+            }
+        nonselected_increase = nonselected_normalized_gap_increase(
+            selected,
+            target_scale,
+        )
+        nonselected_passed = (
+            nonselected_increase <= NONSELECTED_MEDIAN_INCREASE_GATE
+        )
+        pathology = aggregate_pathology_guardrails(selected)
+        denoising = aggregate_denoising(selected)
+        output[slice_name] = {
+            "rows": len(selected),
+            "components": components,
+            "median_nonselected_normalized_gap_increase": nonselected_increase,
+            "nonselected_decision": (
+                "PASS" if nonselected_passed else "FAIL"
+            ),
+            "pathology_guardrails": pathology,
+            "denoising": denoising,
+            "decision": (
+                "PASS"
+                if all(
+                    report["decision"] == "PASS"
+                    for report in components.values()
+                )
+                and nonselected_passed
+                and pathology["decision"] == "PASS"
+                and denoising["decision"] == "PASS"
+                else "FAIL"
+            ),
+        }
+    return output
+
+
 def summarize(
     rows: list[dict[str, Any]],
     target_scale: torch.Tensor,
@@ -595,25 +1133,9 @@ def summarize(
             for row in rows
         ]
     )
-    nonselected = [
-        component
-        for component in AVQI_COMPONENT_NAMES
-        if component not in OPTIMIZED_COMPONENTS
-    ]
-    nonselected_change = np.array(
-        [
-            np.mean(
-                [
-                    (
-                        row[f"exact_absolute_gap_after_{component}"]
-                        - row[f"exact_absolute_gap_before_{component}"]
-                    )
-                    / float(target_scale[AVQI_COMPONENT_NAMES.index(component)])
-                    for component in nonselected
-                ]
-            )
-            for row in rows
-        ]
+    nonselected_increase = nonselected_normalized_gap_increase(
+        rows,
+        target_scale,
     )
     selected_relative_reduction = float(
         1.0
@@ -652,9 +1174,7 @@ def summarize(
             row["cosine_similarity"] for row in rows
         ),
         "maximum_clip_fraction": max(row["clip_fraction"] for row in rows),
-        "median_nonselected_normalized_gap_increase": float(
-            np.median(nonselected_change)
-        ),
+        "median_nonselected_normalized_gap_increase": nonselected_increase,
         "selected_total_relative_gap_reduction": selected_relative_reduction,
     }
     safety_gates = {
@@ -676,6 +1196,12 @@ def summarize(
             >= SELECTED_TOTAL_RELATIVE_REDUCTION_GATE
         ),
     }
+    pathology_guardrails = aggregate_pathology_guardrails(rows)
+    denoising = aggregate_denoising(rows)
+    slices = slice_reports(rows, target_scale)
+    complete_slices = all(
+        report["decision"] == "PASS" for report in slices.values()
+    )
     decision = (
         "PASS_WAVEFORM_OPTIMIZATION"
         if all(
@@ -683,6 +1209,9 @@ def summarize(
             for report in component_gates.values()
         )
         and all(safety_gates.values())
+        and pathology_guardrails["decision"] == "PASS"
+        and denoising["decision"] == "PASS"
+        and complete_slices
         else "FAIL_WAVEFORM_OPTIMIZATION"
     )
     return {
@@ -693,6 +1222,9 @@ def summarize(
             "gates": safety_gates,
             "decision": "PASS" if all(safety_gates.values()) else "FAIL",
         },
+        "full_band_pathology_guardrails": pathology_guardrails,
+        "denoising": denoising,
+        "required_slices": slices,
         "decision": decision,
     }
 
@@ -715,11 +1247,28 @@ def markdown_summary(report: dict[str, Any]) -> str:
             f"{aggregate['median_normalized_gap_reduction']:.3f} | {decision} |"
         )
     values = summary["safety"]["values"]
+    failed_slices = [
+        name
+        for name, item in summary["required_slices"].items()
+        if item["decision"] != "PASS"
+    ]
     lines.extend(
         [
             "",
             f"Residual ceiling: `{report['contract']['residual_ceiling_db']} dB`; "
             f"worst observed: `{values['worst_residual_rms_db']:.2f} dB`.",
+            "",
+            (
+                "Full-band pathology guardrails: "
+                f"`{summary['full_band_pathology_guardrails']['decision']}`; "
+                f"denoising non-regression: `{summary['denoising']['decision']}`."
+            ),
+            "",
+            (
+                "CS/SV and severity slices all passed."
+                if not failed_slices
+                else "Failed required slices: " + ", ".join(failed_slices) + "."
+            ),
             "",
             "All exact values were recomputed with the hash-locked Praat implementation. "
             "No generator parameter was updated.",
@@ -768,6 +1317,7 @@ def main() -> None:
     trajectories: dict[str, Any] = {}
     for index, case in enumerate(cases, start=1):
         waveform, subtype = load_waveform(case.path)
+        reference, _ = load_waveform(case.reference_path)
         optimized, optimization = optimize_waveform(
             waveform.to(device),
             case.target,
@@ -789,6 +1339,11 @@ def main() -> None:
         )
         written, _ = load_waveform(output_path)
         written_safety = waveform_safety(waveform, written)
+        pathology_guardrails = full_band_pathology_guardrails(
+            reference,
+            waveform,
+            written,
+        )
         with torch.inference_mode():
             surrogate_after_written = predict_components(
                 predictor,
@@ -814,9 +1369,16 @@ def main() -> None:
             "candidate": CANDIDATE,
             "source_path": str(case.path.resolve()),
             "source_sha256": sha256_file(case.path),
+            "clean_pathological_reference_path": str(
+                case.reference_path.resolve()
+            ),
+            "clean_pathological_reference_sha256": sha256_file(
+                case.reference_path
+            ),
             "optimized_path": str(output_path.resolve()),
             "optimized_sha256": sha256_file(output_path),
             **written_safety,
+            **pathology_guardrails,
         }
         for component_index, component in enumerate(AVQI_COMPONENT_NAMES):
             target_value = float(target[component_index])
@@ -847,7 +1409,7 @@ def main() -> None:
 
     summary = summarize(rows, target_scale.cpu(), args.residual_ceiling_db)
     report = {
-        "schema_version": "direct-avqi-waveform-optimization-v1",
+        "schema_version": "direct-avqi-waveform-optimization-v2",
         "decision": summary["decision"],
         "waveform_optimizer_steps": len(rows) * args.steps,
         "generator_optimizer_steps": 0,
@@ -887,6 +1449,52 @@ def main() -> None:
                 ),
                 "minimum_cosine_similarity": MINIMUM_COSINE_GATE,
                 "maximum_clip_fraction": MAXIMUM_CLIP_FRACTION,
+                "pathology_db_median_gap_increase_max": (
+                    PATHOLOGY_DB_MEDIAN_GAP_INCREASE_MAX
+                ),
+                "pathology_db_worst_gap_increase_max": (
+                    PATHOLOGY_DB_WORST_GAP_INCREASE_MAX
+                ),
+                "airflow_flatness_median_gap_increase_max": (
+                    AIRFLOW_FLATNESS_MEDIAN_GAP_INCREASE_MAX
+                ),
+                "airflow_flatness_worst_gap_increase_max": (
+                    AIRFLOW_FLATNESS_WORST_GAP_INCREASE_MAX
+                ),
+                "pause_f1_median_decrease_max": (
+                    PAUSE_F1_MEDIAN_DECREASE_MAX
+                ),
+                "pause_f1_worst_decrease_max": PAUSE_F1_WORST_DECREASE_MAX,
+                "guardrail_pass_fraction_min": GUARDRAIL_PASS_FRACTION_MIN,
+                "denoising_median_change_min_db": (
+                    DENOISING_MEDIAN_CHANGE_MIN_DB
+                ),
+                "denoising_worst_change_min_db": (
+                    DENOISING_WORST_CHANGE_MIN_DB
+                ),
+            },
+            "full_band_guardrail_contract": {
+                "reference": "same-speaker clean pathological CS or SV waveform",
+                "alignment": (
+                    "tail crop to shortest waveform only; no shift, filter, "
+                    "resample, or metric-branch high-pass"
+                ),
+                "low_frequency_bands_hz": FULL_BAND_FREQUENCY_RANGES,
+                "low_energy_quantile": LOW_ENERGY_QUANTILE,
+                "airflow_proxy_frequency_range_hz": (
+                    AIRFLOW_PROXY_FREQUENCY_RANGE
+                ),
+                "airflow_proxy_limit": (
+                    "low-energy band energy and spectral flatness are signal "
+                    "proxies, not clinical airflow labels"
+                ),
+                "required_slices": [
+                    "view=cs",
+                    "view=sv",
+                    "severity=pathological_mild",
+                    "severity=pathological_severe",
+                ],
+                "denoising_metrics": ["snr", "si_sdr"],
             },
             "source_sha256": {
                 "external_exact_csv": args.external_exact_csv_sha256,

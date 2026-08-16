@@ -103,6 +103,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     confirm = read("scripts/run_avqi_component_v4_confirm.sh")
     promotion = read("scripts/evaluate_avqi_component_v4_phase_promotion.py")
     promotion_runner = read("scripts/run_avqi_component_v4_phase_promotion.sh")
+    frozen_contract = read("configs/avqi_component_phaseaware_v4.yaml")
     diagnostic = read("scripts/evaluate_avqi_component_backprop.py")
     assert '"surrogate_train": 72' in prepare
     assert '"surrogate_calibration": 12' in prepare
@@ -142,6 +143,9 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert "env -u SLURM_JOB_ID" in promotion_runner
     assert 'SCREEN_KIND=full_tfgrid' in promotion_runner
     assert "full_tfgrid_submission.json" in promotion_runner
+    assert "metric_alignment: tail_crop_to_shortest_only_no_shift_filter_or_resample" in frozen_contract
+    assert "pathology_db_median_gap_increase_max: 0.50" in frozen_contract
+    assert "denoising_median_change_min_db: -0.10" in frozen_contract
 
 
 def test_avqi_phaseaware_v4_full_tfgrid_promotion_is_frozen_and_conservative() -> None:
@@ -267,6 +271,7 @@ def test_avqi_phaseaware_v4_full_tfgrid_promotion_is_frozen_and_conservative() -
 
 def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None:
     source = read("scripts/evaluate_direct_avqi_waveform_optimization.py")
+    audit = read("scripts/audit_avqi_waveform_guardrails.py")
     assert 'CANDIDATE = "S3_500"' in source
     assert 'CONDITION = "snr10"' in source
     assert 'OPTIMIZED_COMPONENTS = ("hnr", "tilt")' in source
@@ -281,6 +286,18 @@ def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None
     assert '"generator_optimizer_steps": 0' in source
     assert '"formal_pathology_training_submitted": False' in source
     assert "exact_absolute_gap_after" in source
+    assert "full_band_pathology_guardrails" in source
+    assert "same-speaker clean pathological CS or SV waveform" in source
+    assert '"low_20_80hz"' in source
+    assert "airflow_proxy_flatness_gap_increase" in source
+    assert "pause_f1_change" in source
+    assert "si_sdr_change_db" in source
+    assert "required_slices" in source
+    assert "audit_waveform_optimizer_steps" in audit
+    assert "source waveform hash drift" in audit
+    assert "optimized waveform hash drift" in audit
+    assert "declared audit source commit differs from repository HEAD" in audit
+    assert '"generator_optimizer_steps": 0' in audit
     assert "FAIL_WAVEFORM_OPTIMIZATION" in source
 
 

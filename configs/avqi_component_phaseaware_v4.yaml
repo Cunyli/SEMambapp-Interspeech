@@ -149,4 +149,23 @@ waveform_pilot_gates:
   require_full_band_pathology_guardrails: true
   require_cs_sv_and_severity_slices: true
   require_denoising_metrics: true
+  full_band_reference: same_speaker_clean_pathological_cs_or_sv
+  metric_alignment: tail_crop_to_shortest_only_no_shift_filter_or_resample
+  low_frequency_bands_hz:
+    - [20, 80]
+    - [80, 300]
+  low_energy_quantile: 0.25
+  airflow_proxy_band_hz: [500, 4000]
+  pathology_db_median_gap_increase_max: 0.50
+  pathology_db_worst_gap_increase_max: 1.50
+  airflow_flatness_median_gap_increase_max: 0.05
+  airflow_flatness_worst_gap_increase_max: 0.10
+  pause_f1_median_decrease_max: 0.05
+  pause_f1_worst_decrease_max: 0.15
+  guardrail_pass_fraction_min: 0.6666666667
+  denoising_metrics:
+    - snr
+    - si_sdr
+  denoising_median_change_min_db: -0.10
+  denoising_worst_change_min_db: -0.50
   formal_generator_training_allowed: false
