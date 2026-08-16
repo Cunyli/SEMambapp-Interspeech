@@ -247,6 +247,53 @@ def test_avqi_multiseed_accepts_calibration_selected_direct_v2_screen() -> None:
     )
 
 
+def test_avqi_multiseed_accepts_phaseaware_v4_screen() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
+    )
+    screen = {
+        "contract": {
+            "routes": {
+                "shared_dual_head": {"candidates": ["output_phase_tfgrid"]},
+                "frozen_independent_predictor": {
+                    "architectures": [
+                        "frequency_aware",
+                        "phase_frequency_aware",
+                        "phase_compact_tfgrid",
+                    ]
+                },
+            },
+            "matched_training_budget": {
+                "shared_max_epochs": 60,
+                "independent_max_epochs": 60,
+            },
+            "calibration": {"holdout_used_for_fit_or_selection": False},
+        },
+        "routes": {
+            "shared_dual_head": {
+                "selected_candidate": "output_phase_tfgrid",
+                "selection_rule": "lowest calibration loss before holdout evaluation",
+                "training": {
+                    "output_phase_tfgrid": {"best_calibration_loss": 0.10}
+                },
+            },
+            "frozen_independent_predictor": {
+                "selected_architecture": "phase_compact_tfgrid",
+                "selection_rule": "lowest calibration loss before holdout evaluation",
+                "training": {
+                    "frequency_aware": {"best_calibration_loss": 0.12},
+                    "phase_frequency_aware": {"best_calibration_loss": 0.09},
+                    "phase_compact_tfgrid": {"best_calibration_loss": 0.08},
+                },
+            },
+        },
+    }
+    namespace["validate_screen_contract"](
+        screen,
+        Path("phase-v4-screen.json"),
+    )
+
+
 def test_avqi_multiseed_promotion_uses_common_components_for_two_routes() -> None:
     namespace = runpy.run_path(
         REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"

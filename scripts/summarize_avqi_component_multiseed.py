@@ -44,6 +44,18 @@ EXPECTED_DIRECT_V2_SCREEN_FORMS = {
         "direct_praat_hard_v2",
     ],
 }
+EXPECTED_PHASE_V4_SCREEN_FORMS = {
+    "shared_dual_head": ["output_phase_tfgrid"],
+    "frozen_independent_predictor": [
+        "frequency_aware",
+        "phase_frequency_aware",
+        "phase_compact_tfgrid",
+    ],
+}
+EXPECTED_DIRECT_V4_SCREEN_FORMS = {
+    "shared_dual_head": ["output_phase_tfgrid"],
+    "frozen_independent_predictor": ["direct_praat_hard_v2"],
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -117,6 +129,8 @@ def validate_screen_contract(screen: dict[str, Any], path: Path) -> None:
     if observed_forms not in (
         EXPECTED_SCREEN_FORMS,
         EXPECTED_DIRECT_V2_SCREEN_FORMS,
+        EXPECTED_PHASE_V4_SCREEN_FORMS,
+        EXPECTED_DIRECT_V4_SCREEN_FORMS,
     ):
         raise ValueError(f"architecture screen forms are incomplete: {path}")
     for route in ROUTES:
