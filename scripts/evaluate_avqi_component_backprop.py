@@ -145,6 +145,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument("--external-exact-csv", type=Path, required=True)
     parser.add_argument("--external-exact-csv-sha256", required=True)
+    parser.add_argument("--vctk-external-label-bank", type=Path)
+    parser.add_argument("--vctk-external-label-bank-sha256")
     parser.add_argument("--full-tfgrid-checkpoint", type=Path)
     parser.add_argument("--full-tfgrid-checkpoint-sha256")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -2172,6 +2174,91 @@ def shared_external_stress_test(
     return report, output_rows
 
 
+def vctk_external_test(
+    csv_path: Path,
+    predict: Callable[[torch.Tensor], torch.Tensor],
+    target_scale: torch.Tensor,
+    forbidden_speaker_ids: set[str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Evaluate an already-frozen scorer on the held-out VCTK speakers."""
+    with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    eligible = [
+        row
+        for row in rows
+        if row["split"] == "vctk_external" and row["view"] == "cs"
+    ]
+    selected = [row for row in eligible if row["scoring_status"] == "ok"]
+    coverage = external_coverage_report(eligible, selected, 12 * 4 * 4)
+    speaker_ids = {row["speaker_id"] for row in eligible}
+    overlap = speaker_ids & forbidden_speaker_ids
+    if overlap:
+        raise ValueError(f"VCTK external speaker leakage: {sorted(overlap)}")
+    if len(speaker_ids) != 12:
+        raise ValueError(f"expected 12 VCTK external speakers, found {len(speaker_ids)}")
+    predictions: list[torch.Tensor] = []
+    references: list[torch.Tensor] = []
+    output_rows: list[dict[str, Any]] = []
+    for index, row in enumerate(selected, start=1):
+        path = Path(row["cs_path"])
+        if sha256_file(path) != row["cs_sha256"]:
+            raise ValueError(f"VCTK external audio hash mismatch: {path}")
+        prediction = predict(load_waveform(path))
+        reference = component_tensor(row)
+        predictions.append(prediction)
+        references.append(reference)
+        item: dict[str, Any] = {
+            "speaker_id": row["speaker_id"],
+            "sample_id": row_sample_id(row),
+            "condition": row["condition_id"],
+            "view": row["view"],
+            "label": row["label"],
+            "audio_path": str(path),
+            "audio_sha256": row["cs_sha256"],
+        }
+        for component_index, component in enumerate(AVQI_COMPONENT_NAMES):
+            item[f"exact_{component}"] = float(reference[component_index])
+            item[f"predicted_{component}"] = float(prediction[component_index])
+        output_rows.append(item)
+        if index % 50 == 0 or index == len(selected):
+            print(f"vctk_external_rows={index}/{len(selected)}", flush=True)
+    reference_tensor = torch.stack(references)
+    prediction_tensor = torch.stack(predictions)
+    primary = component_metrics(reference_tensor, prediction_tensor, target_scale)
+    slices: dict[str, Any] = {}
+    slice_coverage: dict[str, Any] = {}
+    for condition in ("clean", "rir_only", "snr20", "snr10"):
+        eligible_slice = [row for row in eligible if row["condition_id"] == condition]
+        selected_slice = [row for row in selected if row["condition_id"] == condition]
+        slice_coverage[f"condition={condition}"] = external_coverage_report(
+            eligible_slice,
+            selected_slice,
+            12 * 4,
+        )
+        indices = [
+            index for index, row in enumerate(selected)
+            if row["condition_id"] == condition
+        ]
+        slices[f"condition={condition}"] = component_metrics(
+            reference_tensor[indices],
+            prediction_tensor[indices],
+            target_scale,
+        )
+    return (
+        {
+            "rows": len(selected),
+            "speaker_count": len(speaker_ids),
+            "speaker_overlap_with_surrogate": 0,
+            "primary_coverage": coverage,
+            "primary": primary,
+            "slices": slices,
+            "slice_coverage": slice_coverage,
+            "required_slices": list(slices),
+        },
+        output_rows,
+    )
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         raise ValueError(f"refusing to write empty CSV: {path}")
@@ -2225,12 +2312,30 @@ def external_component_passes(report: dict[str, Any], component: str) -> bool:
     )
 
 
+def vctk_external_component_passes(
+    report: dict[str, Any] | None,
+    component: str,
+) -> bool:
+    if report is None:
+        return True
+    if report["primary_coverage"]["decision"] != "PASS":
+        return False
+    if report["primary"][component]["decision"] != "PASS":
+        return False
+    return all(
+        report["slice_coverage"][slice_name]["decision"] == "PASS"
+        and report["slices"][slice_name][component]["decision"] == "PASS"
+        for slice_name in report["required_slices"]
+    )
+
+
 def eligible_components(
     metrics: dict[str, Any],
     external_metrics: dict[str, Any],
     anti_shortcut: dict[str, Any],
     gradient: dict[str, Any],
     segment_transfer: dict[str, Any],
+    vctk_external: dict[str, Any] | None = None,
 ) -> list[str]:
     if gradient["decision"] != "PASS":
         return []
@@ -2239,6 +2344,7 @@ def eligible_components(
         for component in AVQI_COMPONENT_NAMES
         if component_passes(metrics, component)
         and external_component_passes(external_metrics, component)
+        and vctk_external_component_passes(vctk_external, component)
         and anti_shortcut["components"][component]["decision"] == "PASS"
         and gradient["component_input_gradients"][component]["decision"] == "PASS"
         and segment_transfer["components"][component]["decision"] == "PASS"
@@ -2256,6 +2362,7 @@ def route_decision(
     anti_shortcut: dict[str, Any],
     gradient: dict[str, Any],
     segment_transfer: dict[str, Any],
+    vctk_external: dict[str, Any] | None = None,
 ) -> str:
     components = eligible_components(
         metrics,
@@ -2263,6 +2370,7 @@ def route_decision(
         anti_shortcut,
         gradient,
         segment_transfer,
+        vctk_external,
     )
     return (
         "ELIGIBLE_FOR_MULTISEED_CONFIRMATION"
@@ -2353,6 +2461,11 @@ def main() -> None:
         )
     if args.max_optimizer_steps < 0:
         raise ValueError("max optimizer steps cannot be negative")
+    uses_vctk_external = args.vctk_external_label_bank is not None
+    if uses_vctk_external != (args.vctk_external_label_bank_sha256 is not None):
+        raise ValueError(
+            "VCTK external label bank path and SHA256 must be supplied together"
+        )
     uses_full_tfgrid = "pretrained_full_tfgrid" in waveform_architectures
     if uses_full_tfgrid and (
         args.full_tfgrid_checkpoint is None
@@ -2391,6 +2504,13 @@ def main() -> None:
     ):
         if sha256_file(path) != expected_hash:
             raise ValueError(f"source hash mismatch: {path}")
+    if uses_vctk_external and (
+        sha256_file(args.vctk_external_label_bank)
+        != args.vctk_external_label_bank_sha256
+    ):
+        raise ValueError(
+            f"source hash mismatch: {args.vctk_external_label_bank}"
+        )
     if uses_full_tfgrid:
         if sha256_file(args.full_tfgrid_checkpoint) != args.full_tfgrid_checkpoint_sha256:
             raise ValueError(
@@ -2559,6 +2679,11 @@ def main() -> None:
             "config": args.config_sha256,
             "generator_checkpoint": args.checkpoint_sha256,
             "external_exact_csv": args.external_exact_csv_sha256,
+            "vctk_external_label_bank": (
+                args.vctk_external_label_bank_sha256
+                if uses_vctk_external
+                else None
+            ),
             "full_tfgrid_checkpoint": (
                 args.full_tfgrid_checkpoint_sha256 if uses_full_tfgrid else None
             ),
@@ -2919,6 +3044,26 @@ def main() -> None:
         surrogate_speaker_ids,
         device,
     )
+    if uses_vctk_external:
+        shared_vctk_external, shared_vctk_external_rows = vctk_external_test(
+            args.vctk_external_label_bank,
+            shared_predict,
+            shared_scale,
+            surrogate_speaker_ids,
+        )
+        independent_vctk_external, independent_vctk_external_rows = (
+            vctk_external_test(
+                args.vctk_external_label_bank,
+                independent_predict,
+                waveform_scale,
+                surrogate_speaker_ids,
+            )
+        )
+    else:
+        shared_vctk_external = None
+        independent_vctk_external = None
+        shared_vctk_external_rows = []
+        independent_vctk_external_rows = []
 
     shared_metrics = shared_candidate_reports[selected_candidate]["calibrated"]
     independent_metrics = waveform_architecture_reports[selected_architecture][
@@ -2930,6 +3075,7 @@ def main() -> None:
         shared_anti,
         gradients["shared_dual_head"],
         shared_segment_transfer,
+        shared_vctk_external,
     )
     independent_decision = route_decision(
         independent_metrics,
@@ -2937,6 +3083,7 @@ def main() -> None:
         independent_anti,
         gradients["frozen_independent_predictor"],
         independent_segment_transfer,
+        independent_vctk_external,
     )
     shared_eligible_components = eligible_components(
         shared_metrics,
@@ -2944,6 +3091,7 @@ def main() -> None:
         shared_anti,
         gradients["shared_dual_head"],
         shared_segment_transfer,
+        shared_vctk_external,
     )
     independent_eligible_components = eligible_components(
         independent_metrics,
@@ -2951,6 +3099,7 @@ def main() -> None:
         independent_anti,
         gradients["frozen_independent_predictor"],
         independent_segment_transfer,
+        independent_vctk_external,
     )
     if (
         independent_decision == "ELIGIBLE_FOR_MULTISEED_CONFIRMATION"
@@ -3006,6 +3155,7 @@ def main() -> None:
                 "training_segment_transfer": shared_segment_transfer,
                 "gradient": gradients["shared_dual_head"],
                 "external_clean_target_stress": shared_external,
+                "vctk_external_own_target_stress": shared_vctk_external,
                 "eligible_components": shared_eligible_components,
                 "decision": shared_decision,
                 "interpretation_limit": (
@@ -3026,6 +3176,7 @@ def main() -> None:
                 "training_segment_transfer": independent_segment_transfer,
                 "gradient": gradients["frozen_independent_predictor"],
                 "external_enhancement_stress": independent_external,
+                "vctk_external_own_target_stress": independent_vctk_external,
                 "eligible_components": independent_eligible_components,
                 "decision": independent_decision,
             },
@@ -3064,6 +3215,15 @@ def main() -> None:
         args.output_dir / "external_shared_predictions.csv",
         shared_external_rows,
     )
+    if uses_vctk_external:
+        write_csv(
+            args.output_dir / "vctk_external_independent_predictions.csv",
+            independent_vctk_external_rows,
+        )
+        write_csv(
+            args.output_dir / "vctk_external_shared_predictions.csv",
+            shared_vctk_external_rows,
+        )
     (args.output_dir / "SUMMARY.md").write_text(
         human_summary(report), encoding="utf-8"
     )
@@ -3084,6 +3244,14 @@ def main() -> None:
                 "external_independent_predictions.csv",
                 "external_shared_predictions.csv",
                 "SUMMARY.md",
+                *(
+                    (
+                        "vctk_external_independent_predictions.csv",
+                        "vctk_external_shared_predictions.csv",
+                    )
+                    if uses_vctk_external
+                    else ()
+                ),
             )
         },
         "checkpoint_sha256": {

@@ -1,5 +1,5 @@
 schema_version: avqi-component-phaseaware-v4
-status: frozen_before_implementation
+status: frozen_contract_implementation_in_progress
 goal: >-
   Predict each waveform's own exact AVQI v03.01 components, then compare a
   frozen scorer on enhanced speech with the same speaker's clean pathological
@@ -47,6 +47,13 @@ vctk_expansion:
   rir_root: /scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/v1_verified/rir
   split_before_simulation: true
   rescore_every_generated_waveform: true
+  simulation_contract:
+    reverb: full_band_fft_convolution_rms_matched_to_clean
+    snr20: reverberant_speech_plus_dns5_noise_at_20_db
+    snr10: reverberant_speech_plus_dns5_noise_at_10_db
+    peak_ceiling: 0.98
+    output_subtype: PCM_16
+    final_audio_highpass_applied: false
 
 row_budget:
   vctk_internal_rows: 1536

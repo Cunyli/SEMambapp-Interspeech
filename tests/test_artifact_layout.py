@@ -95,6 +95,25 @@ def test_avqi_expansion_is_training_only_and_hash_locked() -> None:
     assert "CONFIRM_SLURM_SUBMIT" in launcher
 
 
+def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
+    prepare = read("scripts/prepare_avqi_component_v4_vctk.py")
+    score = read("scripts/build_avqi_component_v4_label_bank.py")
+    launcher = read("scripts/run_avqi_component_v4_data.sh")
+    diagnostic = read("scripts/evaluate_avqi_component_backprop.py")
+    assert '"surrogate_train": 72' in prepare
+    assert '"surrogate_calibration": 12' in prepare
+    assert '"surrogate_holdout": 12' in prepare
+    assert '"vctk_external": 12' in prepare
+    assert '"metric_branch_highpass_applied": 0' in prepare
+    assert '"speaker_overlap_with_base": 0' in score
+    assert "minimum-split-condition-coverage" in score
+    assert "CONFIRM_SLURM_SUBMIT" in launcher
+    assert '"output_phase_tfgrid"' in diagnostic
+    assert '"phase_frequency_aware"' in diagnostic
+    assert '"phase_compact_tfgrid"' in diagnostic
+    assert 'parser.add_argument("--max-optimizer-steps"' in diagnostic
+
+
 def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None:
     source = read("scripts/evaluate_direct_avqi_waveform_optimization.py")
     assert 'CANDIDATE = "S3_500"' in source
