@@ -106,6 +106,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     promotion_runner = read("scripts/run_avqi_component_v4_phase_promotion.sh")
     frozen_contract = read("configs/avqi_component_phaseaware_v4.yaml")
     diagnostic = read("scripts/evaluate_avqi_component_backprop.py")
+    data_finalizer = read("scripts/finalize_avqi_component_v4_data.py")
     assert '"surrogate_train": 72' in prepare
     assert '"surrogate_calibration": 12' in prepare
     assert '"surrogate_holdout": 12' in prepare
@@ -151,6 +152,10 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert "env -u SLURM_JOB_ID" in promotion_runner
     assert 'SCREEN_KIND=full_tfgrid' in promotion_runner
     assert "full_tfgrid_submission.json" in promotion_runner
+    assert '"DATA_READY_FOR_SCORER_SCREENS"' in data_finalizer
+    assert '"merged_internal_rows": 2_454' in data_finalizer
+    assert "split-condition exact coverage failed" in data_finalizer
+    assert '"waveform_highpass_applied": False' in data_finalizer
     assert "metric_alignment: tail_crop_to_shortest_only_no_shift_filter_or_resample" in frozen_contract
     assert "pathology_db_median_gap_increase_max: 0.50" in frozen_contract
     assert "denoising_median_change_min_db: -0.10" in frozen_contract
