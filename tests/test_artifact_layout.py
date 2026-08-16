@@ -136,6 +136,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert "CONFIRMATION_SEEDS=(20260816 20260817 20260818)" in confirm
     assert 'CONFIRM_KIND="${CONFIRM_KIND:-phase}"' in confirm
     assert 'direct:direct_praat_hard_v2' in confirm
+    assert 'full:pretrained_full_tfgrid' in confirm
     assert 'CONFIRM_RUN_STEM="avqi_component_direct_hard_v4_confirm"' in confirm
     assert 'SHARED_CANDIDATES="$(jq -er' in confirm
     assert 'WAVEFORM_ARCHITECTURES="$(jq -er' in confirm
@@ -145,6 +146,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'DEPENDENCY_ARGS=(--dependency="afterok:$NORMALIZED_JOB_IDS")' in multiseed_runner
     assert 'ARGS+=(--confirmation-report "$path")' in multiseed_runner
     assert 'python3 "$SUMMARY_SCRIPT" "${ARGS[@]}"' in multiseed_runner
+    assert 'CONFIRM_RUN_STEM="avqi_component_pretrained_full_tfgrid_v4_confirm"' in multiseed_runner
     assert 'PROMOTE_DECISION = "PROMOTE_PRETRAINED_FULL_TFGRID_SCREEN"' in promotion
     assert "all_required_slice_medians_non_regressed" in promotion
     assert '"generator_optimizer_steps": 0' in promotion
@@ -466,6 +468,47 @@ def test_avqi_multiseed_accepts_phaseaware_v4_screen() -> None:
     namespace["validate_screen_contract"](
         screen,
         Path("phase-v4-screen.json"),
+    )
+
+
+def test_avqi_multiseed_accepts_pretrained_full_tfgrid_screen() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
+    )
+    screen = {
+        "contract": {
+            "routes": {
+                "shared_dual_head": {"candidates": ["output_phase_tfgrid"]},
+                "frozen_independent_predictor": {
+                    "architectures": ["pretrained_full_tfgrid"]
+                },
+            },
+            "matched_training_budget": {
+                "shared_max_epochs": 60,
+                "independent_max_epochs": 60,
+            },
+            "calibration": {"holdout_used_for_fit_or_selection": False},
+        },
+        "routes": {
+            "shared_dual_head": {
+                "selected_candidate": "output_phase_tfgrid",
+                "selection_rule": "lowest calibration loss before holdout evaluation",
+                "training": {
+                    "output_phase_tfgrid": {"best_calibration_loss": 0.10}
+                },
+            },
+            "frozen_independent_predictor": {
+                "selected_architecture": "pretrained_full_tfgrid",
+                "selection_rule": "lowest calibration loss before holdout evaluation",
+                "training": {
+                    "pretrained_full_tfgrid": {"best_calibration_loss": 0.08}
+                },
+            },
+        },
+    }
+    namespace["validate_screen_contract"](
+        screen,
+        Path("full-tfgrid-v4-screen.json"),
     )
 
 

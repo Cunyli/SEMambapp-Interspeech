@@ -21,8 +21,13 @@ case "$CONFIRM_KIND" in
     CONFIRM_RUN_STEM="avqi_component_direct_hard_v4_confirm"
     CONFIRM_JOB_PREFIX="avqi-v4-d"
     ;;
+  full)
+    DEFAULT_SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_pretrained_full_tfgrid_v4_screen_20260816_01"
+    CONFIRM_RUN_STEM="avqi_component_pretrained_full_tfgrid_v4_confirm"
+    CONFIRM_JOB_PREFIX="avqi-v4-f"
+    ;;
   *)
-    echo "CONFIRM_KIND must be phase or direct, got: $CONFIRM_KIND" >&2
+    echo "CONFIRM_KIND must be phase, direct, or full, got: $CONFIRM_KIND" >&2
     exit 2
     ;;
 esac
@@ -132,6 +137,7 @@ fi
 case "$CONFIRM_KIND:$WAVEFORM_ARCHITECTURES" in
   phase:frequency_aware|phase:phase_frequency_aware|phase:phase_compact_tfgrid) ;;
   direct:direct_praat_hard_v2) ;;
+  full:pretrained_full_tfgrid) ;;
   *)
     echo "Unexpected locked $CONFIRM_KIND architecture: $WAVEFORM_ARCHITECTURES" >&2
     exit 2

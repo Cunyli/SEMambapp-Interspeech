@@ -24,8 +24,14 @@ case "$CONSENSUS_KIND" in
     RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_hard_v4_multiseed_20260816_01}"
     JOB_NAME="avqi-v4-dcons"
     ;;
+  full)
+    SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_pretrained_full_tfgrid_v4_screen_20260816_01"
+    CONFIRM_RUN_STEM="avqi_component_pretrained_full_tfgrid_v4_confirm"
+    RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_pretrained_full_tfgrid_v4_multiseed_20260816_01}"
+    JOB_NAME="avqi-v4-fcons"
+    ;;
   *)
-    echo "CONSENSUS_KIND must be phase or direct, got: $CONSENSUS_KIND" >&2
+    echo "CONSENSUS_KIND must be phase, direct, or full, got: $CONSENSUS_KIND" >&2
     exit 2
     ;;
 esac
