@@ -107,6 +107,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     frozen_contract = read("configs/avqi_component_phaseaware_v4.yaml")
     diagnostic = read("scripts/evaluate_avqi_component_backprop.py")
     data_finalizer = read("scripts/finalize_avqi_component_v4_data.py")
+    test_runner = read("scripts/run_avqi_component_v4_tests.sh")
     assert '"surrogate_train": 72' in prepare
     assert '"surrogate_calibration": 12' in prepare
     assert '"surrogate_holdout": 12' in prepare
@@ -158,6 +159,10 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert '"merged_internal_rows": 2_454' in data_finalizer
     assert "split-condition exact coverage failed" in data_finalizer
     assert '"waveform_highpass_applied": False' in data_finalizer
+    assert "tests/test_shifted_anechoic_target.py" in test_runner
+    assert 'python -m pytest -q "${TEST_FILES[@]}"' in test_runner
+    assert '"PASS_AVQI_V4_REPOSITORY_TESTS"' in test_runner
+    assert "pytest_log_sha256" in test_runner
     assert "metric_alignment: tail_crop_to_shortest_only_no_shift_filter_or_resample" in frozen_contract
     assert "pathology_db_median_gap_increase_max: 0.50" in frozen_contract
     assert "denoising_median_change_min_db: -0.10" in frozen_contract
