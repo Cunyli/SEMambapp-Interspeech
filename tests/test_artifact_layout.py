@@ -133,7 +133,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'EXPECTED_TRAIN_SPEAKERS="${EXPECTED_TRAIN_SPEAKERS:-197}"' in screen
     assert 'SEED="${SEED:-20260815}"' in screen
     assert 'DEPENDENCY_ARGS=(--dependency="afterok:$DEPENDENCY_JOB_ID")' in screen
-    assert "exec \"$DIAGNOSTIC_LAUNCHER\"" in screen
+    assert "exec bash \"$DIAGNOSTIC_LAUNCHER\"" in screen
     assert "CONFIRMATION_SEEDS=(20260816 20260817 20260818)" in confirm
     assert 'CONFIRM_KIND="${CONFIRM_KIND:-phase}"' in confirm
     assert 'direct:direct_praat_hard_v2' in confirm
@@ -142,7 +142,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'SHARED_CANDIDATES="$(jq -er' in confirm
     assert 'WAVEFORM_ARCHITECTURES="$(jq -er' in confirm
     assert 'contract.source_commit' in confirm
-    assert "exec \"$DIAGNOSTIC_LAUNCHER\"" in confirm
+    assert "exec bash \"$DIAGNOSTIC_LAUNCHER\"" in confirm
     assert 'CONSENSUS_KIND="${CONSENSUS_KIND:-phase}"' in multiseed_runner
     assert 'DEPENDENCY_ARGS=(--dependency="afterok:$NORMALIZED_JOB_IDS")' in multiseed_runner
     assert 'ARGS+=(--confirmation-report "$path")' in multiseed_runner
