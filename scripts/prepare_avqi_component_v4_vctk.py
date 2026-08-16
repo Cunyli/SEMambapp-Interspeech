@@ -140,7 +140,7 @@ class WdsReader:
 
 def speaker_id(row: dict[str, Any]) -> str:
     speaker = Path(str(row["source_path"])).parent.name
-    if not speaker.startswith("p") or not speaker[1:].isdigit():
+    if not speaker or not speaker.replace("_", "").replace("-", "").isalnum():
         raise ValueError(f"cannot parse VCTK speaker from {row['source_path']}")
     return speaker
 
