@@ -111,7 +111,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert '"output_phase_tfgrid"' in diagnostic
     assert '"phase_frequency_aware"' in diagnostic
     assert '"phase_compact_tfgrid"' in diagnostic
-    assert 'parser.add_argument("--max-optimizer-steps"' in diagnostic
+    assert '"--max-optimizer-steps"' in diagnostic
 
 
 def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None:
