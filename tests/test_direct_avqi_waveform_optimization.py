@@ -164,6 +164,52 @@ def test_guardrail_reference_map_uses_view_specific_rows(
     }
 
 
+def test_label_selection_excludes_valid_rows_without_clean_target() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "evaluate_avqi_component_backprop.py"
+    )
+    rows = [
+        {
+            "speaker_id": "p317",
+            "sample_id": "sample_missing_clean",
+            "split": "surrogate_train",
+            "condition_id": "clean",
+            "view": "cs",
+            "scoring_status": "error",
+        },
+        {
+            "speaker_id": "p317",
+            "sample_id": "sample_missing_clean",
+            "split": "surrogate_train",
+            "condition_id": "snr10",
+            "view": "cs",
+            "scoring_status": "ok",
+        },
+        {
+            "speaker_id": "p317",
+            "sample_id": "sample_complete",
+            "split": "surrogate_train",
+            "condition_id": "clean",
+            "view": "cs",
+            "scoring_status": "ok",
+        },
+        {
+            "speaker_id": "p317",
+            "sample_id": "sample_complete",
+            "split": "surrogate_train",
+            "condition_id": "snr10",
+            "view": "cs",
+            "scoring_status": "ok",
+        },
+    ]
+
+    exact, usable, missing = namespace["select_usable_label_rows"](rows)
+
+    assert len(exact) == 3
+    assert {row["sample_id"] for row in usable} == {"sample_complete"}
+    assert [row["condition_id"] for row in missing] == ["snr10"]
+
+
 def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
     namespace = load_namespace()
     components = namespace["AVQI_COMPONENT_NAMES"]

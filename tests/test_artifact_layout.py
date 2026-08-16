@@ -67,6 +67,7 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"--expected-calibration-speakers"' in source
     assert '"--expected-holdout-speakers"' in source
     assert "MIN_LABEL_BANK_COVERAGE = 0.95" in source
+    assert "MIN_LABEL_BANK_SLICE_COVERAGE = 0.90" in source
     assert '--expected-train-speakers "$EXPECTED_TRAIN_SPEAKERS"' in launcher
     assert "external_coverage_report" in source
     assert "training_segment_transfer_report" in source

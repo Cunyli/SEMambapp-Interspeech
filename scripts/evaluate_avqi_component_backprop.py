@@ -72,6 +72,7 @@ DEFAULT_EXPECTED_SPLIT_SPEAKERS = {
     "surrogate_holdout": 14,
 }
 MIN_LABEL_BANK_COVERAGE = 0.95
+MIN_LABEL_BANK_SLICE_COVERAGE = 0.90
 PRIMARY_GATE_COMPONENTS = ("cpps", "hnr")
 COMPONENT_FAMILIES = {
     "cpps": "periodicity_noise",
@@ -241,6 +242,39 @@ def load_waveform(path: Path) -> torch.Tensor:
     return waveform
 
 
+def clean_target_key(row: dict[str, str]) -> tuple[str, str, str, str]:
+    return (
+        row["speaker_id"],
+        row_sample_id(row),
+        row["split"],
+        row["view"],
+    )
+
+
+def select_usable_label_rows(
+    all_task_rows: list[dict[str, str]],
+) -> tuple[
+    list[dict[str, str]],
+    list[dict[str, str]],
+    list[dict[str, str]],
+]:
+    exact_rows = [
+        row for row in all_task_rows if row["scoring_status"] == "ok"
+    ]
+    clean_keys = {
+        clean_target_key(row)
+        for row in exact_rows
+        if row["condition_id"] == "clean"
+    }
+    usable_rows = [
+        row for row in exact_rows if clean_target_key(row) in clean_keys
+    ]
+    missing_clean_target_rows = [
+        row for row in exact_rows if clean_target_key(row) not in clean_keys
+    ]
+    return exact_rows, usable_rows, missing_clean_target_rows
+
+
 def load_examples(
     label_bank: Path,
     expected_split_speakers: dict[str, int],
@@ -270,16 +304,20 @@ def load_examples(
             "label-bank split mismatch: "
             f"expected {sorted(expected_split_speakers)}, found {sorted(actual_splits)}"
         )
-    task_rows = [
-        row
-        for row in all_task_rows
-        if row["scoring_status"] == "ok"
-    ]
-    coverage_fraction = len(task_rows) / len(all_task_rows)
-    if coverage_fraction < MIN_LABEL_BANK_COVERAGE:
+    exact_rows, task_rows, missing_clean_target_rows = (
+        select_usable_label_rows(all_task_rows)
+    )
+    exact_coverage_fraction = len(exact_rows) / len(all_task_rows)
+    if exact_coverage_fraction < MIN_LABEL_BANK_COVERAGE:
         raise ValueError(
             "label-bank exact-score coverage below gate: "
-            f"{coverage_fraction:.6f} < {MIN_LABEL_BANK_COVERAGE:.2f}"
+            f"{exact_coverage_fraction:.6f} < {MIN_LABEL_BANK_COVERAGE:.2f}"
+        )
+    usable_coverage_fraction = len(task_rows) / len(all_task_rows)
+    if usable_coverage_fraction < MIN_LABEL_BANK_COVERAGE:
+        raise ValueError(
+            "label-bank clean-target-compatible coverage below gate: "
+            f"{usable_coverage_fraction:.6f} < {MIN_LABEL_BANK_COVERAGE:.2f}"
         )
     invalid_rows = [
         {
@@ -293,6 +331,16 @@ def load_examples(
         }
         for row in all_task_rows
         if row["scoring_status"] != "ok"
+    ]
+    missing_clean_target_cases = [
+        {
+            "speaker_id": row["speaker_id"],
+            "sample_id": row_sample_id(row),
+            "split": row["split"],
+            "condition": row["condition_id"],
+            "view": row["view"],
+        }
+        for row in missing_clean_target_rows
     ]
     split_speakers = {
         split: len({row["speaker_id"] for row in task_rows if row["split"] == split})
@@ -308,9 +356,49 @@ def load_examples(
         for second, second_speakers in speaker_sets.items():
             if first < second and first_speakers & second_speakers:
                 raise ValueError(f"speaker leakage between {first} and {second}")
+    split_condition_coverage: dict[str, Any] = {}
+    for split, condition in sorted(
+        {(row["split"], row["condition_id"]) for row in all_task_rows}
+    ):
+        eligible = [
+            row
+            for row in all_task_rows
+            if row["split"] == split and row["condition_id"] == condition
+        ]
+        exact = [
+            row
+            for row in exact_rows
+            if row["split"] == split and row["condition_id"] == condition
+        ]
+        usable = [
+            row
+            for row in task_rows
+            if row["split"] == split and row["condition_id"] == condition
+        ]
+        usable_fraction = len(usable) / len(eligible)
+        slice_name = f"{split}/{condition}"
+        split_condition_coverage[slice_name] = {
+            "eligible_rows": len(eligible),
+            "exact_rows": len(exact),
+            "usable_rows": len(usable),
+            "exact_fraction": len(exact) / len(eligible),
+            "usable_fraction": usable_fraction,
+            "minimum_usable_fraction": MIN_LABEL_BANK_SLICE_COVERAGE,
+            "decision": (
+                "PASS"
+                if usable_fraction >= MIN_LABEL_BANK_SLICE_COVERAGE
+                else "FAIL"
+            ),
+        }
+        if usable_fraction < MIN_LABEL_BANK_SLICE_COVERAGE:
+            raise ValueError(
+                "label-bank clean-target-compatible slice coverage below gate: "
+                f"{slice_name}={usable_fraction:.6f} < "
+                f"{MIN_LABEL_BANK_SLICE_COVERAGE:.2f}"
+            )
     clean_targets = {
-        (row["speaker_id"], row_sample_id(row), row["view"]): component_tensor(row)
-        for row in task_rows
+        clean_target_key(row): component_tensor(row)
+        for row in exact_rows
         if row["condition_id"] == "clean"
     }
     examples: list[Example] = []
@@ -321,9 +409,7 @@ def load_examples(
         if sha256_file(path) != expected_hash:
             raise ValueError(f"audio hash mismatch: {path}")
         sample_id = row_sample_id(row)
-        key = (row["speaker_id"], sample_id, view)
-        if key not in clean_targets:
-            raise ValueError(f"missing clean target for {key}")
+        key = clean_target_key(row)
         examples.append(
             Example(
                 speaker_id=row["speaker_id"],
@@ -344,12 +430,18 @@ def load_examples(
             print(f"loaded_examples={index}/{len(task_rows)}", flush=True)
     coverage = {
         "total_rows": len(all_task_rows),
+        "exact_rows": len(exact_rows),
         "usable_rows": len(task_rows),
         "invalid_rows": len(invalid_rows),
-        "fraction": coverage_fraction,
+        "missing_clean_target_rows": len(missing_clean_target_rows),
+        "exact_fraction": exact_coverage_fraction,
+        "fraction": usable_coverage_fraction,
         "minimum_fraction": MIN_LABEL_BANK_COVERAGE,
+        "minimum_slice_fraction": MIN_LABEL_BANK_SLICE_COVERAGE,
         "split_speakers": split_speakers,
+        "split_condition_coverage": split_condition_coverage,
         "invalid_cases": invalid_rows,
+        "missing_clean_target_cases": missing_clean_target_cases,
     }
     return examples, coverage
 
