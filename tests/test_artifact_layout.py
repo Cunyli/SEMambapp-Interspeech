@@ -99,6 +99,7 @@ def test_avqi_expansion_is_training_only_and_hash_locked() -> None:
 def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     prepare = read("scripts/prepare_avqi_component_v4_vctk.py")
     score = read("scripts/build_avqi_component_v4_label_bank.py")
+    selection = read("scripts/avqi_vctk_selection.py")
     launcher = read("scripts/run_avqi_component_v4_data.sh")
     screen = read("scripts/run_avqi_component_v4_screen.sh")
     confirm = read("scripts/run_avqi_component_v4_confirm.sh")
@@ -114,10 +115,18 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert '"surrogate_holdout": 12' in prepare
     assert '"vctk_external": 12' in prepare
     assert '"metric_branch_highpass_applied": 0' in prepare
+    assert 'default=2' in prepare
+    assert '"external_reserve_utterances_per_speaker"' in prepare
     assert "popitem(last=False)" in prepare
     assert '"--max-open-shards"' in prepare
     assert '"speaker_overlap_with_base": 0' in score
+    assert "select_exact_complete_external_rows" in score
+    assert 'default=1_824' in score
     assert "minimum-split-condition-coverage" in score
+    assert '"metric_values_used_for_selection": False' in selection
+    assert '"selected_external_valid_rows"' in selection
+    assert 'EXTERNAL_RESERVE_UTTERANCES="${EXTERNAL_RESERVE_UTTERANCES:-2}"' in launcher
+    assert '--expected-vctk-rows "$EXPECTED_VCTK_CANDIDATE_ROWS"' in launcher
     assert "CONFIRM_SLURM_SUBMIT" in launcher
     assert '"output_phase_tfgrid"' in diagnostic
     assert '"phase_frequency_aware"' in diagnostic
@@ -158,6 +167,11 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert "full_tfgrid_submission.json" in promotion_runner
     assert '"DATA_READY_FOR_SCORER_SCREENS"' in data_finalizer
     assert '"merged_internal_rows": 2_454' in data_finalizer
+    assert '"prepared_candidate_rows"' in data_finalizer
+    assert '"selected_external_valid_rows"' in data_finalizer
+    assert '"surrogate_train": 1_152' in data_finalizer
+    assert '"vctk_external": 288' in data_finalizer
+    assert 'condition: 456 for condition in EXPECTED_CONDITIONS' in data_finalizer
     assert "split-condition exact coverage failed" in data_finalizer
     assert '"waveform_highpass_applied": False' in data_finalizer
     assert "tests/test_shifted_anechoic_target.py" in test_runner

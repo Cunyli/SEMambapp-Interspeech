@@ -28,6 +28,10 @@ from model.avqi_components import (
     pool_frequency_aware_shared_feature_map,
     standardized_component_loss,
 )
+from scripts.avqi_vctk_selection import (
+    CONDITIONS,
+    select_exact_complete_external_rows,
+)
 
 
 def test_avqi_v0301_matches_verified_formula() -> None:
@@ -565,3 +569,77 @@ def test_component_loss_balances_correlated_pairs() -> None:
     )
 
     assert torch.isclose(hnr_loss, shimmer_pair_loss)
+
+
+def _external_candidate_rows(
+    sample_id: str,
+    *,
+    failed_condition: str | None = None,
+) -> list[dict[str, str]]:
+    return [
+        {
+            "split": "vctk_external",
+            "speaker_id": "p001",
+            "sample_id": sample_id,
+            "condition": condition,
+            "scoring_status": (
+                "error" if condition == failed_condition else "ok"
+            ),
+            "error_type": (
+                "PraatError" if condition == failed_condition else ""
+            ),
+        }
+        for condition in CONDITIONS
+    ]
+
+
+def test_external_exact_selection_uses_reserve_without_metric_values() -> None:
+    internal = {
+        "split": "surrogate_train",
+        "speaker_id": "p900",
+        "sample_id": "internal",
+        "condition": "clean",
+        "scoring_status": "error",
+    }
+    rows = [
+        internal,
+        *_external_candidate_rows("primary_bad", failed_condition="clean"),
+        *_external_candidate_rows("primary_good"),
+        *_external_candidate_rows("reserve_good"),
+    ]
+    selected, receipt = select_exact_complete_external_rows(
+        rows,
+        required_utterances_per_speaker=2,
+    )
+    selected_samples = {
+        row["sample_id"]
+        for row in selected
+        if row["split"] == "vctk_external"
+    }
+    assert internal in selected
+    assert selected_samples == {"primary_good", "reserve_good"}
+    assert receipt["metric_values_used_for_selection"] is False
+    assert receipt["replacement_count"] == 1
+    assert receipt["selected_external_rows"] == 8
+    assert receipt["speakers"]["p001"]["replaced_sample_ids"] == [
+        "primary_bad"
+    ]
+    assert receipt["speakers"]["p001"]["replacement_sample_ids"] == [
+        "reserve_good"
+    ]
+
+
+def test_external_exact_selection_fails_without_enough_valid_reserves() -> None:
+    rows = [
+        *_external_candidate_rows("bad", failed_condition="clean"),
+        *_external_candidate_rows("only_good"),
+    ]
+    try:
+        select_exact_complete_external_rows(
+            rows,
+            required_utterances_per_speaker=2,
+        )
+    except ValueError as error:
+        assert "only 1 exact-complete external utterances" in str(error)
+        return
+    raise AssertionError("insufficient exact-valid reserve was accepted")

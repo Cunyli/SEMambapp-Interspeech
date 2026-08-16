@@ -84,8 +84,30 @@ def main() -> None:
         raise ValueError("VCTK speaker splits overlap")
     if tuple(data["conditions"]) != EXPECTED_CONDITIONS:
         raise ValueError(f"condition contract differs: {data['conditions']}")
-    if data["row_count"] != 1_728:
-        raise ValueError(f"expected 1728 prepared rows: {data['row_count']}")
+    if data["row_count"] != 1_824:
+        raise ValueError(f"expected 1824 prepared candidate rows: {data['row_count']}")
+    if data["utterances_per_speaker"] != 4:
+        raise ValueError("selected utterance count differs from frozen contract")
+    if data["external_reserve_utterances_per_speaker"] != 2:
+        raise ValueError("external reserve utterance count differs")
+    expected_candidate_rows_by_split = {
+        "surrogate_train": 1_152,
+        "surrogate_calibration": 192,
+        "surrogate_holdout": 192,
+        "vctk_external": 288,
+    }
+    if data["row_counts_by_split"] != expected_candidate_rows_by_split:
+        raise ValueError(
+            f"candidate split row counts differ: {data['row_counts_by_split']}"
+        )
+    expected_candidate_rows_by_condition = {
+        condition: 456 for condition in EXPECTED_CONDITIONS
+    }
+    if data["row_counts_by_condition"] != expected_candidate_rows_by_condition:
+        raise ValueError(
+            "candidate condition row counts differ: "
+            f"{data['row_counts_by_condition']}"
+        )
     if data["full_band_audio_preserved"] is not True:
         raise ValueError("prepared audio is not declared full-band")
     if data["avqi_metric_branch_highpass_applied"] is not False:
@@ -97,6 +119,7 @@ def main() -> None:
         raise ValueError("label scorer did not consume the prepared metadata receipt")
     expected_label_counts = {
         "base_rows": 918,
+        "vctk_candidate_scored_rows": 1_824,
         "vctk_scored_rows": 1_728,
         "internal_vctk_rows": 1_536,
         "external_vctk_rows": 192,
@@ -123,6 +146,17 @@ def main() -> None:
     }
     if failed_slices:
         raise ValueError(f"split-condition exact coverage failed: {failed_slices}")
+    external_selection = labels["external_selection"]
+    if external_selection["metric_values_used_for_selection"] is not False:
+        raise ValueError("external reserve selection used component values")
+    if external_selection["speaker_count"] != 12:
+        raise ValueError("external reserve selection speaker count differs")
+    if external_selection["candidate_external_rows"] != 288:
+        raise ValueError("external reserve candidate row count differs")
+    if external_selection["selected_external_rows"] != 192:
+        raise ValueError("external selected row count differs")
+    if external_selection["selected_external_valid_rows"] != 192:
+        raise ValueError("external selected rows are not all exact-valid")
     validate_artifact(
         labels["internal_label_bank"],
         labels["internal_label_bank_sha256"],
@@ -137,7 +171,8 @@ def main() -> None:
         "slurm_job_id": args.slurm_job_id,
         "data_source_commit": args.data_source_commit,
         "finalizer_source_commit": args.finalizer_source_commit,
-        "prepared_rows": data["row_count"],
+        "prepared_candidate_rows": data["row_count"],
+        "prepared_rows": labels["vctk_scored_rows"],
         "exact_scored_rows": labels["vctk_scored_rows"],
         "exact_valid_rows": labels["vctk_valid_rows"],
         "exact_coverage": labels["vctk_overall_coverage"],
@@ -146,6 +181,8 @@ def main() -> None:
         "speaker_overlap": 0,
         "merged_internal_rows": labels["merged_internal_rows"],
         "external_rows": labels["external_vctk_rows"],
+        "external_replacement_count": external_selection["replacement_count"],
+        "external_selection": external_selection,
         "full_band_audio_preserved": True,
         "waveform_highpass_applied": False,
         "generator_optimizer_steps": 0,

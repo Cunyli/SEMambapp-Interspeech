@@ -19,6 +19,7 @@ import parselmouth
 import soundfile as sf
 
 from avqi_code import run_avqi
+from avqi_vctk_selection import select_exact_complete_external_rows
 
 
 METRICS = (
@@ -74,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--avqi-main", type=Path, required=True)
     parser.add_argument("--avqi-main-sha256", required=True)
     parser.add_argument("--expected-base-rows", type=int, default=918)
-    parser.add_argument("--expected-vctk-rows", type=int, default=1_728)
+    parser.add_argument("--expected-vctk-rows", type=int, default=1_824)
     parser.add_argument("--minimum-coverage", type=float, default=0.95)
     parser.add_argument("--minimum-split-condition-coverage", type=float, default=0.90)
     return parser.parse_args()
@@ -230,7 +231,17 @@ def main() -> None:
     else:
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             scored_rows = list(executor.map(score_task, tasks))
-    overall_coverage = coverage(scored_rows)
+    selected_rows, external_selection = select_exact_complete_external_rows(
+        scored_rows,
+        required_utterances_per_speaker=4,
+    )
+    expected_selected_rows = 108 * 4 * 4
+    if len(selected_rows) != expected_selected_rows:
+        raise ValueError(
+            f"expected {expected_selected_rows} selected rows, found "
+            f"{len(selected_rows)}"
+        )
+    overall_coverage = coverage(selected_rows)
     if overall_coverage < args.minimum_coverage:
         raise ValueError(
             f"exact-score coverage {overall_coverage:.6f} below {args.minimum_coverage}"
@@ -239,7 +250,7 @@ def main() -> None:
     for split in VCTK_SPLIT_COUNTS:
         for condition in ("clean", "rir_only", "snr20", "snr10"):
             selected = [
-                row for row in scored_rows
+                row for row in selected_rows
                 if row["split"] == split and row["condition"] == condition
             ]
             value = coverage(selected)
@@ -257,7 +268,7 @@ def main() -> None:
         normalized["sample_id"] = row.get("pair_id") or row["speaker_id"]
         normalized_base.append(normalized)
     converted: list[dict[str, Any]] = []
-    for scored in scored_rows:
+    for scored in selected_rows:
         key = (scored["speaker_id"], scored["sample_id"], scored["condition"])
         metadata = metadata_by_key[key]
         path = Path(scored["path"])
@@ -324,10 +335,18 @@ def main() -> None:
         "schema_version": "avqi-component-label-bank-v4",
         "source_hashes": source_hashes,
         "base_rows": len(base_rows),
-        "vctk_scored_rows": len(scored_rows),
-        "vctk_valid_rows": sum(row["scoring_status"] == "ok" for row in scored_rows),
+        "vctk_candidate_scored_rows": len(scored_rows),
+        "vctk_candidate_valid_rows": sum(
+            row["scoring_status"] == "ok" for row in scored_rows
+        ),
+        "vctk_candidate_coverage": coverage(scored_rows),
+        "vctk_scored_rows": len(selected_rows),
+        "vctk_valid_rows": sum(
+            row["scoring_status"] == "ok" for row in selected_rows
+        ),
         "vctk_overall_coverage": overall_coverage,
         "vctk_split_condition_coverage": slice_coverage,
+        "external_selection": external_selection,
         "internal_vctk_rows": len(internal_vctk),
         "external_vctk_rows": len(external_vctk),
         "merged_internal_rows": len(normalized_base) + len(internal_vctk),

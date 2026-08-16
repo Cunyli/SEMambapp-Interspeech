@@ -3,7 +3,9 @@
 
 The split is frozen before any simulation.  Each selected utterance yields a
 clean, reverberant, 20 dB SNR, and 10 dB SNR waveform.  This script does not
-apply the AVQI 34 Hz metric-branch high-pass to generated audio.
+apply the AVQI 34 Hz metric-branch high-pass to generated audio. External
+speakers include deterministic reserve utterances so exact-Praat execution
+failures can be replaced without looking at component values.
 """
 
 from __future__ import annotations
@@ -52,6 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20260816)
     parser.add_argument("--utterances-per-speaker", type=int, default=4)
+    parser.add_argument(
+        "--external-reserve-utterances-per-speaker",
+        type=int,
+        default=2,
+    )
     parser.add_argument("--minimum-duration-seconds", type=float, default=3.0)
     parser.add_argument("--maximum-duration-seconds", type=float, default=12.0)
     parser.add_argument("--expected-vctk-items", type=int, default=43_873)
@@ -213,6 +220,8 @@ def main() -> None:
         raise FileExistsError(f"refusing to overwrite output: {args.output_dir}")
     if args.utterances_per_speaker <= 0:
         raise ValueError("utterances per speaker must be positive")
+    if args.external_reserve_utterances_per_speaker < 0:
+        raise ValueError("external reserve utterances must be non-negative")
     if args.max_open_shards <= 0:
         raise ValueError("max open shards must be positive")
     if not 0.0 < args.minimum_duration_seconds <= args.maximum_duration_seconds:
@@ -259,6 +268,12 @@ def main() -> None:
     reader = WdsReader(max_open_shards=args.max_open_shards)
     try:
         for speaker_index, speaker in enumerate(ranked_speakers, start=1):
+            split = split_by_speaker[speaker]
+            required_utterances = args.utterances_per_speaker
+            if split == "vctk_external":
+                required_utterances += (
+                    args.external_reserve_utterances_per_speaker
+                )
             candidates = sorted(
                 by_speaker[speaker],
                 key=lambda row: stable_rank(
@@ -279,13 +294,13 @@ def main() -> None:
                     rejected_durations["too_long"] += 1
                     continue
                 selected.append((candidate, clean))
-                if len(selected) == args.utterances_per_speaker:
+                if len(selected) == required_utterances:
                     break
-            if len(selected) != args.utterances_per_speaker:
+            if len(selected) != required_utterances:
                 raise ValueError(
-                    f"speaker {speaker} has only {len(selected)} eligible utterances"
+                    f"speaker {speaker} has only {len(selected)} eligible "
+                    f"utterances; required {required_utterances}"
                 )
-            split = split_by_speaker[speaker]
             for candidate, clean in selected:
                 sample_id = str(candidate["key"])
                 seed = stable_seed(args.seed, "simulation", speaker, sample_id)
@@ -347,7 +362,12 @@ def main() -> None:
     finally:
         reader.close()
 
-    expected_rows = len(by_speaker) * args.utterances_per_speaker * len(CONDITIONS)
+    expected_utterances = (
+        len(by_speaker) * args.utterances_per_speaker
+        + SPLIT_COUNTS["vctk_external"]
+        * args.external_reserve_utterances_per_speaker
+    )
+    expected_rows = expected_utterances * len(CONDITIONS)
     if len(metadata) != expected_rows:
         raise ValueError(f"expected {expected_rows} rows, generated {len(metadata)}")
     write_csv(args.output_dir / "metadata.csv", metadata)
@@ -366,6 +386,13 @@ def main() -> None:
         "speaker_counts": {key: len(value) for key, value in split_receipt.items()},
         "speaker_overlap": 0,
         "utterances_per_speaker": args.utterances_per_speaker,
+        "external_reserve_utterances_per_speaker": (
+            args.external_reserve_utterances_per_speaker
+        ),
+        "external_candidate_utterances_per_speaker": (
+            args.utterances_per_speaker
+            + args.external_reserve_utterances_per_speaker
+        ),
         "conditions": list(CONDITIONS),
         "row_count": len(metadata),
         "row_counts_by_split": dict(Counter(row["split"] for row in metadata)),
