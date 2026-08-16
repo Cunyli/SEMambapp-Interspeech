@@ -100,6 +100,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     score = read("scripts/build_avqi_component_v4_label_bank.py")
     launcher = read("scripts/run_avqi_component_v4_data.sh")
     screen = read("scripts/run_avqi_component_v4_screen.sh")
+    confirm = read("scripts/run_avqi_component_v4_confirm.sh")
     diagnostic = read("scripts/evaluate_avqi_component_backprop.py")
     assert '"surrogate_train": 72' in prepare
     assert '"surrogate_calibration": 12' in prepare
@@ -123,6 +124,11 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'SEED="${SEED:-20260815}"' in screen
     assert 'DEPENDENCY_ARGS=(--dependency="afterok:$DEPENDENCY_JOB_ID")' in screen
     assert "exec \"$DIAGNOSTIC_LAUNCHER\"" in screen
+    assert "CONFIRMATION_SEEDS=(20260816 20260817 20260818)" in confirm
+    assert 'SHARED_CANDIDATES="$(jq -er' in confirm
+    assert 'WAVEFORM_ARCHITECTURES="$(jq -er' in confirm
+    assert 'contract.source_commit' in confirm
+    assert "exec \"$DIAGNOSTIC_LAUNCHER\"" in confirm
 
 
 def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None:
