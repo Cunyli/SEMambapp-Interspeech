@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 
 from model.avqi_components import (
@@ -32,6 +33,34 @@ from scripts.avqi_vctk_selection import (
     CONDITIONS,
     select_exact_complete_external_rows,
 )
+from scripts.prepare_avqi_component_v4_vctk import select_nonzero_noise_crop
+
+
+class FixedNoiseRowRng:
+    def randrange(self, limit: int) -> int:
+        assert limit == 2
+        return 1
+
+
+class ArrayNoiseReader:
+    def read(self, row: dict[str, np.ndarray]) -> np.ndarray:
+        return row["audio"]
+
+
+def test_vctk_noise_crop_retries_only_zero_energy_windows() -> None:
+    zero = {"audio": np.zeros(16, dtype=np.float32)}
+    valid = {"audio": np.ones(16, dtype=np.float32)}
+    selected, crop, start, retry_count = select_nonzero_noise_crop(
+        zero,
+        [zero, valid],
+        ArrayNoiseReader(),
+        16,
+        FixedNoiseRowRng(),
+    )
+    assert selected is valid
+    assert np.array_equal(crop, valid["audio"])
+    assert start == 0
+    assert retry_count == 1
 
 
 def test_avqi_v0301_matches_verified_formula() -> None:

@@ -114,6 +114,10 @@ def main() -> None:
         raise ValueError("prepared waveform unexpectedly contains AVQI high-pass")
     if data["max_open_shards"] != 4:
         raise ValueError(f"tar cache contract differs: {data['max_open_shards']}")
+    if data["maximum_noise_crop_attempts"] != 32:
+        raise ValueError("noise crop retry contract differs")
+    if not 0 <= data["zero_energy_noise_crops_rejected"] < data["row_count"]:
+        raise ValueError("invalid zero-energy noise crop rejection count")
     validate_artifact(data["metadata_csv"], data["metadata_sha256"])
     if labels["source_hashes"]["vctk_metadata"] != data["metadata_sha256"]:
         raise ValueError("label scorer did not consume the prepared metadata receipt")
@@ -183,6 +187,10 @@ def main() -> None:
         "external_rows": labels["external_vctk_rows"],
         "external_replacement_count": external_selection["replacement_count"],
         "external_selection": external_selection,
+        "zero_energy_noise_crops_rejected": data[
+            "zero_energy_noise_crops_rejected"
+        ],
+        "maximum_noise_crop_attempts": data["maximum_noise_crop_attempts"],
         "full_band_audio_preserved": True,
         "waveform_highpass_applied": False,
         "generator_optimizer_steps": 0,

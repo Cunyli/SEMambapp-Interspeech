@@ -137,6 +137,9 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert "minimum-split-condition-coverage" in score
     assert '"metric_values_used_for_selection": False' in selection
     assert '"selected_external_valid_rows"' in selection
+    assert "select_nonzero_noise_crop" in prepare
+    assert '"zero_energy_noise_crops_rejected"' in prepare
+    assert '"maximum_noise_crop_attempts"' in data_finalizer
     assert 'EXTERNAL_RESERVE_UTTERANCES="${EXTERNAL_RESERVE_UTTERANCES:-2}"' in launcher
     assert '--expected-vctk-rows "$EXPECTED_VCTK_CANDIDATE_ROWS"' in launcher
     assert "CONFIRM_SLURM_SUBMIT" in launcher

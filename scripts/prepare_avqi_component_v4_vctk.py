@@ -38,6 +38,8 @@ SPLIT_COUNTS = {
     "vctk_external": 12,
 }
 CONDITIONS = ("clean", "rir_only", "snr20", "snr10")
+NOISE_CROP_RMS_MIN = 1e-8
+MAX_NOISE_CROP_ATTEMPTS = 32
 
 
 def parse_args() -> argparse.Namespace:
@@ -199,10 +201,33 @@ def reverberate(clean: np.ndarray, rir: np.ndarray) -> np.ndarray:
 def add_noise(signal: np.ndarray, noise: np.ndarray, snr_db: float) -> np.ndarray:
     signal_rms = rms(signal)
     noise_rms = rms(noise)
-    if signal_rms <= 1e-8 or noise_rms <= 1e-8:
+    if signal_rms <= NOISE_CROP_RMS_MIN or noise_rms <= NOISE_CROP_RMS_MIN:
         raise ValueError("cannot mix zero-energy signal or noise")
     target_noise_rms = signal_rms / (10.0 ** (snr_db / 20.0))
     return (signal + noise * (target_noise_rms / noise_rms)).astype(np.float32)
+
+
+def select_nonzero_noise_crop(
+    initial_row: dict[str, Any],
+    noise_rows: list[dict[str, Any]],
+    reader: WdsReader,
+    length: int,
+    rng: random.Random,
+    max_attempts: int = MAX_NOISE_CROP_ATTEMPTS,
+) -> tuple[dict[str, Any], np.ndarray, int, int]:
+    """Keep the frozen first draw, retrying only silent random crop windows."""
+    if max_attempts <= 0:
+        raise ValueError("noise crop attempts must be positive")
+    current_row = initial_row
+    for attempt in range(max_attempts):
+        noise, start = crop_or_tile(reader.read(current_row), length, rng)
+        if rms(noise) > NOISE_CROP_RMS_MIN:
+            return current_row, noise, start, attempt
+        if attempt + 1 < max_attempts:
+            current_row = noise_rows[rng.randrange(len(noise_rows))]
+    raise ValueError(
+        f"failed to find a nonzero noise crop in {max_attempts} attempts"
+    )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -265,6 +290,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True)
     metadata: list[dict[str, Any]] = []
     rejected_durations = Counter()
+    zero_energy_noise_crops_rejected = 0
     reader = WdsReader(max_open_shards=args.max_open_shards)
     try:
         for speaker_index, speaker in enumerate(ranked_speakers, start=1):
@@ -305,9 +331,18 @@ def main() -> None:
                 sample_id = str(candidate["key"])
                 seed = stable_seed(args.seed, "simulation", speaker, sample_id)
                 rng = random.Random(seed)
-                noise_row = noise_rows[rng.randrange(len(noise_rows))]
+                initial_noise_row = noise_rows[rng.randrange(len(noise_rows))]
                 rir_row = rir_rows[rng.randrange(len(rir_rows))]
-                noise, noise_start = crop_or_tile(reader.read(noise_row), clean.size, rng)
+                noise_row, noise, noise_start, noise_crop_retry_count = (
+                    select_nonzero_noise_crop(
+                        initial_noise_row,
+                        noise_rows,
+                        reader,
+                        clean.size,
+                        rng,
+                    )
+                )
+                zero_energy_noise_crops_rejected += noise_crop_retry_count
                 rir = reader.read(rir_row)
                 reverberant = reverberate(clean, rir)
                 variants = {
@@ -347,6 +382,7 @@ def main() -> None:
                             "noise_shard": noise_row["shard"],
                             "noise_audio_member": noise_row["audio_member"],
                             "noise_start_sample": noise_start,
+                            "noise_crop_retry_count": noise_crop_retry_count,
                             "rir_manifest_index": rir_row["_manifest_index"],
                             "rir_shard": rir_row["shard"],
                             "rir_audio_member": rir_row["audio_member"],
@@ -400,6 +436,8 @@ def main() -> None:
             Counter(row["condition_id"] for row in metadata)
         ),
         "rejected_duration_candidates": dict(rejected_durations),
+        "zero_energy_noise_crops_rejected": zero_energy_noise_crops_rejected,
+        "maximum_noise_crop_attempts": MAX_NOISE_CROP_ATTEMPTS,
         "full_band_audio_preserved": True,
         "avqi_metric_branch_highpass_applied": False,
         "max_open_shards": args.max_open_shards,
