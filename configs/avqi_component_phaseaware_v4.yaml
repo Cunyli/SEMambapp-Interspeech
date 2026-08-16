@@ -54,6 +54,7 @@ vctk_expansion:
     peak_ceiling: 0.98
     output_subtype: PCM_16
     final_audio_highpass_applied: false
+    max_open_tar_shards: 4
 
 row_budget:
   vctk_internal_rows: 1536

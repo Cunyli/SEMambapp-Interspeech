@@ -105,6 +105,8 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert '"surrogate_holdout": 12' in prepare
     assert '"vctk_external": 12' in prepare
     assert '"metric_branch_highpass_applied": 0' in prepare
+    assert "popitem(last=False)" in prepare
+    assert '"--max-open-shards"' in prepare
     assert '"speaker_overlap_with_base": 0' in score
     assert "minimum-split-condition-coverage" in score
     assert "CONFIRM_SLURM_SUBMIT" in launcher

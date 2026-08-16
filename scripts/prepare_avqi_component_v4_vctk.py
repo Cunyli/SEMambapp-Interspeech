@@ -15,8 +15,9 @@ import io
 import json
 import math
 import random
+import resource
 import tarfile
-from collections import Counter
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--maximum-duration-seconds", type=float, default=12.0)
     parser.add_argument("--expected-vctk-items", type=int, default=43_873)
     parser.add_argument("--expected-vctk-speakers", type=int, default=108)
+    parser.add_argument("--max-open-shards", type=int, default=4)
     return parser.parse_args()
 
 
@@ -103,8 +105,13 @@ def read_manifest(
 
 
 class WdsReader:
-    def __init__(self) -> None:
-        self._handles: dict[tuple[str, str], tarfile.TarFile] = {}
+    def __init__(self, max_open_shards: int = 4) -> None:
+        if max_open_shards <= 0:
+            raise ValueError("max open shards must be positive")
+        self.max_open_shards = max_open_shards
+        self._handles: OrderedDict[
+            tuple[str, str], tarfile.TarFile
+        ] = OrderedDict()
 
     def close(self) -> None:
         for handle in self._handles.values():
@@ -115,8 +122,13 @@ class WdsReader:
         key = (str(row["_root"]), str(row["shard"]))
         handle = self._handles.get(key)
         if handle is None:
+            if len(self._handles) >= self.max_open_shards:
+                _, evicted = self._handles.popitem(last=False)
+                evicted.close()
             handle = tarfile.open(Path(key[0]) / key[1])
             self._handles[key] = handle
+        else:
+            self._handles.move_to_end(key)
         file_object = handle.extractfile(str(row["audio_member"]))
         if file_object is None:
             raise FileNotFoundError(f"missing tar member: {key}/{row['audio_member']}")
@@ -201,6 +213,8 @@ def main() -> None:
         raise FileExistsError(f"refusing to overwrite output: {args.output_dir}")
     if args.utterances_per_speaker <= 0:
         raise ValueError("utterances per speaker must be positive")
+    if args.max_open_shards <= 0:
+        raise ValueError("max open shards must be positive")
     if not 0.0 < args.minimum_duration_seconds <= args.maximum_duration_seconds:
         raise ValueError("invalid duration interval")
     source_hashes = {
@@ -242,7 +256,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True)
     metadata: list[dict[str, Any]] = []
     rejected_durations = Counter()
-    reader = WdsReader()
+    reader = WdsReader(max_open_shards=args.max_open_shards)
     try:
         for speaker_index, speaker in enumerate(ranked_speakers, start=1):
             candidates = sorted(
@@ -326,7 +340,8 @@ def main() -> None:
                     )
             print(
                 f"prepared_speakers={speaker_index}/{len(ranked_speakers)} "
-                f"rows={len(metadata)}",
+                f"rows={len(metadata)} "
+                f"maxrss_kb={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
                 flush=True,
             )
     finally:
@@ -360,6 +375,8 @@ def main() -> None:
         "rejected_duration_candidates": dict(rejected_durations),
         "full_band_audio_preserved": True,
         "avqi_metric_branch_highpass_applied": False,
+        "max_open_shards": args.max_open_shards,
+        "process_maxrss_kb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         "metadata_csv": str((args.output_dir / "metadata.csv").resolve()),
         "metadata_sha256": sha256_file(args.output_dir / "metadata.csv"),
     }
