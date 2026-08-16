@@ -132,6 +132,9 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'DEPENDENCY_ARGS=(--dependency="afterok:$DEPENDENCY_JOB_ID")' in screen
     assert "exec \"$DIAGNOSTIC_LAUNCHER\"" in screen
     assert "CONFIRMATION_SEEDS=(20260816 20260817 20260818)" in confirm
+    assert 'CONFIRM_KIND="${CONFIRM_KIND:-phase}"' in confirm
+    assert 'direct:direct_praat_hard_v2' in confirm
+    assert 'CONFIRM_RUN_STEM="avqi_component_direct_hard_v4_confirm"' in confirm
     assert 'SHARED_CANDIDATES="$(jq -er' in confirm
     assert 'WAVEFORM_ARCHITECTURES="$(jq -er' in confirm
     assert 'contract.source_commit' in confirm

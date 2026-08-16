@@ -9,7 +9,24 @@ SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 DIAGNOSTIC_LAUNCHER="$SOURCE_ROOT/scripts/slurm_avqi_component_backprop_diagnostic.sh"
 DATA_RUN_ROOT="${DATA_RUN_ROOT:-$ROOT_DIR/runs/avqi_component_phaseaware_v4_data_20260816_02}"
 LABEL_RECEIPT="${LABEL_RECEIPT:-$DATA_RUN_ROOT/outputs/label_bank/receipt.json}"
-SCREEN_RUN_ROOT="${SCREEN_RUN_ROOT:-$ROOT_DIR/runs/avqi_component_phaseaware_v4_screen_20260816_01}"
+CONFIRM_KIND="${CONFIRM_KIND:-phase}"
+case "$CONFIRM_KIND" in
+  phase)
+    DEFAULT_SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_phaseaware_v4_screen_20260816_01"
+    CONFIRM_RUN_STEM="avqi_component_phaseaware_v4_confirm"
+    CONFIRM_JOB_PREFIX="avqi-v4-p"
+    ;;
+  direct)
+    DEFAULT_SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_direct_hard_v4_screen_20260816_01"
+    CONFIRM_RUN_STEM="avqi_component_direct_hard_v4_confirm"
+    CONFIRM_JOB_PREFIX="avqi-v4-d"
+    ;;
+  *)
+    echo "CONFIRM_KIND must be phase or direct, got: $CONFIRM_KIND" >&2
+    exit 2
+    ;;
+esac
+SCREEN_RUN_ROOT="${SCREEN_RUN_ROOT:-$DEFAULT_SCREEN_RUN_ROOT}"
 SCREEN_REPORT="${SCREEN_REPORT:-$SCREEN_RUN_ROOT/outputs/diagnostic_report.json}"
 DEPENDENCY_JOB_ID="${DEPENDENCY_JOB_ID:-}"
 CONFIRM_SEED="${CONFIRM_SEED:-}"
@@ -36,6 +53,7 @@ export SCREEN_RUN_ROOT SCREEN_REPORT DEPENDENCY_JOB_ID PARTITION GPU_TYPE
 export CPUS_PER_TASK MEMORY TIME_LIMIT EXPECTED_TRAIN_SPEAKERS
 export EXPECTED_CALIBRATION_SPEAKERS EXPECTED_HOLDOUT_SPEAKERS
 export MAX_OPTIMIZER_STEPS SOURCE_COMMIT
+export CONFIRM_KIND CONFIRM_RUN_STEM CONFIRM_JOB_PREFIX
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
@@ -50,10 +68,10 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     exit 2
   fi
   for seed in "${CONFIRMATION_SEEDS[@]}"; do
-    run_root="$ROOT_DIR/runs/avqi_component_phaseaware_v4_confirm_seed${seed}_01"
+    run_root="$ROOT_DIR/runs/${CONFIRM_RUN_STEM}_seed${seed}_01"
     log_dir="$run_root/logs"
     output_dir="$run_root/outputs"
-    checkpoint_dir="$ROOT_DIR/checkpoints/avqi_component_phaseaware_v4_confirm_seed${seed}_01"
+    checkpoint_dir="$ROOT_DIR/checkpoints/${CONFIRM_RUN_STEM}_seed${seed}_01"
     if [[ -e "$output_dir" || -e "$checkpoint_dir" ]]; then
       echo "Refusing to overwrite seed $seed outputs" >&2
       exit 2
@@ -61,7 +79,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     mkdir -p "$log_dir"
     sbatch \
       --parsable \
-      --job-name="avqi-v4-c${seed: -2}" \
+      --job-name="${CONFIRM_JOB_PREFIX}${seed: -2}" \
       --partition="$PARTITION" \
       --nodes=1 \
       --ntasks=1 \
@@ -111,10 +129,11 @@ if [[ "$SHARED_CANDIDATES" != "output_phase_tfgrid" ]]; then
   echo "Unexpected locked shared candidate: $SHARED_CANDIDATES" >&2
   exit 2
 fi
-case "$WAVEFORM_ARCHITECTURES" in
-  frequency_aware|phase_frequency_aware|phase_compact_tfgrid) ;;
+case "$CONFIRM_KIND:$WAVEFORM_ARCHITECTURES" in
+  phase:frequency_aware|phase:phase_frequency_aware|phase:phase_compact_tfgrid) ;;
+  direct:direct_praat_hard_v2) ;;
   *)
-    echo "Unexpected locked waveform architecture: $WAVEFORM_ARCHITECTURES" >&2
+    echo "Unexpected locked $CONFIRM_KIND architecture: $WAVEFORM_ARCHITECTURES" >&2
     exit 2
     ;;
 esac
@@ -130,7 +149,7 @@ CONFIG_SHA256="$(sha256sum "$CONFIG" | awk '{print $1}')"
 CHECKPOINT_SHA256="$(sha256sum "$CHECKPOINT" | awk '{print $1}')"
 EXTERNAL_EXACT_CSV_SHA256="$(sha256sum "$EXTERNAL_EXACT_CSV" | awk '{print $1}')"
 SEED="$CONFIRM_SEED"
-JOB_NAME="avqi-v4-c${CONFIRM_SEED: -2}"
+JOB_NAME="${CONFIRM_JOB_PREFIX}${CONFIRM_SEED: -2}"
 
 export SHARED_CANDIDATES WAVEFORM_ARCHITECTURES LABEL_BANK LABEL_BANK_SHA256
 export VCTK_EXTERNAL_LABEL_BANK VCTK_EXTERNAL_LABEL_BANK_SHA256 CONFIG
