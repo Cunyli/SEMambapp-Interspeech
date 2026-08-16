@@ -101,6 +101,7 @@ learned_routes:
     early_stop_patience: 10
     learning_rate: 0.0003
     gradient_clip_norm: 5.0
+    architecture_screen_seed: 20260815
     seeds:
       - 20260816
       - 20260817

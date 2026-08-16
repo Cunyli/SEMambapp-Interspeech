@@ -11,7 +11,7 @@ DATA_RUN_ROOT="${DATA_RUN_ROOT:-$ROOT_DIR/runs/avqi_component_phaseaware_v4_data
 LABEL_RECEIPT="${LABEL_RECEIPT:-$DATA_RUN_ROOT/outputs/label_bank/receipt.json}"
 SCREEN_KIND="${SCREEN_KIND:-phase}"
 DEPENDENCY_JOB_ID="${DEPENDENCY_JOB_ID:-}"
-SEED="${SEED:-20260816}"
+SEED="${SEED:-20260815}"
 
 PARTITION="${PARTITION:-gpu-v100-32g}"
 GPU_TYPE="${GPU_TYPE:-v100}"

@@ -120,6 +120,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert "frequency_aware,phase_frequency_aware,phase_compact_tfgrid" in screen
     assert 'WAVEFORM_ARCHITECTURES="direct_praat_hard_v2"' in screen
     assert 'EXPECTED_TRAIN_SPEAKERS="${EXPECTED_TRAIN_SPEAKERS:-197}"' in screen
+    assert 'SEED="${SEED:-20260815}"' in screen
     assert 'DEPENDENCY_ARGS=(--dependency="afterok:$DEPENDENCY_JOB_ID")' in screen
     assert "exec \"$DIAGNOSTIC_LAUNCHER\"" in screen
 
