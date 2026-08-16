@@ -115,6 +115,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert '"phase_frequency_aware"' in diagnostic
     assert '"phase_compact_tfgrid"' in diagnostic
     assert '"--max-optimizer-steps"' in diagnostic
+    assert '"head_gradients_absent": head_gradients_absent' in diagnostic
     assert 'SHARED_CANDIDATES="output_phase_tfgrid"' in screen
     assert "frequency_aware,phase_frequency_aware,phase_compact_tfgrid" in screen
     assert 'WAVEFORM_ARCHITECTURES="direct_praat_hard_v2"' in screen

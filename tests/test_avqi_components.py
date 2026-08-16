@@ -87,6 +87,18 @@ def test_compact_tfgrid_shared_head_has_feature_gradient() -> None:
     assert float(feature_map.grad.norm()) > 0.0
 
 
+def test_compact_tfgrid_shared_head_supports_frozen_input_gradient() -> None:
+    feature_map = torch.randn(1, 3, 24, 33, requires_grad=True)
+    head = CompactTFGridSharedComponentHead(feature_channels=3)
+    freeze_module_for_input_gradient(head)
+    prediction = head(feature_map)
+    prediction.square().mean().backward()
+    assert feature_map.grad is not None
+    assert torch.isfinite(feature_map.grad).all()
+    assert float(feature_map.grad.norm()) > 0.0
+    assert all(parameter.grad is None for parameter in head.parameters())
+
+
 def test_compact_tfgrid_encoder_rejects_invalid_shape_config() -> None:
     for kwargs in (
         {"input_channels": 1, "embedding": 22},

@@ -53,7 +53,6 @@ from model.avqi_components import (
     SharedComponentHead,
     WaveformComponentPredictor,
     denormalize_components,
-    enable_recurrent_input_gradients,
     freeze_module,
     freeze_module_for_input_gradient,
     phase_aware_spectral_features,
@@ -1595,8 +1594,7 @@ def gradient_smokes(
 
     generator.zero_grad(set_to_none=True)
     selected_head.zero_grad(set_to_none=True)
-    selected_head.eval()
-    enable_recurrent_input_gradients(selected_head)
+    freeze_module_for_input_gradient(selected_head)
     maps = shared_feature_maps(generator, waveform, config)
     shared_pooled = pool_shared_candidate(maps, selected_candidate)
     shared_prediction = shared_head_forward(
@@ -1629,6 +1627,9 @@ def gradient_smokes(
     ]
     shared_backbone_norm = gradient_norm(backbone_parameters)
     shared_head_norm = gradient_norm(list(selected_head.parameters()))
+    head_gradients_absent = all(
+        parameter.grad is None for parameter in selected_head.parameters()
+    )
     shared_decoder_norm = gradient_norm(decoder_parameters)
     output_conditioned = selected_candidate in {
         "enhanced_spectral",
@@ -1644,7 +1645,6 @@ def gradient_smokes(
         for value in (shared_backbone_norm, shared_head_norm, shared_decoder_norm)
     )
 
-    freeze_module_for_input_gradient(selected_head)
     generator.zero_grad(set_to_none=True)
     with torch.no_grad():
         shared_maps = shared_feature_maps(generator, waveform, config)
@@ -1720,6 +1720,7 @@ def gradient_smokes(
             "loss": float(shared_loss.detach().cpu()),
             "backbone_gradient_norm": shared_backbone_norm,
             "head_gradient_norm": shared_head_norm,
+            "head_gradients_absent": head_gradients_absent,
             "decoder_gradient_norm": shared_decoder_norm,
             "decoder_gradient_expected": (
                 "nonzero"
@@ -1734,7 +1735,7 @@ def gradient_smokes(
                 "PASS"
                 if shared_finite
                 and shared_backbone_norm > 1e-8
-                and shared_head_norm > 1e-8
+                and head_gradients_absent
                 and shared_decoder_path_valid
                 else "FAIL"
             ),
