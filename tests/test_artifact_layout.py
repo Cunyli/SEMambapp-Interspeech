@@ -101,6 +101,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     launcher = read("scripts/run_avqi_component_v4_data.sh")
     screen = read("scripts/run_avqi_component_v4_screen.sh")
     confirm = read("scripts/run_avqi_component_v4_confirm.sh")
+    multiseed_runner = read("scripts/run_avqi_component_v4_multiseed.sh")
     promotion = read("scripts/evaluate_avqi_component_v4_phase_promotion.py")
     promotion_runner = read("scripts/run_avqi_component_v4_phase_promotion.sh")
     frozen_contract = read("configs/avqi_component_phaseaware_v4.yaml")
@@ -139,6 +140,10 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'WAVEFORM_ARCHITECTURES="$(jq -er' in confirm
     assert 'contract.source_commit' in confirm
     assert "exec \"$DIAGNOSTIC_LAUNCHER\"" in confirm
+    assert 'CONSENSUS_KIND="${CONSENSUS_KIND:-phase}"' in multiseed_runner
+    assert 'DEPENDENCY_ARGS=(--dependency="afterok:$NORMALIZED_JOB_IDS")' in multiseed_runner
+    assert 'ARGS+=(--confirmation-report "$path")' in multiseed_runner
+    assert 'python3 "$SUMMARY_SCRIPT" "${ARGS[@]}"' in multiseed_runner
     assert 'PROMOTE_DECISION = "PROMOTE_PRETRAINED_FULL_TFGRID_SCREEN"' in promotion
     assert "all_required_slice_medians_non_regressed" in promotion
     assert '"generator_optimizer_steps": 0' in promotion
