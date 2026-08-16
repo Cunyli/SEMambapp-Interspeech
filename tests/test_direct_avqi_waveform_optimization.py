@@ -210,6 +210,36 @@ def test_label_selection_excludes_valid_rows_without_clean_target() -> None:
     assert [row["condition_id"] for row in missing] == ["snr10"]
 
 
+def test_shared_prediction_uses_bounded_batches() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "evaluate_avqi_component_backprop.py"
+    )
+
+    class BatchLimitedHead(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.maximum_batch = 0
+
+        def forward(self, features: torch.Tensor) -> torch.Tensor:
+            self.maximum_batch = max(self.maximum_batch, len(features))
+            if len(features) > 16:
+                raise RuntimeError("unbounded shared prediction batch")
+            return torch.zeros(len(features), 6, device=features.device)
+
+    head = BatchLimitedHead()
+    prediction = namespace["predict_shared"](
+        head,
+        torch.zeros(35, 3, 8, 8),
+        torch.zeros(6),
+        torch.ones(6),
+        torch.device("cpu"),
+        "output_phase_tfgrid",
+    )
+
+    assert prediction.shape == (35, 6)
+    assert head.maximum_batch == 16
+
+
 def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
     namespace = load_namespace()
     components = namespace["AVQI_COMPONENT_NAMES"]

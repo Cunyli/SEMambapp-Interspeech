@@ -1072,13 +1072,22 @@ def predict_shared(
     device: torch.device,
     candidate: str,
 ) -> torch.Tensor:
+    predictions = []
+    head.eval()
     with torch.inference_mode():
-        normalized = shared_head_forward(
-            head,
-            pooled_features.to(device),
-            candidate,
-        )
-        return denormalize_components(normalized, target_mean, target_scale).cpu()
+        for start in range(0, len(pooled_features), SCREEN_BATCH_SIZE):
+            features = pooled_features[
+                start : start + SCREEN_BATCH_SIZE
+            ].to(device)
+            normalized = shared_head_forward(head, features, candidate)
+            predictions.append(
+                denormalize_components(
+                    normalized,
+                    target_mean,
+                    target_scale,
+                ).cpu()
+            )
+    return torch.cat(predictions)
 
 
 def predict_waveforms(
