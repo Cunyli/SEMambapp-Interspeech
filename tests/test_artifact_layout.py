@@ -535,3 +535,14 @@ def test_avqi_multiseed_promotion_uses_common_components_for_two_routes() -> Non
     promotion = namespace["promotion_decision"](routes)
     assert promotion["decision"] == "GO_MATCHED_DUAL_ROUTE_BACKPROP"
     assert promotion["components"] == ["cpps", "tilt"]
+
+
+def test_avqi_phaseaware_v4_final_summary_is_fail_closed() -> None:
+    source = read("scripts/summarize_avqi_component_v4_final.py")
+    assert '"NO_GO_AVQI_T2_TRAINING"' in source
+    assert '"new_bounded_waveform_pilot_submitted": False' in source
+    assert '"generator_optimizer_steps": 0' in source
+    assert '"formal_pathology_training_submitted": False' in source
+    assert '"full_tfgrid_screen_submitted": False' in source
+    assert "require_no_generator_update" in source
+    assert "refusing to overwrite output" in source
