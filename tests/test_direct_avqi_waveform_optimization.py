@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import json
 import runpy
 from pathlib import Path
 
+import pytest
 import soundfile as sf
 import torch
 
@@ -297,3 +299,110 @@ def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
         "severe_1",
         "severe_2",
     }
+
+
+def test_route_c_authorization_binds_screen_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    namespace = load_namespace()
+    sha256_file = namespace["sha256_file"]
+    validate = namespace["validate_route_c_authorization"]
+    predictor = tmp_path / "direct_direct_praat_hard_v2_estimator.pt"
+    predictor.write_bytes(b"frozen direct estimator")
+    predictor_sha256 = sha256_file(predictor)
+    screen = {
+        "decision": "COMPLETED_ROUTE_C_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE",
+        "generator_optimizer_steps": 0,
+        "bounded_waveform_pilot_submitted": False,
+        "formal_pathology_training_submitted": False,
+        "contract": {
+            "route_scope": "direct_only",
+            "source_commit": "f" * 40,
+        },
+        "routes": {
+            "direct_differentiable_estimator": {
+                "selected_architecture": "direct_praat_hard_v2",
+                "decision": "ELIGIBLE_FOR_MULTISEED_CONFIRMATION",
+                "eligible_components": ["hnr", "tilt"],
+                "gradient": {
+                    "decision": "PASS",
+                    "component_input_gradients": {
+                        "hnr": {"decision": "PASS", "gradient_norm": 2.0},
+                        "tilt": {"decision": "PASS", "gradient_norm": 100.0},
+                    },
+                },
+            }
+        },
+    }
+    screen_path = tmp_path / "diagnostic_report.json"
+    screen_path.write_text(json.dumps(screen), encoding="utf-8")
+    screen_sha256 = sha256_file(screen_path)
+    screen_receipt = {
+        "decision": screen["decision"],
+        "route_scope": "direct_only",
+        "route_c": "ELIGIBLE_FOR_MULTISEED_CONFIRMATION",
+        "eligible_components": ["hnr", "tilt"],
+        "generator_optimizer_steps": 0,
+        "bounded_waveform_pilot_submitted": False,
+        "formal_pathology_training_submitted": False,
+        "artifact_sha256": {"diagnostic_report.json": screen_sha256},
+        "checkpoint_sha256": {predictor.name: predictor_sha256},
+        "checkpoint_dir": str(tmp_path),
+    }
+    receipt_path = tmp_path / "completion_receipt.json"
+    receipt_path.write_text(json.dumps(screen_receipt), encoding="utf-8")
+    receipt_sha256 = sha256_file(receipt_path)
+    consensus = {
+        "schema_version": "avqi-component-multiseed-consensus-v2",
+        "route_scope": "direct_only",
+        "active_routes": ["direct_differentiable_estimator"],
+        "generator_optimizer_steps": 0,
+        "bounded_waveform_pilot_submitted": False,
+        "formal_pathology_training_submitted": False,
+        "promotion": {
+            "decision": "GO_BOUNDED_ROUTE_C_WAVEFORM_PILOT",
+            "routes": ["direct_differentiable_estimator"],
+            "components": ["hnr", "tilt"],
+        },
+        "routes": {
+            "direct_differentiable_estimator": {
+                "decision": "RELIABLE",
+                "consensus_components": ["hnr", "tilt"],
+                "component_pass_counts": {"hnr": 3, "tilt": 3},
+            }
+        },
+        "source_report_sha256": {"screen": screen_sha256},
+        "screen_report": str(screen_path),
+    }
+    consensus_path = tmp_path / "multiseed_consensus.json"
+    consensus_path.write_text(json.dumps(consensus), encoding="utf-8")
+    consensus_sha256 = sha256_file(consensus_path)
+
+    gradient_norms, weights, authorization = validate(
+        consensus_path,
+        consensus_sha256,
+        screen_path,
+        screen_sha256,
+        receipt_path,
+        receipt_sha256,
+        predictor,
+        predictor_sha256,
+    )
+
+    assert gradient_norms == {"hnr": 2.0, "tilt": 100.0}
+    assert weights == {"hnr": 1.0, "tilt": 0.02}
+    assert authorization["decision"] == "GO_BOUNDED_ROUTE_C_WAVEFORM_PILOT"
+
+    consensus["promotion"]["decision"] = "NO_GO_AVQI_BACKPROP"
+    consensus_path.write_text(json.dumps(consensus), encoding="utf-8")
+    with pytest.raises(ValueError, match="does not authorize"):
+        validate(
+            consensus_path,
+            sha256_file(consensus_path),
+            screen_path,
+            screen_sha256,
+            receipt_path,
+            receipt_sha256,
+            predictor,
+            predictor_sha256,
+        )

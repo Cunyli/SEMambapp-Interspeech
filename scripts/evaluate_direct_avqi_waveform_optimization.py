@@ -47,18 +47,6 @@ VIEWS = ("cs", "sv")
 # still reported as a validated component, but is not co-weighted with HNR and
 # LTAS tilt in this two-term waveform diagnostic.
 OPTIMIZED_COMPONENTS = ("hnr", "tilt")
-# Fixed from the seed-20260814 component-input gradient report before waveform
-# optimization.  Inverse weighting prevents LTAS tilt (96.05) from drowning
-# HNR (0.81); these are not fitted to the exact waveform-optimization result.
-SCREEN_COMPONENT_GRADIENT_NORMS = {
-    "hnr": 0.8105605244636536,
-    "tilt": 96.05075073242188,
-}
-OPTIMIZATION_COMPONENT_WEIGHTS = {
-    component: min(SCREEN_COMPONENT_GRADIENT_NORMS.values())
-    / SCREEN_COMPONENT_GRADIENT_NORMS[component]
-    for component in OPTIMIZED_COMPONENTS
-}
 EXACT_IMPROVEMENT_FRACTION_GATE = 2.0 / 3.0
 SURROGATE_IMPROVEMENT_FRACTION_GATE = 0.75
 NORMALIZED_GAP_REDUCTION_GATE = 0.02
@@ -119,11 +107,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--external-exact-csv-sha256", required=True)
     parser.add_argument("--predictor-checkpoint", type=Path, required=True)
     parser.add_argument("--predictor-checkpoint-sha256", required=True)
+    parser.add_argument("--authorization-consensus", type=Path, required=True)
+    parser.add_argument("--authorization-consensus-sha256", required=True)
+    parser.add_argument("--screen-report", type=Path, required=True)
+    parser.add_argument("--screen-report-sha256", required=True)
+    parser.add_argument(
+        "--screen-completion-receipt",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument("--screen-completion-receipt-sha256", required=True)
     parser.add_argument("--avqi-code-root", type=Path, required=True)
     parser.add_argument("--avqi-code-tree-sha256", required=True)
     parser.add_argument("--exact-python", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--slurm-job-id", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=20260814)
     parser.add_argument("--speakers-per-severity", type=int, default=3)
@@ -142,6 +141,177 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def load_json_object(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"expected a JSON object: {path}")
+    return value
+
+
+def validate_file_hash(path: Path, expected: str, label: str) -> str:
+    if not path.is_file():
+        raise FileNotFoundError(f"missing {label}: {path}")
+    actual = sha256_file(path)
+    if actual != expected:
+        raise ValueError(f"{label} hash drift: {actual} != {expected}")
+    return actual
+
+
+def validate_route_c_authorization(
+    consensus_path: Path,
+    consensus_sha256: str,
+    screen_report_path: Path,
+    screen_report_sha256: str,
+    screen_completion_receipt_path: Path,
+    screen_completion_receipt_sha256: str,
+    predictor_checkpoint_path: Path,
+    predictor_checkpoint_sha256: str,
+) -> tuple[dict[str, float], dict[str, float], dict[str, Any]]:
+    consensus_hash = validate_file_hash(
+        consensus_path,
+        consensus_sha256,
+        "Route C multi-seed consensus",
+    )
+    screen_hash = validate_file_hash(
+        screen_report_path,
+        screen_report_sha256,
+        "Route C screen report",
+    )
+    screen_receipt_hash = validate_file_hash(
+        screen_completion_receipt_path,
+        screen_completion_receipt_sha256,
+        "Route C screen completion receipt",
+    )
+    predictor_hash = validate_file_hash(
+        predictor_checkpoint_path,
+        predictor_checkpoint_sha256,
+        "Route C predictor checkpoint",
+    )
+    consensus = load_json_object(consensus_path)
+    screen = load_json_object(screen_report_path)
+    screen_receipt = load_json_object(screen_completion_receipt_path)
+
+    if consensus.get("schema_version") != "avqi-component-multiseed-consensus-v2":
+        raise ValueError("unexpected Route C consensus schema")
+    if consensus.get("route_scope") != "direct_only":
+        raise ValueError("waveform pilot requires a direct-only consensus")
+    if consensus.get("active_routes") != ["direct_differentiable_estimator"]:
+        raise ValueError("waveform pilot consensus contains a non-Route-C route")
+    if consensus.get("generator_optimizer_steps") != 0:
+        raise ValueError("authorization consensus contains generator updates")
+    if consensus.get("bounded_waveform_pilot_submitted") is not False:
+        raise ValueError("authorization consensus already submitted a waveform pilot")
+    if consensus.get("formal_pathology_training_submitted") is not False:
+        raise ValueError("authorization consensus contains formal pathology training")
+    promotion = consensus.get("promotion", {})
+    if promotion.get("decision") != "GO_BOUNDED_ROUTE_C_WAVEFORM_PILOT":
+        raise ValueError("Route C consensus does not authorize a bounded pilot")
+    if promotion.get("routes") != ["direct_differentiable_estimator"]:
+        raise ValueError("Route C promotion route differs")
+    if tuple(promotion.get("components", ())) != OPTIMIZED_COMPONENTS:
+        raise ValueError("Route C promotion components differ")
+    route_consensus = consensus.get("routes", {}).get(
+        "direct_differentiable_estimator",
+        {},
+    )
+    if route_consensus.get("decision") != "RELIABLE":
+        raise ValueError("Route C multi-seed result is not reliable")
+    if tuple(route_consensus.get("consensus_components", ())) != OPTIMIZED_COMPONENTS:
+        raise ValueError("Route C consensus component list differs")
+    pass_counts = route_consensus.get("component_pass_counts", {})
+    if any(pass_counts.get(component) != 3 for component in OPTIMIZED_COMPONENTS):
+        raise ValueError("Route C components did not pass all three locked seeds")
+    if consensus.get("source_report_sha256", {}).get("screen") != screen_hash:
+        raise ValueError("Route C consensus does not bind the supplied screen report")
+    consensus_screen_path = Path(consensus.get("screen_report", "")).resolve()
+    if consensus_screen_path != screen_report_path.resolve():
+        raise ValueError("Route C consensus screen path differs")
+
+    expected_screen_decision = (
+        "COMPLETED_ROUTE_C_SINGLE_SEED_SCREEN_NO_GENERATOR_UPDATE"
+    )
+    if screen.get("decision") != expected_screen_decision:
+        raise ValueError("Route C screen is incomplete")
+    if screen.get("generator_optimizer_steps") != 0:
+        raise ValueError("Route C screen contains generator updates")
+    if screen.get("bounded_waveform_pilot_submitted") is not False:
+        raise ValueError("Route C screen already submitted a waveform pilot")
+    if screen.get("formal_pathology_training_submitted") is not False:
+        raise ValueError("Route C screen contains formal pathology training")
+    if screen.get("contract", {}).get("route_scope") != "direct_only":
+        raise ValueError("Route C screen scope differs")
+    route = screen.get("routes", {}).get("direct_differentiable_estimator", {})
+    if route.get("selected_architecture") != "direct_praat_hard_v2":
+        raise ValueError("Route C selected estimator differs")
+    if route.get("decision") != "ELIGIBLE_FOR_MULTISEED_CONFIRMATION":
+        raise ValueError("Route C screen did not pass its scorer gates")
+    if tuple(route.get("eligible_components", ())) != OPTIMIZED_COMPONENTS:
+        raise ValueError("Route C screen eligible components differ")
+    gradient = route.get("gradient", {})
+    if gradient.get("decision") != "PASS":
+        raise ValueError("Route C screen gradient gate failed")
+    component_gradients = gradient.get("component_input_gradients", {})
+    screen_component_gradient_norms: dict[str, float] = {}
+    for component in OPTIMIZED_COMPONENTS:
+        item = component_gradients.get(component, {})
+        norm = float(item.get("gradient_norm", math.nan))
+        if item.get("decision") != "PASS" or not math.isfinite(norm) or norm <= 0.0:
+            raise ValueError(f"invalid authorized gradient for {component}")
+        screen_component_gradient_norms[component] = norm
+
+    if screen_receipt.get("decision") != screen["decision"]:
+        raise ValueError("Route C screen receipt decision differs")
+    if screen_receipt.get("route_scope") != "direct_only":
+        raise ValueError("Route C screen receipt scope differs")
+    if screen_receipt.get("route_c") != route["decision"]:
+        raise ValueError("Route C screen receipt route decision differs")
+    if tuple(screen_receipt.get("eligible_components", ())) != OPTIMIZED_COMPONENTS:
+        raise ValueError("Route C screen receipt components differ")
+    if screen_receipt.get("generator_optimizer_steps") != 0:
+        raise ValueError("Route C screen receipt contains generator updates")
+    if screen_receipt.get("bounded_waveform_pilot_submitted") is not False:
+        raise ValueError("Route C screen receipt already submitted a waveform pilot")
+    if screen_receipt.get("formal_pathology_training_submitted") is not False:
+        raise ValueError("Route C screen receipt contains formal pathology training")
+    recorded_screen_hash = screen_receipt.get("artifact_sha256", {}).get(
+        "diagnostic_report.json"
+    )
+    if recorded_screen_hash != screen_hash:
+        raise ValueError("Route C screen receipt does not bind its report")
+    checkpoint_hashes = screen_receipt.get("checkpoint_sha256", {})
+    if checkpoint_hashes.get(predictor_checkpoint_path.name) != predictor_hash:
+        raise ValueError(
+            "Route C screen receipt does not bind the predictor checkpoint"
+        )
+    receipt_checkpoint_dir = Path(
+        screen_receipt.get("checkpoint_dir", "")
+    ).resolve()
+    if receipt_checkpoint_dir != predictor_checkpoint_path.parent.resolve():
+        raise ValueError("Route C predictor checkpoint directory differs")
+
+    minimum_norm = min(screen_component_gradient_norms.values())
+    optimization_component_weights = {
+        component: minimum_norm / screen_component_gradient_norms[component]
+        for component in OPTIMIZED_COMPONENTS
+    }
+    authorization = {
+        "decision": promotion["decision"],
+        "route": "direct_differentiable_estimator",
+        "components": list(OPTIMIZED_COMPONENTS),
+        "consensus_sha256": consensus_hash,
+        "screen_report_sha256": screen_hash,
+        "screen_completion_receipt_sha256": screen_receipt_hash,
+        "predictor_checkpoint_sha256": predictor_hash,
+        "screen_source_commit": screen["contract"]["source_commit"],
+    }
+    return (
+        screen_component_gradient_norms,
+        optimization_component_weights,
+        authorization,
+    )
 
 
 def repository_head(path: Path) -> str:
@@ -680,6 +850,7 @@ def optimize_waveform(
     calibrator: ComponentAffineCalibrator,
     target_mean: torch.Tensor,
     target_scale: torch.Tensor,
+    optimization_component_weights: dict[str, float],
     steps: int,
     learning_rate_scale: float,
     fidelity_weight: float,
@@ -689,12 +860,21 @@ def optimize_waveform(
         raise ValueError("invalid optimization hyperparameters")
     if residual_ceiling_db >= 0.0:
         raise ValueError("residual ceiling must be below 0 dB")
+    if set(optimization_component_weights) != set(OPTIMIZED_COMPONENTS):
+        raise ValueError(
+            "optimization component weights differ from authorized components"
+        )
+    if any(
+        not math.isfinite(weight) or weight <= 0.0
+        for weight in optimization_component_weights.values()
+    ):
+        raise ValueError("optimization component weights must be finite and positive")
     selected_indices = torch.tensor(
         [AVQI_COMPONENT_NAMES.index(name) for name in OPTIMIZED_COMPONENTS],
         device=base.device,
     )
     component_weights = base.new_tensor(
-        [OPTIMIZATION_COMPONENT_WEIGHTS[name] for name in OPTIMIZED_COMPONENTS]
+        [optimization_component_weights[name] for name in OPTIMIZED_COMPONENTS]
     )
     base = base.reshape(1, -1)
     target = target.to(base.device).reshape(1, -1)
@@ -1283,6 +1463,8 @@ def main() -> None:
         raise FileExistsError(f"refusing to overwrite output: {args.output_dir}")
     if repository_head(REPO_ROOT) != args.source_commit:
         raise ValueError("declared source commit differs from repository HEAD")
+    if not args.slurm_job_id.isdigit():
+        raise ValueError(f"invalid Slurm job ID: {args.slurm_job_id}")
     if sha256_file(args.external_exact_csv) != args.external_exact_csv_sha256:
         raise ValueError("external exact CSV hash drift")
     if sha256_file(args.predictor_checkpoint) != args.predictor_checkpoint_sha256:
@@ -1291,6 +1473,20 @@ def main() -> None:
         raise ValueError("exact AVQI code tree hash drift")
     if not args.exact_python.is_file():
         raise FileNotFoundError(f"exact AVQI interpreter missing: {args.exact_python}")
+    (
+        screen_component_gradient_norms,
+        optimization_component_weights,
+        authorization,
+    ) = validate_route_c_authorization(
+        args.authorization_consensus,
+        args.authorization_consensus_sha256,
+        args.screen_report,
+        args.screen_report_sha256,
+        args.screen_completion_receipt,
+        args.screen_completion_receipt_sha256,
+        args.predictor_checkpoint,
+        args.predictor_checkpoint_sha256,
+    )
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
@@ -1325,6 +1521,7 @@ def main() -> None:
             calibrator,
             target_mean,
             target_scale,
+            optimization_component_weights,
             args.steps,
             args.learning_rate_scale,
             args.fidelity_weight,
@@ -1414,8 +1611,10 @@ def main() -> None:
         "waveform_optimizer_steps": len(rows) * args.steps,
         "generator_optimizer_steps": 0,
         "formal_pathology_training_submitted": False,
+        "authorization": authorization,
         "contract": {
             "source_commit": args.source_commit,
+            "slurm_job_id": args.slurm_job_id,
             "candidate": CANDIDATE,
             "condition": CONDITION,
             "severity_groups": list(SEVERITY_GROUPS),
@@ -1427,8 +1626,8 @@ def main() -> None:
             ),
             "expected_cases": args.expected_cases,
             "optimized_components": list(OPTIMIZED_COMPONENTS),
-            "screen_component_gradient_norms": SCREEN_COMPONENT_GRADIENT_NORMS,
-            "optimization_component_weights": OPTIMIZATION_COMPONENT_WEIGHTS,
+            "screen_component_gradient_norms": screen_component_gradient_norms,
+            "optimization_component_weights": optimization_component_weights,
             "steps": args.steps,
             "learning_rate_scale": args.learning_rate_scale,
             "fidelity_weight": args.fidelity_weight,
@@ -1499,6 +1698,13 @@ def main() -> None:
             "source_sha256": {
                 "external_exact_csv": args.external_exact_csv_sha256,
                 "predictor_checkpoint": args.predictor_checkpoint_sha256,
+                "authorization_consensus": (
+                    args.authorization_consensus_sha256
+                ),
+                "screen_report": args.screen_report_sha256,
+                "screen_completion_receipt": (
+                    args.screen_completion_receipt_sha256
+                ),
                 "avqi_code_tree": args.avqi_code_tree_sha256,
             },
             "exact_python": str(args.exact_python.resolve()),
@@ -1526,6 +1732,20 @@ def main() -> None:
         "waveform_optimizer_steps": report["waveform_optimizer_steps"],
         "generator_optimizer_steps": 0,
         "formal_pathology_training_submitted": False,
+        "authorization_decision": authorization["decision"],
+        "bounded_waveform_pilot_completed": True,
+        "authorization_sha256": {
+            "consensus": authorization["consensus_sha256"],
+            "screen_report": authorization["screen_report_sha256"],
+            "screen_completion_receipt": authorization[
+                "screen_completion_receipt_sha256"
+            ],
+            "predictor_checkpoint": authorization[
+                "predictor_checkpoint_sha256"
+            ],
+        },
+        "speaker_offset": args.speaker_offset,
+        "slurm_job_id": args.slurm_job_id,
         "case_count": len(rows),
         "artifact_sha256": {
             path.name: sha256_file(path)

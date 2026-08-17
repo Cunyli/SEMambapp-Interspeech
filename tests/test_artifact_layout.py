@@ -324,11 +324,15 @@ def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None
     source = read("scripts/evaluate_direct_avqi_waveform_optimization.py")
     audit = read("scripts/audit_avqi_waveform_guardrails.py")
     audit_runner = read("scripts/run_avqi_waveform_guardrail_audit.sh")
+    pilot_runner = read("scripts/run_avqi_component_direct_c_waveform_pilot.sh")
     assert 'CANDIDATE = "S3_500"' in source
     assert 'CONDITION = "snr10"' in source
     assert 'OPTIMIZED_COMPONENTS = ("hnr", "tilt")' in source
-    assert "SCREEN_COMPONENT_GRADIENT_NORMS" in source
-    assert "OPTIMIZATION_COMPONENT_WEIGHTS" in source
+    assert "validate_route_c_authorization" in source
+    assert 'parser.add_argument("--authorization-consensus"' in source
+    assert 'parser.add_argument("--screen-report"' in source
+    assert "screen_component_gradient_norms" in source
+    assert "optimization_component_weights" in source
     assert "avqi_code_tree_sha256" in source
     assert 'parser.add_argument("--exact-python"' in source
     assert "AVQI_EXACT_JSON=" in source
@@ -354,6 +358,21 @@ def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None
     assert 'PREDICTOR_CHECKPOINT_SHA256="11779b5' in audit_runner
     assert "CONFIRM_SLURM_SUBMIT" in audit_runner
     assert 'python "$AUDIT_SCRIPT"' in audit_runner
+    assert 'SPEAKER_OFFSET="${SPEAKER_OFFSET:-4}"' in pilot_runner
+    assert 'LEARNING_RATE_SCALE="${LEARNING_RATE_SCALE:-0.0002}"' in pilot_runner
+    assert "GO_BOUNDED_ROUTE_C_WAVEFORM_PILOT" in pilot_runner
+    assert (
+        'CONSENSUS_REPORT_SHA256="${CONSENSUS_REPORT_SHA256:-0a2b297'
+        in pilot_runner
+    )
+    assert (
+        'PREDICTOR_CHECKPOINT_SHA256="${PREDICTOR_CHECKPOINT_SHA256:-07b69e'
+        in pilot_runner
+    )
+    assert "verify_sha256" in pilot_runner
+    assert '--authorization-consensus "$CONSENSUS_REPORT"' in pilot_runner
+    assert '--slurm-job-id "$SLURM_JOB_ID"' in pilot_runner
+    assert "CONFIRM_SLURM_SUBMIT" in pilot_runner
     assert "FAIL_WAVEFORM_OPTIMIZATION" in source
 
 
