@@ -8,7 +8,7 @@ ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 PILOT_SCRIPT="$SOURCE_ROOT/scripts/evaluate_direct_avqi_waveform_optimization.py"
 
-RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_c_v5_waveform_pilot_offset4_20260817_01}"
+RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_c_v5_waveform_pilot_offset4_20260817_02}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 PARTITION="${PARTITION:-gpu-v100-32g}"

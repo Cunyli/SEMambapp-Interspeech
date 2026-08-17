@@ -360,6 +360,7 @@ def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None
     assert 'python "$AUDIT_SCRIPT"' in audit_runner
     assert 'SPEAKER_OFFSET="${SPEAKER_OFFSET:-4}"' in pilot_runner
     assert 'LEARNING_RATE_SCALE="${LEARNING_RATE_SCALE:-0.0002}"' in pilot_runner
+    assert "waveform_pilot_offset4_20260817_02" in pilot_runner
     assert "GO_BOUNDED_ROUTE_C_WAVEFORM_PILOT" in pilot_runner
     assert (
         'CONSENSUS_REPORT_SHA256="${CONSENSUS_REPORT_SHA256:-0a2b297'

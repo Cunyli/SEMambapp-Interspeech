@@ -399,16 +399,17 @@ def load_cases(
         row
         for row in all_rows
         if row["source_type"] == "clean_reference"
+        and row["view"] in VIEWS
         and row["sample_group"] in SEVERITY_GROUPS
         and row["label"] == "patient"
         and row["scoring_status"] == "ok"
     ]
-    clean_by_speaker: dict[str, dict[str, str]] = {}
+    clean_by_speaker_view: dict[tuple[str, str], dict[str, str]] = {}
     for row in clean_rows:
-        speaker_id = row["speaker_id"]
-        if speaker_id in clean_by_speaker:
-            raise ValueError(f"duplicate clean reference row: {speaker_id}")
-        clean_by_speaker[speaker_id] = row
+        key = (row["speaker_id"], row["view"])
+        if key in clean_by_speaker_view:
+            raise ValueError(f"duplicate clean reference row: {key}")
+        clean_by_speaker_view[key] = row
     selected_speakers: dict[str, list[str]] = {}
     for group in SEVERITY_GROUPS:
         speakers = sorted(
@@ -421,16 +422,17 @@ def load_cases(
                 f"{len(speakers)}"
             )
         selected_speakers[group] = speakers[speaker_offset:stop]
-    required_clean_speakers = {
-        speaker_id
+    required_clean_keys = {
+        (speaker_id, view)
         for speakers in selected_speakers.values()
         for speaker_id in speakers
+        for view in VIEWS
     }
-    missing_clean_speakers = required_clean_speakers - set(clean_by_speaker)
-    if missing_clean_speakers:
+    missing_clean_keys = required_clean_keys - set(clean_by_speaker_view)
+    if missing_clean_keys:
         raise ValueError(
             "missing same-speaker clean pathological references: "
-            f"{sorted(missing_clean_speakers)}"
+            f"{sorted(missing_clean_keys)}"
         )
     selected = [
         row
@@ -457,7 +459,9 @@ def load_cases(
             sample_group=row["sample_group"],
             path=Path(row[f"{row['view']}_path"]),
             reference_path=Path(
-                clean_by_speaker[row["speaker_id"]][f"{row['view']}_path"]
+                clean_by_speaker_view[
+                    (row["speaker_id"], row["view"])
+                ][f"{row['view']}_path"]
             ),
             target=component_tensor(row, "clean_"),
             exact_before=component_tensor(row, "audio_"),

@@ -246,7 +246,11 @@ def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
     namespace = load_namespace()
     components = namespace["AVQI_COMPONENT_NAMES"]
     waveform_path = tmp_path / "source.wav"
+    cs_reference_path = tmp_path / "clean_cs.wav"
+    sv_reference_path = tmp_path / "clean_sv.wav"
     sf.write(waveform_path, torch.zeros(1_600).numpy(), 16_000)
+    sf.write(cs_reference_path, torch.zeros(1_600).numpy(), 16_000)
+    sf.write(sv_reference_path, torch.zeros(1_600).numpy(), 16_000)
     rows = []
     for group, prefix in (
         ("pathological_mild", "mild"),
@@ -263,29 +267,38 @@ def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
                     "label": "patient",
                     "scoring_status": "ok",
                     "speaker_id": f"{prefix}_{speaker_index}",
-                    "cs_path": str(waveform_path),
-                    "sv_path": str(waveform_path),
+                    "cs_path": str(
+                        cs_reference_path
+                        if clean_view in ("cs", "sv")
+                        else waveform_path
+                    ),
+                    "sv_path": str(
+                        sv_reference_path
+                        if clean_view in ("cs", "sv")
+                        else waveform_path
+                    ),
                 }
                 for component_index, component in enumerate(components):
                     row[f"clean_{component}"] = str(component_index)
                     row[f"audio_{component}"] = str(component_index + 0.5)
                 rows.append(row)
-            clean_row = {
-                "source_type": "clean_reference",
-                "candidate": "",
-                "condition": "clean_reference",
-                "view": "both",
-                "sample_group": group,
-                "label": "patient",
-                "scoring_status": "ok",
-                "speaker_id": f"{prefix}_{speaker_index}",
-                "cs_path": str(waveform_path),
-                "sv_path": str(waveform_path),
-            }
-            for component_index, component in enumerate(components):
-                clean_row[f"clean_{component}"] = str(component_index)
-                clean_row[f"audio_{component}"] = str(component_index)
-            rows.append(clean_row)
+            for clean_view in ("both", "cs", "sv"):
+                clean_row = {
+                    "source_type": "clean_reference",
+                    "candidate": "",
+                    "condition": "clean_reference",
+                    "view": clean_view,
+                    "sample_group": group,
+                    "label": "patient",
+                    "scoring_status": "ok",
+                    "speaker_id": f"{prefix}_{speaker_index}",
+                    "cs_path": str(waveform_path),
+                    "sv_path": str(waveform_path),
+                }
+                for component_index, component in enumerate(components):
+                    clean_row[f"clean_{component}"] = str(component_index)
+                    clean_row[f"audio_{component}"] = str(component_index)
+                rows.append(clean_row)
     csv_path = tmp_path / "exact.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -299,6 +312,11 @@ def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
         "severe_1",
         "severe_2",
     }
+    assert all(
+        case.reference_path
+        == {"cs": cs_reference_path, "sv": sv_reference_path}[case.view]
+        for case in cases
+    )
 
 
 def test_route_c_authorization_binds_screen_and_checkpoint(
