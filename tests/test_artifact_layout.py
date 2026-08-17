@@ -109,6 +109,8 @@ def test_route_c_hnr_formula_diagnostic_is_nonfinal_and_read_only() -> None:
     assert "CONFIRM_SLURM_SUBMIT" in launcher
     assert "Refusing to run from a dirty source tree" in launcher
     assert "--expected-internal-valid-rows 2134" in launcher
+    assert "--expected-internal-usable-rows 2106" in launcher
+    assert "missing_clean_pair_rows" in source
 
 
 def test_avqi_expansion_is_training_only_and_hash_locked() -> None:

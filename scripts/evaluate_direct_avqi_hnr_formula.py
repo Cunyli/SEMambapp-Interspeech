@@ -70,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slurm-job-id", default=os.environ.get("SLURM_JOB_ID", ""))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--expected-internal-valid-rows", type=int, default=2_134)
+    parser.add_argument("--expected-internal-usable-rows", type=int, default=2_106)
     parser.add_argument("--expected-vctk-valid-rows", type=int, default=192)
     parser.add_argument("--expected-train-speakers", type=int, default=197)
     parser.add_argument("--expected-calibration-speakers", type=int, default=26)
@@ -132,6 +133,7 @@ def load_label_rows(
     path: Path,
     panel: str,
     expected_valid_rows: int,
+    expected_usable_rows: int,
 ) -> tuple[list[HNRRow], dict[str, Any]]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         source_rows = list(csv.DictReader(handle))
@@ -141,6 +143,32 @@ def load_label_rows(
         raise ValueError(
             f"{panel} valid-row mismatch: {len(valid_rows)} != {expected_valid_rows}"
         )
+    clean_keys = {
+        (
+            row["speaker_id"],
+            sample_id(row),
+            row["split"],
+            row["view"],
+        )
+        for row in valid_rows
+        if row["condition_id"] == "clean"
+    }
+    usable_rows = [
+        row
+        for row in valid_rows
+        if (
+            row["speaker_id"],
+            sample_id(row),
+            row["split"],
+            row["view"],
+        )
+        in clean_keys
+    ]
+    if len(usable_rows) != expected_usable_rows:
+        raise ValueError(
+            f"{panel} clean-paired row mismatch: "
+            f"{len(usable_rows)} != {expected_usable_rows}"
+        )
     keys = [
         (
             row["speaker_id"],
@@ -149,16 +177,19 @@ def load_label_rows(
             row["condition_id"],
             row["view"],
         )
-        for row in valid_rows
+        for row in usable_rows
     ]
     if len(keys) != len(set(keys)):
         raise ValueError(f"duplicate task rows in {panel} label bank")
-    rows = [to_hnr_row(row, panel) for row in valid_rows]
+    rows = [to_hnr_row(row, panel) for row in usable_rows]
     return rows, {
         "eligible_rows": len(task_rows),
-        "valid_rows": len(rows),
-        "invalid_rows": len(task_rows) - len(rows),
-        "valid_fraction": len(rows) / len(task_rows),
+        "exact_valid_rows": len(valid_rows),
+        "invalid_rows": len(task_rows) - len(valid_rows),
+        "exact_valid_fraction": len(valid_rows) / len(task_rows),
+        "clean_paired_usable_rows": len(rows),
+        "missing_clean_pair_rows": len(valid_rows) - len(rows),
+        "clean_paired_usable_fraction": len(rows) / len(task_rows),
         "speakers": len({row.speaker_id for row in rows}),
     }
 
@@ -426,10 +457,12 @@ def main() -> None:
         args.label_bank,
         "internal_nonfinal",
         args.expected_internal_valid_rows,
+        args.expected_internal_usable_rows,
     )
     external_rows, external_coverage = load_label_rows(
         args.vctk_external_label_bank,
         "vctk_external",
+        args.expected_vctk_valid_rows,
         args.expected_vctk_valid_rows,
     )
     validate_speaker_contract(internal_rows, args)

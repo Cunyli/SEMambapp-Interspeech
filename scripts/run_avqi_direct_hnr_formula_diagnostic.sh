@@ -10,7 +10,7 @@ PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_direct_avqi_hnr_formula.py"
 
 DATA_RUN_ROOT="${DATA_RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_c_v5_data_20260817_03}"
 LABEL_RECEIPT="${LABEL_RECEIPT:-$DATA_RUN_ROOT/outputs/label_bank/receipt.json}"
-RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_direct_hnr_raw_cc_v3_diagnostic_20260817_01}"
+RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_direct_hnr_raw_cc_v3_diagnostic_20260817_02}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 PARTITION="${PARTITION:-gpu-v100-32g}"
@@ -124,6 +124,7 @@ python "$PYTHON_SCRIPT" \
   --slurm-job-id "$SLURM_JOB_ID" \
   --device cuda \
   --expected-internal-valid-rows 2134 \
+  --expected-internal-usable-rows 2106 \
   --expected-vctk-valid-rows 192 \
   --expected-train-speakers 197 \
   --expected-calibration-speakers 26 \
