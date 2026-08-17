@@ -62,9 +62,15 @@ EXPECTED_FULL_V4_SCREEN_FORMS = {
     "shared_dual_head": ["output_phase_tfgrid"],
     "frozen_independent_predictor": ["pretrained_full_tfgrid"],
 }
-EXPECTED_DIRECT_C_SCREEN_FORMS = {
-    DIRECT_ROUTE: ["direct_praat_hard_v2"],
-}
+EXPECTED_DIRECT_C_SCREEN_FORMS = (
+    {DIRECT_ROUTE: ["direct_praat_hard_v2"]},
+    {
+        DIRECT_ROUTE: [
+            "direct_praat_hard_v2",
+            "direct_praat_hard_shimmer_rms_v3",
+        ]
+    },
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -159,7 +165,7 @@ def validate_screen_contract(screen: dict[str, Any], path: Path) -> None:
         observed_forms = {
             DIRECT_ROUTE: contract["routes"][DIRECT_ROUTE]["architectures"]
         }
-        if observed_forms != EXPECTED_DIRECT_C_SCREEN_FORMS:
+        if observed_forms not in EXPECTED_DIRECT_C_SCREEN_FORMS:
             raise ValueError(f"Route C screen forms are incomplete: {path}")
         route_report = screen["routes"][DIRECT_ROUTE]
         if route_report["selection_rule"] != (

@@ -848,6 +848,11 @@ def train_waveform_predictor(
         predictor = PraatDifferentiableAVQIComponentEstimator(peak_mode="soft")
     elif architecture == "direct_praat_hard_v2":
         predictor = PraatDifferentiableAVQIComponentEstimator(peak_mode="hard")
+    elif architecture == "direct_praat_hard_shimmer_rms_v3":
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            shimmer_mode="hann_rms_v3",
+        )
     else:
         raise ValueError(f"unknown waveform architecture: {architecture}")
     predictor = predictor.to(device)
@@ -2590,6 +2595,7 @@ def main() -> None:
         "direct_exact_inspired",
         "direct_praat_soft_v2",
         "direct_praat_hard_v2",
+        "direct_praat_hard_shimmer_rms_v3",
     }
     if not set(shared_candidates) <= allowed_shared:
         raise ValueError(
@@ -2766,6 +2772,25 @@ def main() -> None:
                     if "direct_praat_hard_v2" in waveform_architectures
                     else None
                 ),
+                "direct_praat_hard_shimmer_rms_v3": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "piecewise-differentiable maximum",
+                        "formulas": [
+                            "Praat 34 Hz stop-Hann high-pass",
+                            "overlap-normalized linear autocorrelation HNR",
+                            "periodicity-aware soft voiced mask",
+                            "smoothed robust-baseline CPPS",
+                            "period-scaled Hann-RMS shimmer with validity gates",
+                            "global LTAS slope and trend tilt",
+                        ],
+                    }
+                    if "direct_praat_hard_shimmer_rms_v3"
+                    in waveform_architectures
+                    else None
+                ),
             },
         },
         "calibration": {
@@ -2932,6 +2957,7 @@ def main() -> None:
         "direct_exact_inspired",
         "direct_praat_soft_v2",
         "direct_praat_hard_v2",
+        "direct_praat_hard_shimmer_rms_v3",
     }
     magnitude_architectures = {
         "global_stats",

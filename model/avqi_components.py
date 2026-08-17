@@ -1167,12 +1167,15 @@ class PraatDifferentiableAVQIComponentEstimator(
     The implementation keeps the exact AVQI labels as the authority. It uses
     the verified 34 Hz high-pass response, overlap-normalized linear
     autocorrelation, a periodicity-aware soft voiced mask, a Praat-like
-    smoothed cepstral analysis, cycle-lag envelope perturbation, and a global
-    LTAS. The optional ``raw_cc_v3`` HNR branch follows Praat's one-period
-    forward cross-correlation timing more closely without altering the other
-    five components. ``peak_mode="soft"`` gives a smooth expected peak, while
-    ``peak_mode="hard"`` uses PyTorch's piecewise-differentiable maximum.
-    Neither mode has trainable neural parameters.
+    smoothed cepstral analysis, cycle-synchronous amplitude perturbation, and
+    a global LTAS. The optional ``raw_cc_v3`` HNR branch follows Praat's
+    one-period forward cross-correlation timing more closely without altering
+    the other five components. The ``hann_rms_v3`` shimmer branch replaces the
+    legacy analytic-envelope sample with Praat-like period-scaled Hann RMS and
+    soft period/amplitude validity gates. ``peak_mode="soft"`` gives a smooth
+    expected peak, while ``peak_mode="hard"`` uses PyTorch's
+    piecewise-differentiable maximum. Neither mode has trainable neural
+    parameters.
     """
 
     def __init__(
@@ -1189,11 +1192,14 @@ class PraatDifferentiableAVQIComponentEstimator(
         peak_temperature: float = 80.0,
         hnr_mode: str = "linear_ac_v2",
         hnr_max_frames: int = 4_096,
+        shimmer_mode: str = "analytic_envelope_v2",
     ):
         if peak_mode not in {"soft", "hard"}:
             raise ValueError(f"unsupported peak mode: {peak_mode}")
         if hnr_mode not in {"linear_ac_v2", "raw_cc_v3"}:
             raise ValueError(f"unsupported HNR mode: {hnr_mode}")
+        if shimmer_mode not in {"analytic_envelope_v2", "hann_rms_v3"}:
+            raise ValueError(f"unsupported shimmer mode: {shimmer_mode}")
         if cpps_frame_length <= 1 or cpps_hop_length <= 0:
             raise ValueError("CPPS frame and hop lengths must be positive")
         if n_fft < cpps_frame_length or cpps_max_frames < 2:
@@ -1214,6 +1220,7 @@ class PraatDifferentiableAVQIComponentEstimator(
         self.cpps_max_frames = cpps_max_frames
         self.hnr_mode = hnr_mode
         self.hnr_max_frames = hnr_max_frames
+        self.shimmer_mode = shimmer_mode
         self.register_buffer(
             "cpps_window",
             torch.hann_window(cpps_frame_length, periodic=True),
@@ -1652,6 +1659,114 @@ class PraatDifferentiableAVQIComponentEstimator(
             return self._raw_cc_v3_hnr(prepared)
         return self._linear_ac_v2_pitch_features(prepared)[-1]
 
+    def _hann_windowed_rms(
+        self,
+        prepared: torch.Tensor,
+        centers: torch.Tensor,
+        periods: torch.Tensor,
+    ) -> torch.Tensor:
+        """Approximate Praat's pulse-centred, period-scaled Hann RMS.
+
+        Exact Praat uses a Hann window extending 0.2 periods on each side of a
+        valid pulse. A fixed sample-offset grid keeps the support
+        differentiable with respect to the waveform and estimated period.
+        """
+        maximum_period = self.sample_rate / 75.0
+        maximum_half_width = int(math.ceil(0.2 * maximum_period))
+        offsets = torch.arange(
+            -maximum_half_width,
+            maximum_half_width + 1,
+            device=prepared.device,
+            dtype=prepared.dtype,
+        )
+        positions = centers.unsqueeze(-1) + offsets.unsqueeze(0)
+        bounded = positions.clamp(0.0, float(prepared.numel() - 1))
+        lower = bounded.floor().long()
+        upper = (lower + 1).clamp_max(prepared.numel() - 1)
+        fraction = bounded - lower.to(dtype=bounded.dtype)
+        samples = prepared[lower] * (1.0 - fraction) + prepared[upper] * fraction
+
+        half_width = (0.2 * periods).clamp_min(1.0).unsqueeze(-1)
+        window_phase = offsets.unsqueeze(0) / half_width
+        support = (window_phase.abs() <= 1.0).to(dtype=prepared.dtype)
+        bounded_phase = window_phase.clamp(-1.0, 1.0)
+        window = (0.5 + 0.5 * torch.cos(math.pi * bounded_phase)) * support
+        numerator = (samples * window).square().sum(dim=-1)
+        denominator = window.square().sum(dim=-1).clamp_min(1e-8)
+        return (numerator / denominator + 1e-10).sqrt()
+
+    def _hann_rms_shimmer(
+        self,
+        prepared: torch.Tensor,
+        frames: torch.Tensor,
+        period: torch.Tensor,
+        voicing_weight: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        centers = (
+            torch.arange(
+                frames.shape[0],
+                device=prepared.device,
+                dtype=prepared.dtype,
+            )
+            * self.hop_length
+            + self.frame_length / 2.0
+        )
+        previous_period = torch.cat((period[:1], period[:-1]))
+        previous_positions = centers - period
+        current_amplitude = self._hann_windowed_rms(prepared, centers, period)
+        previous_amplitude = self._hann_windowed_rms(
+            prepared,
+            previous_positions,
+            previous_period,
+        )
+
+        valid_weight = torch.sigmoid(
+            (previous_positions - 0.2 * previous_period) / 4.0
+        )
+        period_factor = torch.maximum(period, previous_period) / torch.minimum(
+            period,
+            previous_period,
+        ).clamp_min(1e-8)
+        period_factor_weight = torch.sigmoid((1.3 - period_factor) / 0.03)
+        amplitude_factor = torch.maximum(
+            current_amplitude,
+            previous_amplitude,
+        ) / torch.minimum(
+            current_amplitude,
+            previous_amplitude,
+        ).clamp_min(1e-8)
+        amplitude_factor_weight = torch.sigmoid(
+            (1.6 - amplitude_factor) / 0.05
+        )
+        pair_weight = (
+            voicing_weight
+            * valid_weight
+            * period_factor_weight
+            * amplitude_factor_weight
+        ).clamp_min(1e-8)
+        amplitude_weight = (
+            voicing_weight * valid_weight * period_factor_weight
+        ).clamp_min(1e-8)
+
+        amplitude_difference = self._smooth_absolute(
+            current_amplitude - previous_amplitude
+        )
+        mean_difference = self._weighted_mean(amplitude_difference, pair_weight)
+        mean_amplitude = self._weighted_mean(
+            current_amplitude,
+            amplitude_weight,
+        ).clamp_min(1e-8)
+        shimmer_percent = 100.0 * mean_difference / mean_amplitude
+        shimmer_db_frames = self._smooth_absolute(
+            20.0
+            * torch.log10(
+                current_amplitude.clamp_min(1e-8)
+                / previous_amplitude.clamp_min(1e-8)
+            )
+        )
+        shimmer_db = self._weighted_mean(shimmer_db_frames, pair_weight)
+        return shimmer_percent, shimmer_db
+
     def raw_hnr(self, waveform: torch.Tensor) -> torch.Tensor:
         """Return only the unaligned HNR proxy for formula diagnostics."""
         if waveform.ndim == 1:
@@ -1673,49 +1788,57 @@ class PraatDifferentiableAVQIComponentEstimator(
             else linear_ac_hnr
         )
 
-        envelope_spectrum = torch.fft.fft(prepared)
-        hilbert_response = torch.zeros_like(envelope_spectrum)
-        hilbert_response[0] = 1.0
-        if prepared.numel() % 2 == 0:
-            hilbert_response[1 : prepared.numel() // 2] = 2.0
-            hilbert_response[prepared.numel() // 2] = 1.0
+        if self.shimmer_mode == "hann_rms_v3":
+            shimmer_percent, shimmer_db = self._hann_rms_shimmer(
+                prepared,
+                frames,
+                period,
+                voicing_weight,
+            )
         else:
-            hilbert_response[1 : (prepared.numel() + 1) // 2] = 2.0
-        envelope = torch.fft.ifft(envelope_spectrum * hilbert_response).abs()
-        centers = (
-            torch.arange(
-                frames.shape[0],
-                device=prepared.device,
-                dtype=prepared.dtype,
+            envelope_spectrum = torch.fft.fft(prepared)
+            hilbert_response = torch.zeros_like(envelope_spectrum)
+            hilbert_response[0] = 1.0
+            if prepared.numel() % 2 == 0:
+                hilbert_response[1 : prepared.numel() // 2] = 2.0
+                hilbert_response[prepared.numel() // 2] = 1.0
+            else:
+                hilbert_response[1 : (prepared.numel() + 1) // 2] = 2.0
+            envelope = torch.fft.ifft(envelope_spectrum * hilbert_response).abs()
+            centers = (
+                torch.arange(
+                    frames.shape[0],
+                    device=prepared.device,
+                    dtype=prepared.dtype,
+                )
+                * self.hop_length
+                + self.frame_length / 2.0
             )
-            * self.hop_length
-            + self.frame_length / 2.0
-        )
-        current_amplitude = self._sample_linear(envelope, centers)
-        previous_positions = centers - period
-        previous_amplitude = self._sample_linear(envelope, previous_positions)
-        valid_weight = torch.sigmoid(previous_positions / 4.0)
-        shimmer_weight = (voicing_weight * valid_weight).clamp_min(1e-5)
-        amplitude_difference = self._smooth_absolute(
-            current_amplitude - previous_amplitude
-        )
-        shimmer_percent_frames = (
-            200.0
-            * amplitude_difference
-            / (current_amplitude + previous_amplitude).clamp_min(1e-8)
-        )
-        shimmer_db_frames = self._smooth_absolute(
-            20.0
-            * torch.log10(
-                current_amplitude.clamp_min(1e-8)
-                / previous_amplitude.clamp_min(1e-8)
+            current_amplitude = self._sample_linear(envelope, centers)
+            previous_positions = centers - period
+            previous_amplitude = self._sample_linear(envelope, previous_positions)
+            valid_weight = torch.sigmoid(previous_positions / 4.0)
+            shimmer_weight = (voicing_weight * valid_weight).clamp_min(1e-5)
+            amplitude_difference = self._smooth_absolute(
+                current_amplitude - previous_amplitude
             )
-        )
-        shimmer_percent = self._weighted_mean(
-            shimmer_percent_frames,
-            shimmer_weight,
-        )
-        shimmer_db = self._weighted_mean(shimmer_db_frames, shimmer_weight)
+            shimmer_percent_frames = (
+                200.0
+                * amplitude_difference
+                / (current_amplitude + previous_amplitude).clamp_min(1e-8)
+            )
+            shimmer_db_frames = self._smooth_absolute(
+                20.0
+                * torch.log10(
+                    current_amplitude.clamp_min(1e-8)
+                    / previous_amplitude.clamp_min(1e-8)
+                )
+            )
+            shimmer_percent = self._weighted_mean(
+                shimmer_percent_frames,
+                shimmer_weight,
+            )
+            shimmer_db = self._weighted_mean(shimmer_db_frames, shimmer_weight)
 
         cpps = self._cpps(prepared)
         ltas_input = self._soft_voiced_ltas_input(prepared)

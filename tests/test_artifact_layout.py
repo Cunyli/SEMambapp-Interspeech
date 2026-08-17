@@ -37,6 +37,9 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert 'parser.add_argument("--source-commit"' in source
     assert 'choices=("direct_only",)' in direct_source
     assert 'ROUTE_KEY = "direct_differentiable_estimator"' in direct_source
+    assert '"direct_praat_hard_shimmer_rms_v3"' in source
+    assert '"direct_praat_hard_shimmer_rms_v3"' in direct_source
+    assert '"direct_praat_hard_shimmer_rms_v3"' in multiseed
     assert '"shared_dual_head": {"status": "SKIPPED_USER_SCOPE"}' in direct_source
     assert (
         '"frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"}'
@@ -174,7 +177,10 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert "independent_gradient_smoke" in diagnostic
     assert 'SHARED_CANDIDATES="output_phase_tfgrid"' in screen
     assert "frequency_aware,phase_frequency_aware,phase_compact_tfgrid" in screen
-    assert 'WAVEFORM_ARCHITECTURES="direct_praat_hard_v2"' in screen
+    assert (
+        'WAVEFORM_ARCHITECTURES="${WAVEFORM_ARCHITECTURES:-direct_praat_hard_v2}"'
+        in screen
+    )
     assert 'WAVEFORM_ARCHITECTURES="pretrained_full_tfgrid"' in screen
     assert 'SCREEN_KIND" == "full_tfgrid"' in screen
     assert 'EXPECTED_TRAIN_SPEAKERS="${EXPECTED_TRAIN_SPEAKERS:-197}"' in screen
@@ -185,6 +191,9 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'CONFIRM_KIND="${CONFIRM_KIND:-phase}"' in confirm
     assert 'ROUTE_SCOPE" != "direct_only"' in confirm
     assert '.routes.direct_differentiable_estimator.selected_architecture' in confirm
+    assert (
+        "direct_praat_hard_v2|direct_praat_hard_shimmer_rms_v3" in confirm
+    )
     assert 'full:pretrained_full_tfgrid' in confirm
     assert 'CONFIRM_RUN_STEM="avqi_component_direct_c_v5_confirm"' in confirm
     assert 'SHARED_CANDIDATES="$(jq -er' in confirm
@@ -651,6 +660,64 @@ def test_avqi_multiseed_accepts_route_c_only_screen() -> None:
     namespace["validate_screen_contract"](
         screen,
         Path("route-c-screen.json"),
+    )
+
+
+def test_avqi_multiseed_accepts_calibration_selected_shimmer_rms_screen() -> None:
+    namespace = runpy.run_path(
+        REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
+    )
+    architectures = [
+        "direct_praat_hard_v2",
+        "direct_praat_hard_shimmer_rms_v3",
+    ]
+    screen = {
+        "contract": {
+            "route_scope": "direct_only",
+            "routes": {
+                "shared_dual_head": {
+                    "status": "SKIPPED_USER_SCOPE",
+                    "candidates": [],
+                },
+                "frozen_independent_predictor": {
+                    "status": "SKIPPED_USER_SCOPE",
+                    "architectures": [],
+                },
+                "direct_differentiable_estimator": {
+                    "architectures": architectures,
+                },
+            },
+            "direct_formula_budget": {
+                "trainable_parameters": 0,
+                "optimizer_steps": 0,
+                "maximum_optimizer_steps": 0,
+            },
+            "calibration": {"holdout_used_for_fit_or_selection": False},
+        },
+        "routes": {
+            "shared_dual_head": {"status": "SKIPPED_USER_SCOPE"},
+            "frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"},
+            "direct_differentiable_estimator": {
+                "selected_architecture": "direct_praat_hard_shimmer_rms_v3",
+                "selection_rule": "lowest calibration loss before holdout evaluation",
+                "training": {
+                    "direct_praat_hard_v2": {
+                        "best_calibration_loss": 0.06,
+                        "optimizer_steps": 0,
+                        "trainable_parameter_count": 0,
+                    },
+                    "direct_praat_hard_shimmer_rms_v3": {
+                        "best_calibration_loss": 0.05,
+                        "optimizer_steps": 0,
+                        "trainable_parameter_count": 0,
+                    },
+                },
+            },
+        },
+    }
+    namespace["validate_screen_contract"](
+        screen,
+        Path("route-c-shimmer-rms-screen.json"),
     )
 
 

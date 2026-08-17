@@ -148,10 +148,13 @@ if [[ "$CONFIRM_KIND" == "direct" ]]; then
   WAVEFORM_ARCHITECTURES="$(jq -er '.routes.direct_differentiable_estimator.selected_architecture' "$SCREEN_REPORT")"
   PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_component_direct_c.py"
   MAX_OPTIMIZER_STEPS=0
-  if [[ "$WAVEFORM_ARCHITECTURES" != "direct_praat_hard_v2" ]]; then
-    echo "Unexpected locked Route C estimator: $WAVEFORM_ARCHITECTURES" >&2
-    exit 2
-  fi
+  case "$WAVEFORM_ARCHITECTURES" in
+    direct_praat_hard_v2|direct_praat_hard_shimmer_rms_v3) ;;
+    *)
+      echo "Unexpected locked Route C estimator: $WAVEFORM_ARCHITECTURES" >&2
+      exit 2
+      ;;
+  esac
 else
   if [[ "$ROUTE_SCOPE" != "all" ]]; then
     echo "$CONFIRM_KIND confirmation requires the two-route screen contract" >&2

@@ -40,7 +40,7 @@ case "$SCREEN_KIND" in
     SHARED_CANDIDATES=""
     PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_component_direct_c.py"
     FULL_TFGRID_CHECKPOINT=""
-    WAVEFORM_ARCHITECTURES="direct_praat_hard_v2"
+    WAVEFORM_ARCHITECTURES="${WAVEFORM_ARCHITECTURES:-direct_praat_hard_v2}"
     MAX_OPTIMIZER_STEPS=0
     RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs/avqi_component_direct_c_v5_screen_20260817_01}"
     CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ROOT_DIR/checkpoints/avqi_component_direct_c_v5_screen_20260817_01}"

@@ -477,6 +477,17 @@ def test_praat_differentiable_rejects_unknown_hnr_mode() -> None:
     raise AssertionError("unknown differentiable HNR mode was accepted")
 
 
+def test_praat_differentiable_rejects_unknown_shimmer_mode() -> None:
+    try:
+        PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            shimmer_mode="unknown",
+        )
+    except ValueError:
+        return
+    raise AssertionError("unknown differentiable shimmer mode was accepted")
+
+
 def test_praat_differentiable_default_keeps_linear_ac_v2_hnr() -> None:
     sample_rate = 16_000
     time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
@@ -497,6 +508,90 @@ def test_praat_differentiable_default_keeps_linear_ac_v2_hnr() -> None:
         default.raw_components(waveform),
         explicit.raw_components(waveform),
     )
+
+
+def test_praat_differentiable_default_keeps_analytic_envelope_v2_shimmer() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    waveform = torch.sin(2.0 * math.pi * 175.0 * time)
+    default = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+    explicit = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="analytic_envelope_v2",
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+    assert torch.equal(
+        default.raw_components(waveform),
+        explicit.raw_components(waveform),
+    )
+
+
+def test_praat_hann_rms_v3_shimmer_is_gain_invariant_and_am_sensitive() -> None:
+    sample_rate = 16_000
+    frequency = 200.0
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    carrier = torch.sin(2.0 * math.pi * frequency * time)
+    modulated = carrier * (
+        1.0 + 0.3 * torch.sin(2.0 * math.pi * 7.0 * time)
+    )
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="hann_rms_v3",
+        max_frames=128,
+        cpps_max_frames=256,
+    )
+    steady_shimmer = estimator.raw_components(carrier)[0, 2:4]
+    modulated_shimmer = estimator.raw_components(modulated)[0, 2:4]
+    gained_shimmer = estimator.raw_components(modulated * 0.25)[0, 2:4]
+    shifted_shimmer = estimator.raw_components(torch.roll(modulated, 1_600))[
+        0, 2:4
+    ]
+    generator = torch.Generator().manual_seed(20260818)
+    noisy = modulated + 0.2 * torch.randn(modulated.shape, generator=generator)
+    noisy_shimmer = estimator.raw_components(noisy)[0, 2:4]
+
+    assert torch.all(modulated_shimmer > steady_shimmer + 0.1)
+    assert float(
+        (shifted_shimmer[0] - modulated_shimmer[0]).abs()
+        / modulated_shimmer[0]
+    ) < 0.05
+    assert float((shifted_shimmer[1] - modulated_shimmer[1]).abs()) < 0.05
+    assert torch.all(
+        noisy_shimmer - modulated_shimmer
+        > torch.tensor([1.0, 0.1], dtype=noisy_shimmer.dtype)
+    )
+    assert torch.allclose(
+        modulated_shimmer,
+        gained_shimmer,
+        atol=2e-3,
+        rtol=2e-3,
+    )
+
+
+def test_praat_hann_rms_v3_shimmer_has_finite_nonzero_input_gradient() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    waveform = (
+        torch.sin(2.0 * math.pi * 180.0 * time)
+        * (1.0 + 0.2 * torch.sin(2.0 * math.pi * 5.0 * time))
+    ).unsqueeze(0).requires_grad_()
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="hann_rms_v3",
+        max_frames=128,
+        cpps_max_frames=256,
+    )
+    shimmer = estimator(waveform)[:, 2:4]
+    shimmer.square().mean().backward()
+
+    assert waveform.grad is not None
+    assert torch.isfinite(waveform.grad).all()
+    assert float(waveform.grad.norm()) > 0.0
 
 
 def test_praat_raw_cc_v3_hnr_is_invariant_and_noise_sensitive() -> None:
@@ -602,21 +697,23 @@ def test_praat_differentiable_v2_component_gradients_survive_zero_energy_regions
         torch.cat((voiced, torch.zeros_like(voiced))),
     )
     for peak_mode in ("soft", "hard"):
-        estimator = PraatDifferentiableAVQIComponentEstimator(
-            peak_mode=peak_mode,
-            max_frames=128,
-            cpps_max_frames=256,
-        )
-        for source in waveforms:
-            waveform = source.unsqueeze(0).requires_grad_()
-            prediction = estimator(waveform)
-            for component_index in range(prediction.shape[-1]):
-                gradient = torch.autograd.grad(
-                    prediction[:, component_index].sum(),
-                    waveform,
-                    retain_graph=component_index + 1 < prediction.shape[-1],
-                )[0]
-                assert torch.isfinite(gradient).all()
+        for shimmer_mode in ("analytic_envelope_v2", "hann_rms_v3"):
+            estimator = PraatDifferentiableAVQIComponentEstimator(
+                peak_mode=peak_mode,
+                shimmer_mode=shimmer_mode,
+                max_frames=128,
+                cpps_max_frames=256,
+            )
+            for source in waveforms:
+                waveform = source.unsqueeze(0).requires_grad_()
+                prediction = estimator(waveform)
+                for component_index in range(prediction.shape[-1]):
+                    gradient = torch.autograd.grad(
+                        prediction[:, component_index].sum(),
+                        waveform,
+                        retain_graph=component_index + 1 < prediction.shape[-1],
+                    )[0]
+                    assert torch.isfinite(gradient).all()
 
 
 def test_component_affine_calibrator_is_fixed_and_differentiable() -> None:
