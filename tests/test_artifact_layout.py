@@ -40,6 +40,9 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"direct_praat_hard_shimmer_rms_v3"' in source
     assert '"direct_praat_hard_shimmer_rms_v3"' in direct_source
     assert '"direct_praat_hard_shimmer_rms_v3"' in multiseed
+    assert '"direct_praat_hard_shimmer_raw_cc_surrogate_v4"' in source
+    assert '"direct_praat_hard_shimmer_raw_cc_surrogate_v4"' in direct_source
+    assert '"direct_praat_hard_shimmer_raw_cc_surrogate_v4"' in multiseed
     assert '"shared_dual_head": {"status": "SKIPPED_USER_SCOPE"}' in direct_source
     assert (
         '"frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"}'
@@ -191,9 +194,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'CONFIRM_KIND="${CONFIRM_KIND:-phase}"' in confirm
     assert 'ROUTE_SCOPE" != "direct_only"' in confirm
     assert '.routes.direct_differentiable_estimator.selected_architecture' in confirm
-    assert (
-        "direct_praat_hard_v2|direct_praat_hard_shimmer_rms_v3" in confirm
-    )
+    assert "direct_praat_hard_shimmer_raw_cc_surrogate_v4" in confirm
     assert 'full:pretrained_full_tfgrid' in confirm
     assert 'CONFIRM_RUN_STEM="avqi_component_direct_c_v5_confirm"' in confirm
     assert 'SHARED_CANDIDATES="$(jq -er' in confirm
@@ -663,13 +664,13 @@ def test_avqi_multiseed_accepts_route_c_only_screen() -> None:
     )
 
 
-def test_avqi_multiseed_accepts_calibration_selected_shimmer_rms_screen() -> None:
+def test_avqi_multiseed_accepts_calibration_selected_shimmer_surrogate_screen() -> None:
     namespace = runpy.run_path(
         REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
     )
     architectures = [
         "direct_praat_hard_v2",
-        "direct_praat_hard_shimmer_rms_v3",
+        "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
     ]
     screen = {
         "contract": {
@@ -698,7 +699,9 @@ def test_avqi_multiseed_accepts_calibration_selected_shimmer_rms_screen() -> Non
             "shared_dual_head": {"status": "SKIPPED_USER_SCOPE"},
             "frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"},
             "direct_differentiable_estimator": {
-                "selected_architecture": "direct_praat_hard_shimmer_rms_v3",
+                "selected_architecture": (
+                    "direct_praat_hard_shimmer_raw_cc_surrogate_v4"
+                ),
                 "selection_rule": "lowest calibration loss before holdout evaluation",
                 "training": {
                     "direct_praat_hard_v2": {
@@ -706,7 +709,7 @@ def test_avqi_multiseed_accepts_calibration_selected_shimmer_rms_screen() -> Non
                         "optimizer_steps": 0,
                         "trainable_parameter_count": 0,
                     },
-                    "direct_praat_hard_shimmer_rms_v3": {
+                    "direct_praat_hard_shimmer_raw_cc_surrogate_v4": {
                         "best_calibration_loss": 0.05,
                         "optimizer_steps": 0,
                         "trainable_parameter_count": 0,
@@ -717,7 +720,7 @@ def test_avqi_multiseed_accepts_calibration_selected_shimmer_rms_screen() -> Non
     }
     namespace["validate_screen_contract"](
         screen,
-        Path("route-c-shimmer-rms-screen.json"),
+        Path("route-c-shimmer-surrogate-screen.json"),
     )
 
 

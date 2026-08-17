@@ -594,6 +594,50 @@ def test_praat_hann_rms_v3_shimmer_has_finite_nonzero_input_gradient() -> None:
     assert float(waveform.grad.norm()) > 0.0
 
 
+def test_praat_raw_cc_surrogate_v4_keeps_v3_forward_and_changes_gradient() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
+    source = torch.sin(2.0 * math.pi * 180.0 * time) * (
+        1.0 + 0.2 * torch.sin(2.0 * math.pi * 5.0 * time)
+    )
+    v3_waveform = source.unsqueeze(0).requires_grad_()
+    surrogate_waveform = source.unsqueeze(0).requires_grad_()
+    v3 = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="hann_rms_v3",
+        max_frames=128,
+        cpps_max_frames=256,
+        hnr_max_frames=256,
+    )
+    surrogate = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="hann_rms_raw_cc_surrogate_v4",
+        max_frames=128,
+        cpps_max_frames=256,
+        hnr_max_frames=256,
+    )
+    v3_components = v3.raw_components(v3_waveform)
+    surrogate_components = surrogate.raw_components(surrogate_waveform)
+
+    assert torch.equal(v3_components, surrogate_components)
+    v3_gradient = torch.autograd.grad(
+        v3_components[:, 2:4].sum(),
+        v3_waveform,
+    )[0]
+    surrogate_gradient = torch.autograd.grad(
+        surrogate_components[:, 2:4].sum(),
+        surrogate_waveform,
+    )[0]
+    assert torch.isfinite(surrogate_gradient).all()
+    assert float(surrogate_gradient.norm()) > 0.0
+    assert not torch.allclose(
+        v3_gradient,
+        surrogate_gradient,
+        atol=1e-8,
+        rtol=1e-5,
+    )
+
+
 def test_praat_raw_cc_v3_hnr_is_invariant_and_noise_sensitive() -> None:
     torch.manual_seed(20260817)
     sample_rate = 16_000
@@ -697,7 +741,11 @@ def test_praat_differentiable_v2_component_gradients_survive_zero_energy_regions
         torch.cat((voiced, torch.zeros_like(voiced))),
     )
     for peak_mode in ("soft", "hard"):
-        for shimmer_mode in ("analytic_envelope_v2", "hann_rms_v3"):
+        for shimmer_mode in (
+            "analytic_envelope_v2",
+            "hann_rms_v3",
+            "hann_rms_raw_cc_surrogate_v4",
+        ):
             estimator = PraatDifferentiableAVQIComponentEstimator(
                 peak_mode=peak_mode,
                 shimmer_mode=shimmer_mode,

@@ -1172,7 +1172,10 @@ class PraatDifferentiableAVQIComponentEstimator(
     one-period forward cross-correlation timing more closely without altering
     the other five components. The ``hann_rms_v3`` shimmer branch replaces the
     legacy analytic-envelope sample with Praat-like period-scaled Hann RMS and
-    soft period/amplitude validity gates. ``peak_mode="soft"`` gives a smooth
+    soft period/amplitude validity gates. The
+    ``hann_rms_raw_cc_surrogate_v4`` branch keeps the v3 value in the forward
+    pass but uses a raw-CC paired-delta surrogate in the backward pass.
+    ``peak_mode="soft"`` gives a smooth
     expected peak, while ``peak_mode="hard"`` uses PyTorch's
     piecewise-differentiable maximum. Neither mode has trainable neural
     parameters.
@@ -1198,7 +1201,11 @@ class PraatDifferentiableAVQIComponentEstimator(
             raise ValueError(f"unsupported peak mode: {peak_mode}")
         if hnr_mode not in {"linear_ac_v2", "raw_cc_v3"}:
             raise ValueError(f"unsupported HNR mode: {hnr_mode}")
-        if shimmer_mode not in {"analytic_envelope_v2", "hann_rms_v3"}:
+        if shimmer_mode not in {
+            "analytic_envelope_v2",
+            "hann_rms_v3",
+            "hann_rms_raw_cc_surrogate_v4",
+        }:
             raise ValueError(f"unsupported shimmer mode: {shimmer_mode}")
         if cpps_frame_length <= 1 or cpps_hop_length <= 0:
             raise ValueError("CPPS frame and hop lengths must be positive")
@@ -1561,8 +1568,11 @@ class PraatDifferentiableAVQIComponentEstimator(
         hnr = self._weighted_mean(frame_hnr, voicing_weight)
         return frames, period, voicing_weight, hnr
 
-    def _raw_cc_v3_hnr(self, prepared: torch.Tensor) -> torch.Tensor:
-        """Approximate Praat raw-CC pitch strength on one-period windows.
+    def _raw_cc_v3_pitch_features(
+        self,
+        prepared: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return raw-CC frames, periods, voicing weights, and HNR.
 
         Praat's ``To Pitch (cc)`` uses a one-period analysis window and a
         default step of one quarter of the minimum period. This branch keeps
@@ -1619,7 +1629,7 @@ class PraatDifferentiableAVQIComponentEstimator(
         normalized_correlation = (numerator / denominator).clamp(-0.9999, 0.9999)
 
         if self.peak_mode == "soft":
-            periodicity, _ = self._periodicity_peak(
+            periodicity, period = self._periodicity_peak(
                 normalized_correlation,
                 lag_min,
                 lag_max,
@@ -1642,6 +1652,7 @@ class PraatDifferentiableAVQIComponentEstimator(
             )
             offset = (0.5 * (left - right) / safe_curvature).clamp(-1.0, 1.0)
             periodicity = peak - 0.25 * (left - right) * offset
+            period = peak_index.to(dtype=prepared.dtype) + offset
 
         periodicity = periodicity.clamp(1e-4, 0.9999)
         local_peak = reference.abs().amax(dim=-1)
@@ -1652,7 +1663,11 @@ class PraatDifferentiableAVQIComponentEstimator(
         periodicity_weight = torch.sigmoid((periodicity - 0.45) / 0.06)
         voicing_weight = (intensity_weight * periodicity_weight).clamp_min(1e-8)
         frame_hnr = 10.0 * torch.log10(periodicity / (1.0 - periodicity))
-        return self._weighted_mean(frame_hnr, voicing_weight)
+        hnr = self._weighted_mean(frame_hnr, voicing_weight)
+        return reference, period, voicing_weight, hnr
+
+    def _raw_cc_v3_hnr(self, prepared: torch.Tensor) -> torch.Tensor:
+        return self._raw_cc_v3_pitch_features(prepared)[-1]
 
     def _hnr_one(self, prepared: torch.Tensor) -> torch.Tensor:
         if self.hnr_mode == "raw_cc_v3":
@@ -1711,6 +1726,20 @@ class PraatDifferentiableAVQIComponentEstimator(
             * self.hop_length
             + self.frame_length / 2.0
         )
+        return self._hann_rms_shimmer_at_centers(
+            prepared,
+            centers,
+            period,
+            voicing_weight,
+        )
+
+    def _hann_rms_shimmer_at_centers(
+        self,
+        prepared: torch.Tensor,
+        centers: torch.Tensor,
+        period: torch.Tensor,
+        voicing_weight: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         previous_period = torch.cat((period[:1], period[:-1]))
         previous_positions = centers - period
         current_amplitude = self._hann_windowed_rms(prepared, centers, period)
@@ -1788,13 +1817,59 @@ class PraatDifferentiableAVQIComponentEstimator(
             else linear_ac_hnr
         )
 
-        if self.shimmer_mode == "hann_rms_v3":
-            shimmer_percent, shimmer_db = self._hann_rms_shimmer(
+        if self.shimmer_mode in {
+            "hann_rms_v3",
+            "hann_rms_raw_cc_surrogate_v4",
+        }:
+            forward_shimmer = self._hann_rms_shimmer(
                 prepared,
                 frames,
                 period,
                 voicing_weight,
             )
+            if self.shimmer_mode == "hann_rms_raw_cc_surrogate_v4":
+                raw_frames, raw_period, raw_voicing_weight, _ = (
+                    self._raw_cc_v3_pitch_features(prepared)
+                )
+                raw_window_length = max(
+                    2,
+                    int(round(self.sample_rate / 75.0)),
+                )
+                raw_hop_length = max(
+                    1,
+                    int(round(self.sample_rate / 75.0 / 4.0)),
+                )
+                raw_centers = (
+                    torch.arange(
+                        raw_frames.shape[0],
+                        device=prepared.device,
+                        dtype=prepared.dtype,
+                    )
+                    * raw_hop_length
+                    + raw_window_length / 2.0
+                )
+                backward_shimmer = self._hann_rms_shimmer_at_centers(
+                    prepared,
+                    raw_centers,
+                    raw_period,
+                    raw_voicing_weight,
+                )
+                shimmer_percent = (
+                    forward_shimmer[0].detach()
+                    + (
+                        backward_shimmer[0]
+                        - backward_shimmer[0].detach()
+                    )
+                )
+                shimmer_db = (
+                    forward_shimmer[1].detach()
+                    + (
+                        backward_shimmer[1]
+                        - backward_shimmer[1].detach()
+                    )
+                )
+            else:
+                shimmer_percent, shimmer_db = forward_shimmer
         else:
             envelope_spectrum = torch.fft.fft(prepared)
             hilbert_response = torch.zeros_like(envelope_spectrum)

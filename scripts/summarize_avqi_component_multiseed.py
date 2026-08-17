@@ -70,6 +70,12 @@ EXPECTED_DIRECT_C_SCREEN_FORMS = (
             "direct_praat_hard_shimmer_rms_v3",
         ]
     },
+    {
+        DIRECT_ROUTE: [
+            "direct_praat_hard_v2",
+            "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
+        ]
+    },
 )
 
 
