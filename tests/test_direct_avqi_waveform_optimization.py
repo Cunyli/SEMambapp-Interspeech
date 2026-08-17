@@ -267,16 +267,8 @@ def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
                     "label": "patient",
                     "scoring_status": "ok",
                     "speaker_id": f"{prefix}_{speaker_index}",
-                    "cs_path": str(
-                        cs_reference_path
-                        if clean_view in ("cs", "sv")
-                        else waveform_path
-                    ),
-                    "sv_path": str(
-                        sv_reference_path
-                        if clean_view in ("cs", "sv")
-                        else waveform_path
-                    ),
+                    "cs_path": str(waveform_path),
+                    "sv_path": str(waveform_path),
                 }
                 for component_index, component in enumerate(components):
                     row[f"clean_{component}"] = str(component_index)
@@ -292,8 +284,16 @@ def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
                     "label": "patient",
                     "scoring_status": "ok",
                     "speaker_id": f"{prefix}_{speaker_index}",
-                    "cs_path": str(waveform_path),
-                    "sv_path": str(waveform_path),
+                    "cs_path": str(
+                        cs_reference_path
+                        if clean_view in ("cs", "sv")
+                        else waveform_path
+                    ),
+                    "sv_path": str(
+                        sv_reference_path
+                        if clean_view in ("cs", "sv")
+                        else waveform_path
+                    ),
                 }
                 for component_index, component in enumerate(components):
                     clean_row[f"clean_{component}"] = str(component_index)
