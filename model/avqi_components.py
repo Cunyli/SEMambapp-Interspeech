@@ -1168,7 +1168,9 @@ class PraatDifferentiableAVQIComponentEstimator(
     the verified 34 Hz high-pass response, overlap-normalized linear
     autocorrelation, a periodicity-aware soft voiced mask, a Praat-like
     smoothed cepstral analysis, cycle-lag envelope perturbation, and a global
-    LTAS. ``peak_mode="soft"`` gives a smooth expected peak, while
+    LTAS. The optional ``raw_cc_v3`` HNR branch follows Praat's one-period
+    forward cross-correlation timing more closely without altering the other
+    five components. ``peak_mode="soft"`` gives a smooth expected peak, while
     ``peak_mode="hard"`` uses PyTorch's piecewise-differentiable maximum.
     Neither mode has trainable neural parameters.
     """
@@ -1185,13 +1187,19 @@ class PraatDifferentiableAVQIComponentEstimator(
         cpps_hop_length: int = 32,
         cpps_max_frames: int = 4_096,
         peak_temperature: float = 80.0,
+        hnr_mode: str = "linear_ac_v2",
+        hnr_max_frames: int = 4_096,
     ):
         if peak_mode not in {"soft", "hard"}:
             raise ValueError(f"unsupported peak mode: {peak_mode}")
+        if hnr_mode not in {"linear_ac_v2", "raw_cc_v3"}:
+            raise ValueError(f"unsupported HNR mode: {hnr_mode}")
         if cpps_frame_length <= 1 or cpps_hop_length <= 0:
             raise ValueError("CPPS frame and hop lengths must be positive")
         if n_fft < cpps_frame_length or cpps_max_frames < 2:
             raise ValueError("invalid CPPS FFT or frame limit")
+        if hnr_max_frames < 2:
+            raise ValueError("HNR frame limit must be at least two")
         super().__init__(
             sample_rate=sample_rate,
             frame_length=frame_length,
@@ -1204,6 +1212,8 @@ class PraatDifferentiableAVQIComponentEstimator(
         self.cpps_frame_length = cpps_frame_length
         self.cpps_hop_length = cpps_hop_length
         self.cpps_max_frames = cpps_max_frames
+        self.hnr_mode = hnr_mode
+        self.hnr_max_frames = hnr_max_frames
         self.register_buffer(
             "cpps_window",
             torch.hann_window(cpps_frame_length, periodic=True),
@@ -1514,8 +1524,11 @@ class PraatDifferentiableAVQIComponentEstimator(
         tilt = (10.0 / math.log(10.0)) * (log_high_mean - log_low_mean)
         return slope, tilt
 
-    def _raw_one(self, waveform: torch.Tensor) -> torch.Tensor:
-        prepared = self._prepare(waveform)
+    def _linear_ac_v2_pitch_features(
+        self,
+        prepared: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the frozen v2 frames, periods, voicing weights, and HNR."""
         frames = self._limited_frames(
             prepared,
             self.frame_length,
@@ -1539,6 +1552,126 @@ class PraatDifferentiableAVQIComponentEstimator(
         voicing_weight = (selection_weight * periodicity_weight).clamp_min(1e-5)
         frame_hnr = 10.0 * torch.log10(periodicity / (1.0 - periodicity))
         hnr = self._weighted_mean(frame_hnr, voicing_weight)
+        return frames, period, voicing_weight, hnr
+
+    def _raw_cc_v3_hnr(self, prepared: torch.Tensor) -> torch.Tensor:
+        """Approximate Praat raw-CC pitch strength on one-period windows.
+
+        Praat's ``To Pitch (cc)`` uses a one-period analysis window and a
+        default step of one quarter of the minimum period. This branch keeps
+        those fixed timings, uses a forward cross-correlation normalized at
+        every candidate lag, and averages the resulting HNR over softly voiced
+        frames. Exact Praat labels remain the calibration and promotion judge.
+        """
+        pitch_floor = 75.0
+        pitch_ceiling = 600.0
+        window_length = max(2, int(round(self.sample_rate / pitch_floor)))
+        hop_length = max(1, int(round(self.sample_rate / pitch_floor / 4.0)))
+        lag_min = max(1, int(math.ceil(self.sample_rate / pitch_ceiling)))
+        lag_max = max(
+            lag_min + 1,
+            int(math.floor(self.sample_rate / pitch_floor)),
+        )
+
+        # Keep one extra lag so a hard maximum at the upper boundary still has
+        # a right neighbour for the piecewise-differentiable parabolic fit.
+        available_max_lag = lag_max + 1
+        segment_length = window_length + available_max_lag
+        if prepared.numel() < segment_length + hop_length:
+            prepared = F.pad(
+                prepared,
+                (0, segment_length + hop_length - prepared.numel()),
+            )
+        segments = self._limited_frames(
+            prepared,
+            segment_length,
+            hop_length,
+            self.hnr_max_frames,
+        )
+        centered = segments - segments.mean(dim=-1, keepdim=True)
+        reference = centered[:, :window_length]
+
+        fft_size = 1 << (segment_length + window_length - 2).bit_length()
+        segment_spectrum = torch.fft.rfft(centered, n=fft_size, dim=-1)
+        reference_spectrum = torch.fft.rfft(reference, n=fft_size, dim=-1)
+        numerator = torch.fft.irfft(
+            segment_spectrum * reference_spectrum.conj(),
+            n=fft_size,
+            dim=-1,
+        )[:, : available_max_lag + 1]
+
+        squared_prefix = F.pad(centered.square().cumsum(dim=-1), (1, 0))
+        target_end = window_length + available_max_lag + 1
+        target_energy = squared_prefix[:, window_length:target_end] - squared_prefix[
+            :, : available_max_lag + 1
+        ]
+        reference_energy = reference.square().sum(dim=-1, keepdim=True)
+        denominator = (
+            (reference_energy * target_energy).clamp_min(0.0) + 1e-10
+        ).sqrt()
+        normalized_correlation = (numerator / denominator).clamp(-0.9999, 0.9999)
+
+        if self.peak_mode == "soft":
+            periodicity, _ = self._periodicity_peak(
+                normalized_correlation,
+                lag_min,
+                lag_max,
+            )
+        else:
+            candidates = normalized_correlation[:, lag_min : lag_max + 1]
+            peak, relative_index = candidates.max(dim=-1)
+            peak_index = relative_index + lag_min
+            left = normalized_correlation.gather(
+                1, (peak_index - 1).unsqueeze(-1)
+            ).squeeze(-1)
+            right = normalized_correlation.gather(
+                1, (peak_index + 1).unsqueeze(-1)
+            ).squeeze(-1)
+            curvature = left - 2.0 * peak + right
+            safe_curvature = torch.where(
+                curvature.abs() >= 1e-6,
+                curvature,
+                torch.full_like(curvature, -1e-6),
+            )
+            offset = (0.5 * (left - right) / safe_curvature).clamp(-1.0, 1.0)
+            periodicity = peak - 0.25 * (left - right) * offset
+
+        periodicity = periodicity.clamp(1e-4, 0.9999)
+        local_peak = reference.abs().amax(dim=-1)
+        global_peak = prepared.abs().amax().clamp_min(1e-8)
+        intensity_weight = torch.sigmoid(
+            ((local_peak / global_peak) - 0.03) / 0.01
+        )
+        periodicity_weight = torch.sigmoid((periodicity - 0.45) / 0.06)
+        voicing_weight = (intensity_weight * periodicity_weight).clamp_min(1e-8)
+        frame_hnr = 10.0 * torch.log10(periodicity / (1.0 - periodicity))
+        return self._weighted_mean(frame_hnr, voicing_weight)
+
+    def _hnr_one(self, prepared: torch.Tensor) -> torch.Tensor:
+        if self.hnr_mode == "raw_cc_v3":
+            return self._raw_cc_v3_hnr(prepared)
+        return self._linear_ac_v2_pitch_features(prepared)[-1]
+
+    def raw_hnr(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Return only the unaligned HNR proxy for formula diagnostics."""
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        if waveform.ndim != 2:
+            raise ValueError(
+                f"expected a [batch, time] waveform, got {tuple(waveform.shape)}"
+            )
+        return torch.stack([self._hnr_one(self._prepare(row)) for row in waveform])
+
+    def _raw_one(self, waveform: torch.Tensor) -> torch.Tensor:
+        prepared = self._prepare(waveform)
+        frames, period, voicing_weight, linear_ac_hnr = (
+            self._linear_ac_v2_pitch_features(prepared)
+        )
+        hnr = (
+            self._raw_cc_v3_hnr(prepared)
+            if self.hnr_mode == "raw_cc_v3"
+            else linear_ac_hnr
+        )
 
         envelope_spectrum = torch.fft.fft(prepared)
         hilbert_response = torch.zeros_like(envelope_spectrum)

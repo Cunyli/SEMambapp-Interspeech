@@ -466,6 +466,78 @@ def test_praat_differentiable_v2_rejects_unknown_peak_mode() -> None:
     raise AssertionError("unknown differentiable AVQI peak mode was accepted")
 
 
+def test_praat_differentiable_rejects_unknown_hnr_mode() -> None:
+    try:
+        PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            hnr_mode="unknown",
+        )
+    except ValueError:
+        return
+    raise AssertionError("unknown differentiable HNR mode was accepted")
+
+
+def test_praat_differentiable_default_keeps_linear_ac_v2_hnr() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    waveform = torch.sin(2.0 * math.pi * 175.0 * time)
+    default = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+    explicit = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        hnr_mode="linear_ac_v2",
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+    assert torch.equal(default.raw_hnr(waveform), explicit.raw_hnr(waveform))
+    assert torch.equal(
+        default.raw_components(waveform),
+        explicit.raw_components(waveform),
+    )
+
+
+def test_praat_raw_cc_v3_hnr_is_invariant_and_noise_sensitive() -> None:
+    torch.manual_seed(20260817)
+    sample_rate = 16_000
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    clean = torch.sin(2.0 * math.pi * 170.0 * time)
+    noisy = clean + 0.4 * torch.randn_like(clean)
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        hnr_mode="raw_cc_v3",
+        hnr_max_frames=256,
+    )
+    clean_hnr = estimator.raw_hnr(clean)
+    gained_hnr = estimator.raw_hnr(clean * 0.25)
+    shifted_hnr = estimator.raw_hnr(torch.roll(clean, 1_600))
+    noisy_hnr = estimator.raw_hnr(noisy)
+
+    assert torch.allclose(clean_hnr, gained_hnr, atol=2e-3, rtol=2e-3)
+    assert torch.allclose(clean_hnr, shifted_hnr, atol=0.1, rtol=2e-3)
+    assert float(clean_hnr - noisy_hnr) > 0.1
+
+
+def test_praat_raw_cc_v3_hnr_has_finite_nonzero_input_gradient() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
+    voiced = torch.sin(2.0 * math.pi * 180.0 * time)
+    waveform = torch.cat((voiced, torch.zeros_like(voiced))).requires_grad_()
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        hnr_mode="raw_cc_v3",
+        hnr_max_frames=256,
+    )
+    prediction = estimator.raw_hnr(waveform)
+    prediction.sum().backward()
+
+    assert waveform.grad is not None
+    assert torch.isfinite(waveform.grad).all()
+    assert float(waveform.grad.norm()) > 0.0
+
+
 def test_praat_differentiable_v2_is_invariant_and_family_sensitive() -> None:
     sample_rate = 16_000
     time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate

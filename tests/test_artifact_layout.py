@@ -91,6 +91,26 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert "refusing to overwrite output" in multiseed
 
 
+def test_route_c_hnr_formula_diagnostic_is_nonfinal_and_read_only() -> None:
+    source = read("scripts/evaluate_direct_avqi_hnr_formula.py")
+    launcher = read("scripts/run_avqi_direct_hnr_formula_diagnostic.sh")
+    model = read("model/avqi_components.py")
+    assert '"raw_cc_v3"' in model
+    assert 'hnr_mode: str = "linear_ac_v2"' in model
+    assert '"selection_split": "surrogate_calibration"' in source
+    assert '"holdout_used_for_selection": False' in source
+    assert '"final_pathological_waveform_pilot_panel_accessed": False' in source
+    assert '"bounded_waveform_pilot_authorized": False' in source
+    assert '"formal_generator_training_authorized": False' in source
+    assert '"waveform_optimizer_steps": 0' in source
+    assert '"generator_optimizer_steps": 0' in source
+    assert "GO_INTEGRATE_RAW_CC_V3_INTO_FULL_ROUTE_C_SCREEN" in source
+    assert "MINIMUM_RELATIVE_CALIBRATION_IMPROVEMENT" in launcher
+    assert "CONFIRM_SLURM_SUBMIT" in launcher
+    assert "Refusing to run from a dirty source tree" in launcher
+    assert "--expected-internal-valid-rows 2134" in launcher
+
+
 def test_avqi_expansion_is_training_only_and_hash_locked() -> None:
     prepare = read("scripts/prepare_avqi_component_expanded_data.py")
     score = read("scripts/build_avqi_component_expanded_label_bank.py")
