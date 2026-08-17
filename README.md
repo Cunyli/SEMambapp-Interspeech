@@ -123,21 +123,45 @@ speakers. Exact Praat, rather than the surrogate, made the final decision:
 
 | Exact result on 12 final CS/SV cases | Outcome |
 |---|---|
-| LTAS tilt | improved in `12/12`; median normalized gap reduction `0.123` — pass |
-| HNR | improved in `10/12`; median normalized gap reduction `0.009 < 0.02` — fail |
+| LTAS tilt | improved in `12/12`; median normalized gap reduction `0.1244` — pass |
+| HNR | improved in `11/12`; median normalized gap reduction `0.0127 < 0.02` — fail |
 | Waveform safety | worst residual about `-48.1 dB`, cosine `>0.99999`, no clipping, no median degradation of the other four terms — pass |
 
-**Plain conclusion:** the independent direct estimator is currently more
-reliable than the tested dual head or neural frozen predictors. Its LTAS-tilt
-gradient also survives exact Praat verification, but HNR moves too weakly at a
-safe perturbation level. The present decision is therefore
+The HNR formula was then checked once more without reopening that final panel.
+A fixed Praat-timed raw cross-correlation candidate used a one-period window,
+a quarter-period step, and the same 75--600 Hz, 0.03 silence, and 0.45 voicing
+settings as the exact metric branch. Selection used only the 26-speaker
+calibration split; evaluation used the 26-speaker holdout and a separate
+12-speaker VCTK panel. Of 2,148 internal CS/SV task rows, 2,134 had exact
+labels and 2,106 also had a valid same-view clean pair.
+
+| Frozen HNR formula check | Linear-AC hard v2 | Raw-CC hard v3 | Gate result |
+|---|---:|---:|---|
+| Calibration normalized MSE | `0.04598` | `0.05485` | v3 is `19.3%` worse; v2 selected |
+| Holdout Spearman / normalized MAE | `0.9779 / 0.1409` | `0.9150 / 0.2022` | both pass, v2 is stronger |
+| Holdout paired-delta Spearman | `0.8406` | `0.7391` | both pass, v2 is stronger |
+| VCTK condition calibration slopes | `0.855--1.019` | `0.640--0.707` | all four v3 condition slices fail |
+| Input gradient | finite and nonzero | finite and nonzero | pass for both; not sufficient for promotion |
+
+The raw-CC candidate is therefore not integrated into the full Route C screen,
+and no second waveform pilot is authorized. This negative comparison is about
+the fixed v3 approximation, not about Praat's exact raw-CC implementation.
+
+**Plain conclusion:** Route C currently provides one exact-verified training
+signal: LTAS tilt. The v2 HNR proxy predicts exact HNR accurately, but its safe
+waveform gradient still moves exact HNR too weakly; the closer-timed raw-CC v3
+proxy is less accurate and less calibrated. One component is not enough to
+authorize pathology AVQI-T2 training. The present decision remains
 `NO_GO_AVQI_T2_TRAINING`: generator optimizer steps remain zero. This is a
-bounded negative result for the current loss, not a claim that dual-head or
+bounded negative result for the current formulas, not a claim that dual-head or
 independent-predictor research can never work.
 
-The locked receipts are on Triton under
-`runs/avqi_component_direct_praat_v2_voicedmask_consensus_20260814_01/` and
-`runs/avqi_direct_waveform_opt_balanced_hnr_tilt_final_20260814_01/`.
+The current locked receipts are on Triton under
+`runs/avqi_component_direct_c_v5_multiseed_20260817_01/`,
+`runs/avqi_component_direct_c_v5_waveform_pilot_offset4_20260817_02/`, and
+`runs/avqi_direct_hnr_raw_cc_v3_diagnostic_20260817_02/`. The HNR formula
+report is SHA256
+`626b90bc85a83cdab97669ee7f22e503b81ed1fe2dc107c53cb62bd9d38eca94`.
 
 ## Repository and retained artifacts
 
