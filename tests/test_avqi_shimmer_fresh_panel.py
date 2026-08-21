@@ -212,3 +212,12 @@ def test_launcher_keeps_generator_frozen_and_binds_exact_sources() -> None:
     assert "train" not in "\n".join(
         line for line in source.splitlines() if line.lstrip().startswith("python ")
     )
+
+
+def test_repository_test_runner_executes_the_verified_source_worktree() -> None:
+    source = (
+        REPO_ROOT / "scripts" / "run_avqi_component_v4_tests.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'cd "$SOURCE_ROOT"' in source
+    assert 'cd "$ROOT_DIR"' not in source

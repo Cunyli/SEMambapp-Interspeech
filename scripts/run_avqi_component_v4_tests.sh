@@ -75,7 +75,7 @@ module load triton/2025.1-gcc
 module load gcc/13.3.0
 eval "$(conda shell.bash hook)"
 conda activate semambapp
-cd "$ROOT_DIR"
+cd "$SOURCE_ROOT"
 mkdir -p "$OUTPUT_DIR"
 PYTEST_LOG="$OUTPUT_DIR/pytest.log"
 python -m pytest -q "${TEST_FILES[@]}" 2>&1 | tee "$PYTEST_LOG"
