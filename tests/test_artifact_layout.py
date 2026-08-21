@@ -43,6 +43,12 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"direct_praat_hard_shimmer_raw_cc_surrogate_v4"' in source
     assert '"direct_praat_hard_shimmer_raw_cc_surrogate_v4"' in direct_source
     assert '"direct_praat_hard_shimmer_raw_cc_surrogate_v4"' in multiseed
+    assert '"direct_praat_hard_shimmer_pulse_chain_v5"' in source
+    assert '"direct_praat_hard_shimmer_pulse_chain_v5"' in direct_source
+    assert '"direct_praat_hard_shimmer_pulse_chain_v5"' in multiseed
+    assert '"direct_praat_hard_shimmer_pulse_path_v6"' in source
+    assert '"direct_praat_hard_shimmer_pulse_path_v6"' in direct_source
+    assert '"direct_praat_hard_shimmer_pulse_path_v6"' in multiseed
     assert '"shared_dual_head": {"status": "SKIPPED_USER_SCOPE"}' in direct_source
     assert (
         '"frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"}'
@@ -95,6 +101,19 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"generator_optimizer_steps": 0' in multiseed
     assert '"source_report_sha256"' in multiseed
     assert "refusing to overwrite output" in multiseed
+
+
+def test_avqi_shimmer_internal_pilot_is_exact_rescored_and_fail_closed() -> None:
+    source = read("scripts/evaluate_avqi_shimmer_internal_pilot.py")
+    assert '"PASS_DEPLOYABLE_PATH_HISTORICAL_PILOT_ONLY"' in source
+    assert '"authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"' in source
+    assert '"promotion_authorized": False' in source
+    assert '"generator_optimizer_steps": 0' in source
+    assert '"exact_pulses_supplied_to_estimator": False' in source
+    assert '"exact_after_used_during_alpha_selection": False' in source
+    assert '"alpha_selection_uses_only_internal_proxy": True' in source
+    assert "gates = {split: split_gate" in source
+    assert 'for split in ("calibration", "holdout")' in source
 
 
 def test_route_c_hnr_formula_diagnostic_is_nonfinal_and_read_only() -> None:
@@ -195,8 +214,10 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert 'ROUTE_SCOPE" != "direct_only"' in confirm
     assert '.routes.direct_differentiable_estimator.selected_architecture' in confirm
     assert "direct_praat_hard_shimmer_raw_cc_surrogate_v4" in confirm
+    assert "direct_praat_hard_shimmer_pulse_chain_v5" in confirm
+    assert "direct_praat_hard_shimmer_pulse_path_v6" in confirm
     assert 'full:pretrained_full_tfgrid' in confirm
-    assert 'CONFIRM_RUN_STEM="avqi_component_direct_c_v5_confirm"' in confirm
+    assert 'CONFIRM_RUN_STEM="avqi_component_direct_c_v6_confirm"' in confirm
     assert 'SHARED_CANDIDATES="$(jq -er' in confirm
     assert 'WAVEFORM_ARCHITECTURES="$(jq -er' in confirm
     assert 'contract.source_commit' in confirm
@@ -664,64 +685,69 @@ def test_avqi_multiseed_accepts_route_c_only_screen() -> None:
     )
 
 
-def test_avqi_multiseed_accepts_calibration_selected_shimmer_surrogate_screen() -> None:
+def test_avqi_multiseed_accepts_calibration_selected_shimmer_formula_screens() -> None:
     namespace = runpy.run_path(
         REPO_ROOT / "scripts" / "summarize_avqi_component_multiseed.py"
     )
-    architectures = [
-        "direct_praat_hard_v2",
+    for shimmer_architecture in (
         "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
-    ]
-    screen = {
-        "contract": {
-            "route_scope": "direct_only",
+        "direct_praat_hard_shimmer_pulse_chain_v5",
+        "direct_praat_hard_shimmer_pulse_path_v6",
+    ):
+        architectures = [
+            "direct_praat_hard_v2",
+            shimmer_architecture,
+        ]
+        screen = {
+            "contract": {
+                "route_scope": "direct_only",
+                "routes": {
+                    "shared_dual_head": {
+                        "status": "SKIPPED_USER_SCOPE",
+                        "candidates": [],
+                    },
+                    "frozen_independent_predictor": {
+                        "status": "SKIPPED_USER_SCOPE",
+                        "architectures": [],
+                    },
+                    "direct_differentiable_estimator": {
+                        "architectures": architectures,
+                    },
+                },
+                "direct_formula_budget": {
+                    "trainable_parameters": 0,
+                    "optimizer_steps": 0,
+                    "maximum_optimizer_steps": 0,
+                },
+                "calibration": {"holdout_used_for_fit_or_selection": False},
+            },
             "routes": {
-                "shared_dual_head": {
-                    "status": "SKIPPED_USER_SCOPE",
-                    "candidates": [],
-                },
-                "frozen_independent_predictor": {
-                    "status": "SKIPPED_USER_SCOPE",
-                    "architectures": [],
-                },
+                "shared_dual_head": {"status": "SKIPPED_USER_SCOPE"},
+                "frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"},
                 "direct_differentiable_estimator": {
-                    "architectures": architectures,
-                },
-            },
-            "direct_formula_budget": {
-                "trainable_parameters": 0,
-                "optimizer_steps": 0,
-                "maximum_optimizer_steps": 0,
-            },
-            "calibration": {"holdout_used_for_fit_or_selection": False},
-        },
-        "routes": {
-            "shared_dual_head": {"status": "SKIPPED_USER_SCOPE"},
-            "frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"},
-            "direct_differentiable_estimator": {
-                "selected_architecture": (
-                    "direct_praat_hard_shimmer_raw_cc_surrogate_v4"
-                ),
-                "selection_rule": "lowest calibration loss before holdout evaluation",
-                "training": {
-                    "direct_praat_hard_v2": {
-                        "best_calibration_loss": 0.06,
-                        "optimizer_steps": 0,
-                        "trainable_parameter_count": 0,
-                    },
-                    "direct_praat_hard_shimmer_raw_cc_surrogate_v4": {
-                        "best_calibration_loss": 0.05,
-                        "optimizer_steps": 0,
-                        "trainable_parameter_count": 0,
+                    "selected_architecture": shimmer_architecture,
+                    "selection_rule": (
+                        "lowest calibration loss before holdout evaluation"
+                    ),
+                    "training": {
+                        "direct_praat_hard_v2": {
+                            "best_calibration_loss": 0.06,
+                            "optimizer_steps": 0,
+                            "trainable_parameter_count": 0,
+                        },
+                        shimmer_architecture: {
+                            "best_calibration_loss": 0.05,
+                            "optimizer_steps": 0,
+                            "trainable_parameter_count": 0,
+                        },
                     },
                 },
             },
-        },
-    }
-    namespace["validate_screen_contract"](
-        screen,
-        Path("route-c-shimmer-surrogate-screen.json"),
-    )
+        }
+        namespace["validate_screen_contract"](
+            screen,
+            Path(f"route-c-{shimmer_architecture}-screen.json"),
+        )
 
 
 def test_avqi_multiseed_route_c_authorizes_only_bounded_waveform_pilot() -> None:

@@ -18,7 +18,7 @@ case "$CONFIRM_KIND" in
   direct)
     DEFAULT_DATA_RUN_ROOT="$ROOT_DIR/runs/avqi_component_direct_c_v5_data_20260816_02"
     DEFAULT_SCREEN_RUN_ROOT="$ROOT_DIR/runs/avqi_component_direct_c_v5_screen_20260817_01"
-    CONFIRM_RUN_STEM="avqi_component_direct_c_v5_confirm"
+    CONFIRM_RUN_STEM="avqi_component_direct_c_v6_confirm"
     CONFIRM_JOB_PREFIX="avqi-v5-c"
     ;;
   full)
@@ -149,7 +149,7 @@ if [[ "$CONFIRM_KIND" == "direct" ]]; then
   PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_component_direct_c.py"
   MAX_OPTIMIZER_STEPS=0
   case "$WAVEFORM_ARCHITECTURES" in
-    direct_praat_hard_v2|direct_praat_hard_shimmer_rms_v3|direct_praat_hard_shimmer_raw_cc_surrogate_v4) ;;
+    direct_praat_hard_v2|direct_praat_hard_shimmer_rms_v3|direct_praat_hard_shimmer_raw_cc_surrogate_v4|direct_praat_hard_shimmer_pulse_chain_v5|direct_praat_hard_shimmer_pulse_path_v6) ;;
     *)
       echo "Unexpected locked Route C estimator: $WAVEFORM_ARCHITECTURES" >&2
       exit 2

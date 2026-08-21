@@ -64,6 +64,8 @@ DIRECT_ARCHITECTURES = (
     "direct_praat_hard_v2",
     "direct_praat_hard_shimmer_rms_v3",
     "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
+    "direct_praat_hard_shimmer_pulse_chain_v5",
+    "direct_praat_hard_shimmer_pulse_path_v6",
 )
 ROUTE_KEY = "direct_differentiable_estimator"
 

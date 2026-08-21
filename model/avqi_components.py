@@ -1174,7 +1174,16 @@ class PraatDifferentiableAVQIComponentEstimator(
     legacy analytic-envelope sample with Praat-like period-scaled Hann RMS and
     soft period/amplitude validity gates. The
     ``hann_rms_raw_cc_surrogate_v4`` branch keeps the v3 value in the forward
-    pass but uses a raw-CC paired-delta surrogate in the backward pass.
+    pass but uses a raw-CC paired-delta surrogate in the backward pass. The
+    ``praat_pulse_chain_v5`` branch uses AVQI's independent 50--400 Hz pitch
+    range, a hard recursive cross-correlation pulse chain, Praat's asymmetric
+    Hann-RMS amplitude tier, and hard period/amplitude screening. Pulse timing
+    decisions are detached while the amplitude measurements remain
+    differentiable with respect to the waveform. The
+    ``praat_pulse_path_v6`` branch keeps the full set of strong raw-AC peaks
+    plus an explicit unvoiced candidate, then applies Praat's candidate-
+    strength, octave, octave-jump, and voiced/unvoiced path costs; v5 remains
+    frozen for direct comparison.
     ``peak_mode="soft"`` gives a smooth
     expected peak, while ``peak_mode="hard"`` uses PyTorch's
     piecewise-differentiable maximum. Neither mode has trainable neural
@@ -1205,6 +1214,8 @@ class PraatDifferentiableAVQIComponentEstimator(
             "analytic_envelope_v2",
             "hann_rms_v3",
             "hann_rms_raw_cc_surrogate_v4",
+            "praat_pulse_chain_v5",
+            "praat_pulse_path_v6",
         }:
             raise ValueError(f"unsupported shimmer mode: {shimmer_mode}")
         if cpps_frame_length <= 1 or cpps_hop_length <= 0:
@@ -1796,6 +1807,741 @@ class PraatDifferentiableAVQIComponentEstimator(
         shimmer_db = self._weighted_mean(shimmer_db_frames, pair_weight)
         return shimmer_percent, shimmer_db
 
+    def _shimmer_pitch_contour(
+        self,
+        prepared: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        """Return a hard AVQI-shimmer pitch contour for pulse placement.
+
+        ``To PointProcess (periodic, cc)`` first calls Praat's default raw-AC
+        pitch analysis. At a 50 Hz floor that means a three-period Hann
+        window and a 15 ms step. This intentionally does not reuse the
+        75--600 Hz HNR contour.
+        """
+        pitch_floor = 50.0
+        pitch_ceiling = 400.0
+        periods_per_window = 3.0
+        frame_length = int(
+            math.floor(periods_per_window * self.sample_rate / pitch_floor)
+        )
+        frame_length = max(4, frame_length // 2 * 2)
+        hop_length = max(
+            1,
+            int(round(periods_per_window * self.sample_rate / pitch_floor / 4.0)),
+        )
+        if prepared.numel() < frame_length:
+            prepared = F.pad(prepared, (0, frame_length - prepared.numel()))
+        frames = prepared.unfold(0, frame_length, hop_length)
+        centered = frames - frames.mean(dim=-1, keepdim=True)
+        sample_index = torch.arange(
+            1,
+            frame_length + 1,
+            device=prepared.device,
+            dtype=prepared.dtype,
+        )
+        window = 0.5 - 0.5 * torch.cos(
+            2.0 * math.pi * sample_index / (frame_length + 1.0)
+        )
+        windowed = centered * window
+        fft_size = 1 << (2 * frame_length - 1).bit_length()
+        spectrum = torch.fft.rfft(windowed, n=fft_size, dim=-1)
+        autocorrelation = torch.fft.irfft(
+            spectrum.abs().square(),
+            n=fft_size,
+            dim=-1,
+        )[:, :frame_length]
+        window_spectrum = torch.fft.rfft(window, n=fft_size)
+        window_autocorrelation = torch.fft.irfft(
+            window_spectrum.abs().square(),
+            n=fft_size,
+        )[:frame_length]
+        window_autocorrelation = (
+            window_autocorrelation / window_autocorrelation[0].clamp_min(1e-10)
+        )
+        normalized = autocorrelation / (
+            autocorrelation[:, :1].clamp_min(1e-10)
+            * window_autocorrelation.unsqueeze(0).clamp_min(1e-4)
+        )
+        normalized = normalized.clamp(-0.9999, 0.9999)
+
+        lag_min = max(2, int(math.floor(self.sample_rate / pitch_ceiling)))
+        lag_max = min(
+            frame_length - 2,
+            int(math.floor(frame_length / periods_per_window)) + 2,
+        )
+        candidate_correlation = normalized[:, lag_min : lag_max + 1]
+        candidate_lags = torch.arange(
+            lag_min,
+            lag_max + 1,
+            device=prepared.device,
+            dtype=prepared.dtype,
+        )
+        local_maximum = torch.zeros_like(candidate_correlation, dtype=torch.bool)
+        local_maximum[:, 1:-1] = (
+            (candidate_correlation[:, 1:-1] > candidate_correlation[:, :-2])
+            & (candidate_correlation[:, 1:-1] >= candidate_correlation[:, 2:])
+            & (candidate_correlation[:, 1:-1] > 0.225)
+        )
+        centers = (
+            torch.arange(
+                frames.shape[0],
+                device=prepared.device,
+                dtype=prepared.dtype,
+            )
+            * hop_length
+            + frame_length / 2.0
+            - 0.5
+        )
+        if self.shimmer_mode == "praat_pulse_path_v6":
+            periods, voiced = self._shimmer_praat_candidate_path(
+                prepared=prepared,
+                windowed_frames=windowed,
+                candidate_correlation=candidate_correlation,
+                candidate_lags=candidate_lags,
+                local_maximum=local_maximum,
+                hop_length=hop_length,
+            )
+            return centers.detach(), periods, voiced, hop_length
+
+        candidate_frequency = self.sample_rate / candidate_lags
+        octave_adjusted = candidate_correlation - 0.01 * torch.log2(
+            pitch_floor / candidate_frequency
+        )
+        score = octave_adjusted.masked_fill(~local_maximum, -torch.inf)
+        best_score, best_index = score.max(dim=-1)
+        fallback_index = candidate_correlation.argmax(dim=-1)
+        has_local_maximum = torch.isfinite(best_score)
+        best_index = torch.where(has_local_maximum, best_index, fallback_index)
+        peak_index = best_index + lag_min
+        peak = normalized.gather(1, peak_index.unsqueeze(-1)).squeeze(-1)
+        left = normalized.gather(1, (peak_index - 1).unsqueeze(-1)).squeeze(-1)
+        right = normalized.gather(1, (peak_index + 1).unsqueeze(-1)).squeeze(-1)
+        curvature = (peak - left) + (peak - right)
+        offset = torch.where(
+            curvature.abs() > 1e-8,
+            0.5 * (right - left) / curvature,
+            torch.zeros_like(curvature),
+        ).clamp(-1.0, 1.0)
+        period = peak_index.to(dtype=prepared.dtype) + offset
+        periodicity = peak + 0.5 * (0.5 * (right - left)).square() / (
+            curvature.abs().clamp_min(1e-8)
+        )
+        global_peak = prepared.abs().amax().clamp_min(1e-8)
+        local_peak = centered.abs().amax(dim=-1)
+        voiced = (
+            has_local_maximum
+            & (periodicity >= 0.45)
+            & (local_peak / global_peak >= 0.03)
+        )
+        return centers.detach(), period.detach(), voiced.detach(), hop_length
+
+    def _shimmer_praat_candidate_path(
+        self,
+        *,
+        prepared: torch.Tensor,
+        windowed_frames: torch.Tensor,
+        candidate_correlation: torch.Tensor,
+        candidate_lags: torch.Tensor,
+        local_maximum: torch.Tensor,
+        hop_length: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Select a detached raw-AC contour with Praat's path score.
+
+        The topology is deliberately non-differentiable.  It is used only to
+        place pulses; live asymmetric-Hann RMS amplitudes supply the waveform
+        gradient after the path has been selected.
+        """
+        if candidate_correlation.ndim != 2:
+            raise ValueError("pitch candidates must be a frame-by-lag matrix")
+        if local_maximum.shape != candidate_correlation.shape:
+            raise ValueError("pitch candidate mask must match correlations")
+
+        pitch_floor = 50.0
+        pitch_ceiling = 400.0
+        voicing_threshold = 0.45
+        silence_threshold = 0.03
+        octave_cost = 0.01
+        octave_jump_cost = 0.35
+        voiced_unvoiced_cost = 0.14
+        max_voiced_candidates = 14
+
+        peak = candidate_correlation
+        left = torch.cat((peak[:, :1], peak[:, :-1]), dim=-1)
+        right = torch.cat((peak[:, 1:], peak[:, -1:]), dim=-1)
+        derivative = 0.5 * (right - left)
+        curvature = (peak - left) + (peak - right)
+        offset = torch.where(
+            curvature > 1e-8,
+            derivative / curvature.clamp_min(1e-8),
+            torch.zeros_like(curvature),
+        ).clamp(-1.0, 1.0)
+        refined_lag = candidate_lags.unsqueeze(0) + offset
+        refined_frequency = self.sample_rate / refined_lag.clamp_min(1.0)
+        refined_strength = peak + 0.5 * derivative.square() / curvature.clamp_min(
+            1e-8
+        )
+        refined_strength = torch.where(
+            refined_strength > 1.0,
+            refined_strength.reciprocal(),
+            refined_strength,
+        )
+
+        retention_score = refined_strength - octave_cost * torch.log2(
+            pitch_floor / refined_frequency
+        )
+        retention_score = retention_score.masked_fill(~local_maximum, -torch.inf)
+        number_to_keep = min(max_voiced_candidates, retention_score.shape[-1])
+        kept_score, kept_index = retention_score.topk(number_to_keep, dim=-1)
+        kept_valid = torch.isfinite(kept_score)
+        kept_frequency = refined_frequency.gather(1, kept_index)
+        kept_strength = refined_strength.gather(1, kept_index)
+
+        frame_count = candidate_correlation.shape[0]
+        state_count = number_to_keep + 1
+        frequencies = prepared.new_zeros((frame_count, state_count))
+        strengths = prepared.new_zeros((frame_count, state_count))
+        valid = torch.zeros(
+            (frame_count, state_count),
+            device=prepared.device,
+            dtype=torch.bool,
+        )
+        valid[:, 0] = True
+        frequencies[:, 1:] = kept_frequency
+        strengths[:, 1:] = kept_strength
+        valid[:, 1:] = kept_valid
+
+        half_window = windowed_frames.shape[-1] // 2
+        half_longest_period = max(
+            1,
+            int(round(0.5 * self.sample_rate / pitch_floor)),
+        )
+        intensity_start = max(0, half_window - half_longest_period)
+        intensity_end = min(
+            windowed_frames.shape[-1],
+            half_window + half_longest_period,
+        )
+        local_peak = windowed_frames[
+            :, intensity_start:intensity_end
+        ].abs().amax(dim=-1)
+        global_peak = (prepared - prepared.mean()).abs().amax().clamp_min(1e-10)
+        intensity = (local_peak / global_peak).clamp_max(1.0)
+        unvoiced_strength = voicing_threshold + torch.clamp_min(
+            2.0
+            - intensity
+            / (silence_threshold / (1.0 + voicing_threshold)),
+            0.0,
+        )
+
+        emission = strengths - octave_cost * torch.log2(
+            pitch_ceiling / frequencies.clamp_min(1e-10)
+        )
+        emission[:, 0] = unvoiced_strength
+        emission = emission.masked_fill(~valid, -torch.inf)
+
+        time_step_correction = 0.01 / (hop_length / self.sample_rate)
+        octave_jump_cost *= time_step_correction
+        voiced_unvoiced_cost *= time_step_correction
+        delta = emission[0].clone()
+        backpointers: list[torch.Tensor] = []
+        for frame_index in range(1, frame_count):
+            previous_frequency = frequencies[frame_index - 1]
+            current_frequency = frequencies[frame_index]
+            previous_voiced = torch.arange(
+                state_count,
+                device=prepared.device,
+            ) != 0
+            current_voiced = previous_voiced
+            both_voiced = current_voiced.unsqueeze(-1) & previous_voiced.unsqueeze(0)
+            changed_voicing = current_voiced.unsqueeze(-1) ^ previous_voiced.unsqueeze(0)
+            safe_ratio = current_frequency.unsqueeze(-1).clamp_min(1e-10) / (
+                previous_frequency.unsqueeze(0).clamp_min(1e-10)
+            )
+            transition_cost = torch.zeros_like(safe_ratio)
+            transition_cost = torch.where(
+                both_voiced,
+                octave_jump_cost * torch.log2(safe_ratio).abs(),
+                transition_cost,
+            )
+            transition_cost = torch.where(
+                changed_voicing,
+                torch.full_like(transition_cost, voiced_unvoiced_cost),
+                transition_cost,
+            )
+            path_score = delta.unsqueeze(0) - transition_cost
+            best_previous_score, best_previous = path_score.max(dim=-1)
+            delta = emission[frame_index] + best_previous_score
+            backpointers.append(best_previous)
+
+        state = int(delta.argmax().item())
+        states = [state]
+        for backpointer in reversed(backpointers):
+            state = int(backpointer[state].item())
+            states.append(state)
+        states.reverse()
+        selected_state = torch.tensor(
+            states,
+            device=prepared.device,
+            dtype=torch.long,
+        )
+        selected_frequency = frequencies.gather(
+            1,
+            selected_state.unsqueeze(-1),
+        ).squeeze(-1)
+        voiced = selected_state != 0
+        periods = torch.where(
+            voiced,
+            self.sample_rate / selected_frequency.clamp_min(1e-10),
+            torch.full_like(selected_frequency, self.sample_rate / pitch_floor),
+        )
+        return periods.detach(), voiced.detach()
+
+    @staticmethod
+    def _interpolate_hard_period(
+        position: float,
+        centers: torch.Tensor,
+        periods: torch.Tensor,
+        first: int,
+        last: int,
+    ) -> float:
+        interval_centers = centers[first : last + 1]
+        interval_periods = periods[first : last + 1]
+        if interval_centers.numel() == 1:
+            return float(interval_periods[0])
+        position_tensor = interval_centers.new_tensor(position)
+        right = int(torch.searchsorted(interval_centers, position_tensor).item())
+        right = min(max(right, 1), interval_centers.numel() - 1)
+        left = right - 1
+        left_center = float(interval_centers[left])
+        right_center = float(interval_centers[right])
+        fraction = (position - left_center) / max(right_center - left_center, 1e-8)
+        fraction = min(max(fraction, 0.0), 1.0)
+        left_frequency = 1.0 / float(interval_periods[left])
+        right_frequency = 1.0 / float(interval_periods[right])
+        frequency = left_frequency * (1.0 - fraction) + right_frequency * fraction
+        return 1.0 / max(frequency, 1e-12)
+
+    @staticmethod
+    def _hard_absolute_extremum(
+        waveform: torch.Tensor,
+        left: float,
+        right: float,
+    ) -> float:
+        lower = max(0, int(math.floor(left)))
+        upper = min(waveform.numel() - 1, int(math.ceil(right)))
+        if upper < lower:
+            return 0.5 * (left + right)
+        values = waveform[lower : upper + 1]
+        relative_minimum = int(values.argmin().item())
+        relative_maximum = int(values.argmax().item())
+        if abs(float(values[relative_minimum])) > abs(
+            float(values[relative_maximum])
+        ):
+            relative_index = relative_minimum
+        else:
+            relative_index = relative_maximum
+        index = lower + relative_index
+        if index <= 0 or index >= waveform.numel() - 1:
+            return float(index)
+        value_left = float(waveform[index - 1])
+        value_mid = float(waveform[index])
+        value_right = float(waveform[index + 1])
+        denominator = 2.0 * value_mid - value_left - value_right
+        if abs(denominator) <= 1e-12:
+            return float(index)
+        offset = 0.5 * (value_right - value_left) / denominator
+        return float(index) + min(max(offset, -1.0), 1.0)
+
+    @staticmethod
+    def _hard_maximum_correlation(
+        waveform: torch.Tensor,
+        reference_center: float,
+        window_length: float,
+        search_left: float,
+        search_right: float,
+    ) -> tuple[float, float, float]:
+        """Locate the next pulse with Praat-like normalized correlation."""
+        half_window = 0.5 * window_length
+        reference_left = int(math.floor(reference_center - half_window + 0.5))
+        reference_right = int(math.floor(reference_center + half_window + 0.5))
+        candidate_left_min = int(math.floor(search_left - half_window))
+        candidate_left_max = int(math.ceil(search_right - half_window))
+        if candidate_left_max < candidate_left_min:
+            geometric_distance = math.sqrt(
+                abs(
+                    (search_left - reference_center)
+                    * (search_right - reference_center)
+                )
+            )
+            direction = -1.0 if search_right < reference_center else 1.0
+            return -1.0, reference_center + direction * geometric_distance, 0.0
+
+        offsets = torch.arange(
+            reference_right - reference_left + 1,
+            device=waveform.device,
+        )
+        reference_indices = reference_left + offsets
+        candidate_left = torch.arange(
+            candidate_left_min,
+            candidate_left_max + 1,
+            device=waveform.device,
+        )
+        candidate_indices = candidate_left.unsqueeze(-1) + offsets.unsqueeze(0)
+        reference_valid = (reference_indices >= 0) & (
+            reference_indices < waveform.numel()
+        )
+        candidate_valid = (candidate_indices >= 0) & (
+            candidate_indices < waveform.numel()
+        )
+        valid = candidate_valid & reference_valid.unsqueeze(0)
+        bounded_reference = reference_indices.clamp(0, waveform.numel() - 1)
+        bounded_candidate = candidate_indices.clamp(0, waveform.numel() - 1)
+        reference = waveform.index_select(0, bounded_reference)
+        candidates = waveform[bounded_candidate]
+        valid_float = valid.to(dtype=waveform.dtype)
+        product = (candidates * reference.unsqueeze(0) * valid_float).sum(dim=-1)
+        reference_energy = (
+            reference.square().unsqueeze(0) * valid_float
+        ).sum(dim=-1)
+        candidate_energy = (candidates.square() * valid_float).sum(dim=-1)
+        denominator = (reference_energy * candidate_energy).clamp_min(0.0).sqrt()
+        correlation = torch.where(
+            denominator > 0.0,
+            product / denominator.clamp_min(1e-12),
+            torch.zeros_like(product),
+        )
+        local_peak = (candidates.abs() * valid_float).amax(dim=-1)
+
+        local_maximum = torch.zeros_like(correlation, dtype=torch.bool)
+        if correlation.numel() >= 2:
+            local_maximum[0] = (
+                (correlation[0] >= 0.0) & (correlation[0] >= correlation[1])
+            )
+        if correlation.numel() >= 3:
+            local_maximum[1:-1] = (
+                (correlation[1:-1] >= correlation[:-2])
+                & (correlation[1:-1] >= correlation[2:])
+            )
+        score = correlation.masked_fill(~local_maximum, -torch.inf)
+        if not bool(torch.isfinite(score).any()):
+            geometric_distance = math.sqrt(
+                abs(
+                    (search_left - reference_center)
+                    * (search_right - reference_center)
+                )
+            )
+            direction = -1.0 if search_right < reference_center else 1.0
+            return -1.0, reference_center + direction * geometric_distance, 0.0
+        best = int(score.argmax().item())
+
+        best_shift = float(candidate_left[best]) - reference_left
+        interpolated_center = reference_center + best_shift
+        interpolated_correlation = float(correlation[best])
+        if 0 < best < correlation.numel() - 1:
+            left = float(correlation[best - 1])
+            middle = float(correlation[best])
+            right = float(correlation[best + 1])
+            curvature = (middle - left) + (middle - right)
+            if curvature != 0.0:
+                derivative = 0.5 * (right - left)
+                offset = derivative / curvature
+                candidate = interpolated_center + offset
+                if search_left <= candidate <= search_right:
+                    interpolated_center = candidate
+                    interpolated_correlation = (
+                        middle + 0.5 * derivative * derivative / curvature
+                    )
+                else:
+                    geometric_distance = math.sqrt(
+                        abs(
+                            (search_left - reference_center)
+                            * (search_right - reference_center)
+                        )
+                    )
+                    direction = -1.0 if search_right < reference_center else 1.0
+                    interpolated_center = (
+                        reference_center + direction * geometric_distance
+                    )
+        return (
+            interpolated_correlation,
+            interpolated_center,
+            float(local_peak[best]),
+        )
+
+    @torch.no_grad()
+    def _praat_shimmer_pulse_chain(self, prepared: torch.Tensor) -> torch.Tensor:
+        """Construct a detached recursive pulse chain for AVQI shimmer."""
+        waveform = prepared.detach()
+        centers, periods, voiced, hop_length = self._shimmer_pitch_contour(waveform)
+        if not bool(voiced.any()):
+            return waveform.new_empty(0)
+        voiced_indices = voiced.nonzero(as_tuple=False).flatten().tolist()
+        intervals: list[tuple[int, int]] = []
+        first = voiced_indices[0]
+        last = first
+        for index in voiced_indices[1:]:
+            if index == last + 1:
+                last = index
+            else:
+                intervals.append((first, last))
+                first = last = index
+        intervals.append((first, last))
+
+        pulses: list[float] = []
+        global_peak = float(waveform.abs().amax())
+        added_right = -math.inf
+        minimum_period = self.sample_rate / 400.0
+        for first, last in intervals:
+            left_edge = max(0.0, float(centers[first]) - 0.5 * hop_length)
+            right_edge = min(
+                float(waveform.numel() - 1),
+                float(centers[last]) + 0.5 * hop_length,
+            )
+            middle = 0.5 * (left_edge + right_edge)
+            middle_period = self._interpolate_hard_period(
+                middle,
+                centers,
+                periods,
+                first,
+                last,
+            )
+            anchor = self._hard_absolute_extremum(
+                waveform,
+                middle - 0.5 * middle_period,
+                middle + 0.5 * middle_period,
+            )
+            pulses.append(anchor)
+            iteration_limit = int(
+                math.ceil((right_edge - left_edge) / minimum_period)
+            ) + 4
+
+            current = anchor
+            for _ in range(iteration_limit):
+                period = self._interpolate_hard_period(
+                    current,
+                    centers,
+                    periods,
+                    first,
+                    last,
+                )
+                correlation, candidate, local_peak = self._hard_maximum_correlation(
+                    waveform,
+                    current,
+                    period,
+                    current - 1.25 * period,
+                    current - 0.8 * period,
+                )
+                if correlation == -1.0:
+                    candidate = current - period
+                if candidate >= current - 0.5 * minimum_period:
+                    break
+                if candidate < left_edge:
+                    if (
+                        correlation > 0.7
+                        and local_peak > 0.023333 * global_peak
+                        and candidate - added_right > 0.8 * period
+                    ):
+                        pulses.append(candidate)
+                    break
+                if (
+                    correlation > 0.3
+                    and (local_peak == 0.0 or local_peak > 0.01 * global_peak)
+                    and candidate - added_right > 0.8 * period
+                ):
+                    pulses.append(candidate)
+                current = candidate
+
+            current = anchor
+            for _ in range(iteration_limit):
+                period = self._interpolate_hard_period(
+                    current,
+                    centers,
+                    periods,
+                    first,
+                    last,
+                )
+                correlation, candidate, local_peak = self._hard_maximum_correlation(
+                    waveform,
+                    current,
+                    period,
+                    current + 0.8 * period,
+                    current + 1.25 * period,
+                )
+                if correlation == -1.0:
+                    candidate = current + period
+                if candidate <= current + 0.5 * minimum_period:
+                    break
+                if candidate > right_edge:
+                    if (
+                        correlation > 0.7
+                        and local_peak > 0.023333 * global_peak
+                    ):
+                        pulses.append(candidate)
+                        added_right = candidate
+                    break
+                if correlation > 0.3 and (
+                    local_peak == 0.0 or local_peak > 0.01 * global_peak
+                ):
+                    pulses.append(candidate)
+                    added_right = candidate
+                current = candidate
+
+        ordered = sorted(
+            pulse
+            for pulse in pulses
+            if 0.0 <= pulse <= float(waveform.numel() - 1)
+        )
+        unique: list[float] = []
+        for pulse in ordered:
+            if not unique or pulse - unique[-1] > 1e-3:
+                unique.append(pulse)
+        return waveform.new_tensor(unique)
+
+    def _praat_asymmetric_hann_rms(
+        self,
+        prepared: torch.Tensor,
+        centers: torch.Tensor,
+        left_periods: torch.Tensor,
+        right_periods: torch.Tensor,
+    ) -> torch.Tensor:
+        """Measure live waveform amplitudes at detached Praat pulse timings."""
+        maximum_period = self.sample_rate / 50.0
+        maximum_half_width = int(math.ceil(0.2 * maximum_period))
+        offsets = torch.arange(
+            -maximum_half_width,
+            maximum_half_width + 1,
+            device=prepared.device,
+        )
+        anchor = centers.floor().long()
+        sample_indices = anchor.unsqueeze(-1) + offsets.unsqueeze(0)
+        valid_index = (sample_indices >= 0) & (sample_indices < prepared.numel())
+        bounded_indices = sample_indices.clamp(0, prepared.numel() - 1)
+        relative_position = sample_indices.to(dtype=prepared.dtype) - centers.unsqueeze(
+            -1
+        )
+        left_width = (0.2 * left_periods).clamp_min(1e-8).unsqueeze(-1)
+        right_width = (0.2 * right_periods).clamp_min(1e-8).unsqueeze(-1)
+        width = torch.where(relative_position < 0.0, left_width, right_width)
+        phase = relative_position / width
+        support = valid_index & (phase >= -1.0) & (phase <= 1.0)
+        window = (
+            0.5 + 0.5 * torch.cos(math.pi * phase.clamp(-1.0, 1.0))
+        ) * support.to(dtype=prepared.dtype)
+        samples = prepared[bounded_indices]
+        numerator = (samples * window).square().sum(dim=-1)
+        denominator = window.square().sum(dim=-1).clamp_min(1e-12)
+        return (numerator / denominator).clamp_min(0.0).sqrt()
+
+    def _praat_pulse_chain_shimmer(
+        self,
+        prepared: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute exact-style local shimmer on a detached pulse topology."""
+        pulses = self._praat_shimmer_pulse_chain(prepared)
+        return self._praat_fixed_pulse_shimmer(prepared, pulses)
+
+    def _praat_fixed_pulse_shimmer(
+        self,
+        prepared: torch.Tensor,
+        pulses: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute local shimmer from caller-supplied detached pulse positions."""
+        zero = prepared.sum() * 0.0
+        pulses = pulses.to(device=prepared.device, dtype=prepared.dtype).detach()
+        if pulses.numel() < 3:
+            return zero, zero
+
+        previous_period = pulses[1:-1] - pulses[:-2]
+        following_period = pulses[2:] - pulses[1:-1]
+        minimum_period = 0.0001 * self.sample_rate
+        maximum_period = 0.02 * self.sample_rate
+        period_factor = torch.maximum(
+            previous_period,
+            following_period,
+        ) / torch.minimum(previous_period, following_period).clamp_min(1e-12)
+        valid_tier = (
+            (previous_period >= minimum_period)
+            & (previous_period <= maximum_period)
+            & (following_period >= minimum_period)
+            & (following_period <= maximum_period)
+            & (period_factor <= 1.3)
+        )
+        if not bool(valid_tier.any()):
+            return zero, zero
+        tier_centers = pulses[1:-1][valid_tier]
+        tier_left_periods = previous_period[valid_tier]
+        tier_right_periods = following_period[valid_tier]
+        amplitudes = self._praat_asymmetric_hann_rms(
+            prepared,
+            tier_centers,
+            tier_left_periods,
+            tier_right_periods,
+        )
+        positive = amplitudes.detach() > 0.0
+        tier_centers = tier_centers[positive]
+        amplitudes = amplitudes[positive]
+        if amplitudes.numel() < 2:
+            return zero, zero
+
+        pair_period = tier_centers[1:] - tier_centers[:-1]
+        amplitude_factor = torch.maximum(
+            amplitudes[:-1],
+            amplitudes[1:],
+        ) / torch.minimum(amplitudes[:-1], amplitudes[1:]).clamp_min(1e-12)
+        valid_pair = (
+            (pair_period >= minimum_period)
+            & (pair_period <= maximum_period)
+            & (amplitude_factor.detach() <= 1.6)
+        )
+        if not bool(valid_pair.any()):
+            return zero, zero
+        difference = (amplitudes[1:] - amplitudes[:-1]).abs()[valid_pair]
+        denominator = amplitudes[:-1].mean().clamp_min(1e-12)
+        shimmer_percent = 100.0 * difference.mean() / denominator
+        shimmer_db = (
+            20.0
+            * torch.log10(
+                amplitudes[1:].clamp_min(1e-12)
+                / amplitudes[:-1].clamp_min(1e-12)
+            )
+            .abs()[valid_pair]
+            .mean()
+        )
+        return shimmer_percent, shimmer_db
+
+    def raw_shimmer_from_pulse_positions(
+        self,
+        waveform: torch.Tensor,
+        pulse_positions: torch.Tensor,
+        metric_sample_count: int | None = None,
+    ) -> torch.Tensor:
+        """Return Shimmer %/dB with a frozen externally supplied pulse topology.
+
+        This helper is an isolation diagnostic rather than a promoted estimator:
+        exact Praat can supply detached pulse positions while the amplitude tier
+        remains differentiable with respect to ``waveform``.  For an AVQI SV
+        branch, pass ``metric_sample_count=3 * sample_rate`` so filtering occurs
+        before the final-three-second crop, matching AVQI v03.01 ordering.
+        """
+        if waveform.ndim != 1:
+            raise ValueError(
+                "fixed-pulse shimmer expects a one-dimensional waveform"
+            )
+        if pulse_positions.ndim != 1:
+            raise ValueError("pulse positions must be one-dimensional")
+        if metric_sample_count is not None and metric_sample_count <= 0:
+            raise ValueError("metric sample count must be positive")
+        prepared = self._prepare(waveform)
+        if (
+            metric_sample_count is not None
+            and prepared.numel() > metric_sample_count
+        ):
+            prepared = prepared[-metric_sample_count:]
+        percent, db = self._praat_fixed_pulse_shimmer(
+            prepared,
+            pulse_positions,
+        )
+        return torch.stack((percent, db))
+
     def raw_hnr(self, waveform: torch.Tensor) -> torch.Tensor:
         """Return only the unaligned HNR proxy for formula diagnostics."""
         if waveform.ndim == 1:
@@ -1818,6 +2564,11 @@ class PraatDifferentiableAVQIComponentEstimator(
         )
 
         if self.shimmer_mode in {
+            "praat_pulse_chain_v5",
+            "praat_pulse_path_v6",
+        }:
+            shimmer_percent, shimmer_db = self._praat_pulse_chain_shimmer(prepared)
+        elif self.shimmer_mode in {
             "hann_rms_v3",
             "hann_rms_raw_cc_surrogate_v4",
         }:

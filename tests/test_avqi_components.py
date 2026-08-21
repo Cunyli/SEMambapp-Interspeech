@@ -638,6 +638,238 @@ def test_praat_raw_cc_surrogate_v4_keeps_v3_forward_and_changes_gradient() -> No
     )
 
 
+def test_praat_pulse_chain_v5_uses_avqi_shimmer_pitch_range() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="praat_pulse_chain_v5",
+    )
+
+    for frequency in (55.0, 200.0, 380.0):
+        waveform = torch.sin(2.0 * math.pi * frequency * time)
+        prepared = estimator._prepare(waveform)
+        _, periods, voiced, hop_length = estimator._shimmer_pitch_contour(
+            prepared
+        )
+        pulses = estimator._praat_shimmer_pulse_chain(prepared)
+        expected_period = sample_rate / frequency
+
+        assert hop_length == 240
+        assert int(voiced.sum()) > 0
+        assert math.isclose(
+            float(periods[voiced].median()),
+            expected_period,
+            rel_tol=0.02,
+        )
+        assert pulses.numel() > 10
+        assert torch.all(torch.diff(pulses) > 0.0)
+        assert math.isclose(
+            float(torch.diff(pulses).median()),
+            expected_period,
+            rel_tol=0.03,
+        )
+
+
+def test_praat_pulse_path_v6_uses_candidate_strength_and_unvoiced_state() -> None:
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="praat_pulse_path_v6",
+    )
+    frame_count = 5
+    lag_count = 6
+    correlations = torch.zeros((frame_count, lag_count))
+    correlations[:, 1] = 0.8
+    correlations[2, 1] = 0.3
+    maxima = torch.zeros_like(correlations, dtype=torch.bool)
+    maxima[:, 1] = True
+    windowed = torch.ones((frame_count, 960))
+    prepared = torch.ones(2_000)
+    prepared[800:1_200] = 0.0
+    windowed[2] = 0.0
+    periods, voiced = estimator._shimmer_praat_candidate_path(
+        prepared=prepared,
+        windowed_frames=windowed,
+        candidate_correlation=correlations,
+        candidate_lags=torch.arange(100.0, 106.0),
+        local_maximum=maxima,
+        hop_length=240,
+    )
+    assert voiced.tolist() == [True, True, False, True, True]
+    assert torch.allclose(periods[voiced], torch.full((4,), 101.0))
+
+    waveform = torch.sin(
+        2.0
+        * math.pi
+        * 180.0
+        * torch.arange(8_000, dtype=torch.float32)
+        / 16_000
+    ).requires_grad_()
+    shimmer = estimator.raw_components(waveform)[0, 2:4]
+    gradient = torch.autograd.grad(shimmer.sum(), waveform)[0]
+    assert torch.isfinite(shimmer).all()
+    assert torch.isfinite(gradient).all()
+    assert float(gradient.norm()) > 0.0
+
+
+def test_praat_pulse_path_v6_matches_praat_sample_geometry() -> None:
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="praat_pulse_path_v6",
+    )
+    interpolated_period = estimator._interpolate_hard_period(
+        5.0,
+        torch.tensor([0.0, 10.0]),
+        torch.tensor([100.0, 200.0]),
+        0,
+        1,
+    )
+    assert math.isclose(interpolated_period, 400.0 / 3.0, rel_tol=1e-7)
+
+    tie_waveform = torch.zeros(12)
+    tie_waveform[4] = -2.0
+    tie_waveform[6] = 2.0
+    extremum = estimator._hard_absolute_extremum(tie_waveform, 3.2, 6.2)
+    assert extremum == 6.0
+
+    sample_index = torch.arange(1_000, dtype=torch.float32)
+    periodic = torch.sin(2.0 * math.pi * sample_index / 80.0)
+    correlation, center, _ = estimator._hard_maximum_correlation(
+        periodic,
+        reference_center=400.25,
+        window_length=80.0,
+        search_left=464.25,
+        search_right=500.25,
+    )
+    assert correlation > 0.999
+    assert math.isclose(center, 480.25, abs_tol=1e-4)
+
+
+def test_praat_pulse_chain_v5_asymmetric_hann_rms_matches_reference() -> None:
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="praat_pulse_chain_v5",
+    )
+    waveform = torch.linspace(-1.0, 1.0, 512).square()
+    center = 220.25
+    left_period = 70.0
+    right_period = 105.0
+    actual = estimator._praat_asymmetric_hann_rms(
+        waveform,
+        torch.tensor([center]),
+        torch.tensor([left_period]),
+        torch.tensor([right_period]),
+    )[0]
+
+    weighted_squares = []
+    window_squares = []
+    for index in range(
+        math.ceil(center - 0.2 * left_period),
+        math.floor(center + 0.2 * right_period) + 1,
+    ):
+        width = 0.2 * (left_period if index < center else right_period)
+        phase = (index - center) / width
+        window = 0.5 + 0.5 * math.cos(math.pi * phase)
+        weighted_squares.append(float(waveform[index] * window) ** 2)
+        window_squares.append(window**2)
+    expected = math.sqrt(sum(weighted_squares) / sum(window_squares))
+    assert math.isclose(float(actual), expected, rel_tol=1e-6, abs_tol=1e-7)
+
+
+def test_praat_pulse_chain_v5_shimmer_is_invariant_and_am_sensitive() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
+    carrier = torch.sin(2.0 * math.pi * 180.0 * time)
+    modulated = carrier * (
+        1.0 + 0.2 * torch.sin(2.0 * math.pi * 5.0 * time)
+    )
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="praat_pulse_chain_v5",
+        max_frames=128,
+        cpps_max_frames=256,
+    )
+    steady = estimator.raw_components(carrier)[0, 2:4]
+    baseline = estimator.raw_components(modulated)[0, 2:4]
+    gained = estimator.raw_components(modulated * 0.25)[0, 2:4]
+    sign_reversed = estimator.raw_components(-modulated)[0, 2:4]
+
+    assert torch.all(baseline > steady + torch.tensor([0.1, 0.01]))
+    assert torch.allclose(baseline, gained, atol=2e-3, rtol=2e-3)
+    assert torch.allclose(baseline, sign_reversed, atol=2e-3, rtol=2e-3)
+
+
+def test_praat_pulse_chain_v5_shimmer_has_finite_nonzero_input_gradient() -> None:
+    sample_rate = 16_000
+    time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
+    waveform = (
+        torch.sin(2.0 * math.pi * 180.0 * time)
+        * (1.0 + 0.2 * torch.sin(2.0 * math.pi * 5.0 * time))
+    ).unsqueeze(0).requires_grad_()
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="praat_pulse_chain_v5",
+        max_frames=128,
+        cpps_max_frames=256,
+    )
+    shimmer = estimator.raw_components(waveform)[:, 2:4]
+    gradient = torch.autograd.grad(shimmer.sum(), waveform)[0]
+
+    assert torch.isfinite(shimmer).all()
+    assert torch.all(shimmer > 0.0)
+    assert torch.isfinite(gradient).all()
+    assert float(gradient.norm()) > 0.0
+
+
+def test_praat_fixed_pulse_shimmer_matches_chain_and_preserves_identity() -> None:
+    sample_rate = 16_000
+    time = torch.arange(52_000, dtype=torch.float32) / sample_rate
+    waveform = torch.sin(2.0 * math.pi * 180.0 * time) * (
+        1.0 + 0.2 * torch.sin(2.0 * math.pi * 5.0 * time)
+    )
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="praat_pulse_chain_v5",
+    )
+    prepared = estimator._prepare(waveform)[-3 * sample_rate :]
+    pulses = estimator._praat_shimmer_pulse_chain(prepared)
+    expected = torch.stack(estimator._praat_fixed_pulse_shimmer(prepared, pulses))
+    actual = estimator.raw_shimmer_from_pulse_positions(
+        waveform,
+        pulses,
+        metric_sample_count=3 * sample_rate,
+    )
+
+    assert torch.equal(actual, expected)
+    candidate = waveform.clone().requires_grad_()
+    target = actual.detach()
+    identity_loss = (
+        estimator.raw_shimmer_from_pulse_positions(
+            candidate,
+            pulses,
+            metric_sample_count=3 * sample_rate,
+        )
+        - target
+    ).square().sum()
+    identity_gradient = torch.autograd.grad(identity_loss, candidate)[0]
+    assert torch.equal(identity_gradient, torch.zeros_like(identity_gradient))
+
+    perturbed = waveform.clone()
+    perturbed[-sample_rate:] *= 1.0 + 0.1 * torch.sin(
+        2.0 * math.pi * 4.0 * time[-sample_rate:]
+    )
+    perturbed.requires_grad_()
+    moved = estimator.raw_shimmer_from_pulse_positions(
+        perturbed,
+        pulses,
+        metric_sample_count=3 * sample_rate,
+    )
+    moved_gradient = torch.autograd.grad(moved.sum(), perturbed)[0]
+    assert torch.isfinite(moved).all()
+    assert torch.isfinite(moved_gradient).all()
+    assert float(moved_gradient.norm()) > 0.0
+
+
 def test_praat_raw_cc_v3_hnr_is_invariant_and_noise_sensitive() -> None:
     torch.manual_seed(20260817)
     sample_rate = 16_000
@@ -745,6 +977,8 @@ def test_praat_differentiable_v2_component_gradients_survive_zero_energy_regions
             "analytic_envelope_v2",
             "hann_rms_v3",
             "hann_rms_raw_cc_surrogate_v4",
+            "praat_pulse_chain_v5",
+            "praat_pulse_path_v6",
         ):
             estimator = PraatDifferentiableAVQIComponentEstimator(
                 peak_mode=peak_mode,

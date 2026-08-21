@@ -147,13 +147,37 @@ The raw-CC candidate is therefore not integrated into the full Route C screen,
 and no second waveform pilot is authorized. This negative comparison is about
 the fixed v3 approximation, not about Praat's exact raw-CC implementation.
 
-**Plain conclusion:** Route C currently provides one exact-verified training
-signal: LTAS tilt. The v2 HNR proxy predicts exact HNR accurately, but its safe
-waveform gradient still moves exact HNR too weakly; the closer-timed raw-CC v3
-proxy is less accurate and less calibrated. One component is not enough to
-authorize pathology AVQI-T2 training. The present decision remains
+Shimmer was then isolated on local historical SV waveforms. Exact Praat pulses
+first showed that the asymmetric-Hann amplitude gradient was effective when
+pulse topology was frozen. The deployable v6 formula subsequently reproduced
+Praat's raw-AC candidate-strength/unvoiced path and sample-time correlation
+geometry without receiving exact pulses. A bounded proxy-only line search was
+rescored by exact Praat only after each waveform had been frozen:
+
+| Historical SV-only v6 check | Calibration speakers | Holdout speakers |
+|---|---:|---:|
+| Material Shimmer % improvements | `10/11` | `5/5` |
+| Median normalized Shimmer % gap reduction | `0.06337` | `0.05768` |
+| Median normalized Shimmer dB gap reduction | `0.08365` | `0.05826` |
+| Median internal pulses within 5 samples of exact | `0.9732` | `1.0000` |
+| Identity / safety | unchanged; all gates pass | unchanged; all gates pass |
+
+Two independent PCM24 runs produced identical reports, case metrics, and 28
+waveform hashes. This result is
+`PASS_DEPLOYABLE_PATH_HISTORICAL_PILOT_ONLY`: it authorizes a fresh frozen
+speaker-disjoint CS/SV panel, not generator training. The historical panel has
+only four speakers, is SV-only, and does not provide all-six-component or
+external-speaker evidence.
+
+**Plain conclusion:** LTAS tilt remains the only component that has passed the
+formal final exact panel. Shimmer % is now a credible second Route C candidate:
+its deployable gradient passed both historical calibration and holdout waveform
+gates, but it still needs a fresh CS/SV, all-six-component panel. The v2 HNR
+proxy predicts exact HNR accurately, but its safe waveform gradient still moves
+exact HNR too weakly; the closer-timed raw-CC v3 proxy is less accurate and less
+calibrated. The present decision therefore remains
 `NO_GO_AVQI_T2_TRAINING`: generator optimizer steps remain zero. This is a
-bounded negative result for the current formulas, not a claim that dual-head or
+bounded result for the current formulas, not a claim that dual-head or
 independent-predictor research can never work.
 
 The current locked receipts are on Triton under
@@ -162,6 +186,11 @@ The current locked receipts are on Triton under
 `runs/avqi_direct_hnr_raw_cc_v3_diagnostic_20260817_02/`. The HNR formula
 report is SHA256
 `626b90bc85a83cdab97669ee7f22e503b81ed1fe2dc107c53cb62bd9d38eca94`.
+The deterministic local Shimmer receipts are
+`runs/avqi_shimmer_internal_v6c_historical_20260821_03/` and
+`runs/avqi_shimmer_internal_v6c_historical_20260821_04/`; both report files
+have SHA256
+`a3eee583c799753a52c4c8a298aecabec96c3dfcd9c11080574515539b8e962c`.
 
 ## Repository and retained artifacts
 

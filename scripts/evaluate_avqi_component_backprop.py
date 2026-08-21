@@ -858,6 +858,16 @@ def train_waveform_predictor(
             peak_mode="hard",
             shimmer_mode="hann_rms_raw_cc_surrogate_v4",
         )
+    elif architecture == "direct_praat_hard_shimmer_pulse_chain_v5":
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            shimmer_mode="praat_pulse_chain_v5",
+        )
+    elif architecture == "direct_praat_hard_shimmer_pulse_path_v6":
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            shimmer_mode="praat_pulse_path_v6",
+        )
     else:
         raise ValueError(f"unknown waveform architecture: {architecture}")
     predictor = predictor.to(device)
@@ -2602,6 +2612,8 @@ def main() -> None:
         "direct_praat_hard_v2",
         "direct_praat_hard_shimmer_rms_v3",
         "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
+        "direct_praat_hard_shimmer_pulse_chain_v5",
+        "direct_praat_hard_shimmer_pulse_path_v6",
     }
     if not set(shared_candidates) <= allowed_shared:
         raise ValueError(
@@ -2817,6 +2829,49 @@ def main() -> None:
                     in waveform_architectures
                     else None
                 ),
+                "direct_praat_hard_shimmer_pulse_chain_v5": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "detached hard pulse topology",
+                        "formulas": [
+                            "Praat 34 Hz stop-Hann high-pass",
+                            "overlap-normalized linear autocorrelation HNR",
+                            "periodicity-aware soft voiced mask",
+                            "smoothed robust-baseline CPPS",
+                            "independent 50--400 Hz raw-AC pitch contour",
+                            "recursive cross-correlation pulse chain",
+                            "asymmetric Hann-RMS shimmer with hard screening",
+                            "global LTAS slope and trend tilt",
+                        ],
+                    }
+                    if "direct_praat_hard_shimmer_pulse_chain_v5"
+                    in waveform_architectures
+                    else None
+                ),
+                "direct_praat_hard_shimmer_pulse_path_v6": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "detached hard pulse topology",
+                        "formulas": [
+                            "Praat 34 Hz stop-Hann high-pass",
+                            "overlap-normalized linear autocorrelation HNR",
+                            "periodicity-aware soft voiced mask",
+                            "smoothed robust-baseline CPPS",
+                            "independent 50--400 Hz raw-AC candidate lattice",
+                            "candidate-strength and unvoiced-state pitch path",
+                            "sample-aligned recursive cross-correlation pulses",
+                            "asymmetric Hann-RMS shimmer with hard screening",
+                            "global LTAS slope and trend tilt",
+                        ],
+                    }
+                    if "direct_praat_hard_shimmer_pulse_path_v6"
+                    in waveform_architectures
+                    else None
+                ),
             },
         },
         "calibration": {
@@ -2985,6 +3040,8 @@ def main() -> None:
         "direct_praat_hard_v2",
         "direct_praat_hard_shimmer_rms_v3",
         "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
+        "direct_praat_hard_shimmer_pulse_chain_v5",
+        "direct_praat_hard_shimmer_pulse_path_v6",
     }
     magnitude_architectures = {
         "global_stats",
