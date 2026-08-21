@@ -110,7 +110,7 @@ external panel remained unchanged.
 | Frequency-aware CNN after expansion | best learned predictor, `0.083 -> 0.073`; HNR is strongest, but CS and severe-SV coverage is incomplete | `0/6`, no-go |
 | Pretrained full TF-GridNet | internal CPPS/HNR/tilt pass, but calibration loss is worse (`0.095`) and all six outputs are too sensitive to a 100 ms circular shift | `0/6`, no-go |
 | Shared late TF-Grid head, final locked test | gradients reach the shared backbone, but prediction accuracy and required external slices fail in all three seeds | `0/6` in `3/3` seeds |
-| Direct frozen estimator v2 | the hard peak form beats the soft form on calibration (`0.0508` vs `0.1316`); HNR, Shimmer %, and LTAS tilt pass every component gate in all three seeds | `3/6`, bounded backprop candidate |
+| Direct frozen estimator v6 | the hard v2 baseline qualified HNR and LTAS tilt; the Praat pulse-path v6 repair also raises Shimmer % paired-delta Spearman from `0.5115` to `0.7950` and passes all three confirmation seeds | `3/6` scorer gate; bounded waveform evidence required per component |
 
 Every component must independently pass accuracy, calibration, paired change,
 coverage, anti-shortcut tests, three-second transfer, finite input gradients,
@@ -144,8 +144,9 @@ labels and 2,106 also had a valid same-view clean pair.
 | Input gradient | finite and nonzero | finite and nonzero | pass for both; not sufficient for promotion |
 
 The raw-CC candidate is therefore not integrated into the full Route C screen,
-and no second waveform pilot is authorized. This negative comparison is about
-the fixed v3 approximation, not about Praat's exact raw-CC implementation.
+and no second HNR waveform pilot is authorized. This negative comparison is
+about the fixed v3 approximation, not about Praat's exact raw-CC
+implementation.
 
 Shimmer was then isolated on local historical SV waveforms. Exact Praat pulses
 first showed that the asymmetric-Hann amplitude gradient was effective when
@@ -169,16 +170,42 @@ speaker-disjoint CS/SV panel, not generator training. The historical panel has
 only four speakers, is SV-only, and does not provide all-six-component or
 external-speaker evidence.
 
-**Plain conclusion:** LTAS tilt remains the only component that has passed the
-formal final exact panel. Shimmer % is now a credible second Route C candidate:
-its deployable gradient passed both historical calibration and holdout waveform
-gates, but it still needs a fresh CS/SV, all-six-component panel. The v2 HNR
-proxy predicts exact HNR accurately, but its safe waveform gradient still moves
-exact HNR too weakly; the closer-timed raw-CC v3 proxy is less accurate and less
-calibrated. The present decision therefore remains
+The fresh Shimmer panel then froze six previously unused pathological speakers
+before simulation: three for calibration and three for final evaluation, with
+six CS/SV cases per split and balanced RIR-only, 20 dB, and 10 dB conditions.
+Only calibration exact scores selected one global normalized step size; the six
+final candidate waveforms were hash-sealed before their exact scores were
+opened.
+
+| Fresh Shimmer v6 result | Calibration | Final |
+|---|---:|---:|
+| Selected global step | `0.001` | frozen from calibration |
+| Material cases | `6/6` | `5/6` |
+| Exact Shimmer % improvement rate | `5/6` | `5/5` material cases |
+| Median normalized Shimmer % gap reduction | `0.02508` | `0.03062` |
+| Median normalized Shimmer dB gap reduction | `0.01275` | `0.02559` |
+| Worst residual / minimum cosine / clipping | `-60.00 dB / 0.99999905 / 0` | `-60.00 dB / 0.99999917 / 0` |
+| Full-band pathology and denoising guardrails | pass | pass |
+
+The final CS, SV, mild, and severe slices all pass their frozen gates. One
+non-material final-SV case started almost on target (exact Shimmer % gap
+`0.0540`) and worsened to `0.2300`; it is excluded only by the predeclared
+material-gap threshold, not hidden from the result table. All five material
+cases improve. A second end-to-end run selects the same step, passes the same
+gates, and obtains a final median reduction of `0.03062`; small GPU numerical
+variation keeps it from being byte-identical (maximum decoded sample difference
+about `2.27e-6`). An independent repeat on the originally sealed waveforms
+recomputes all 108 exact values with maximum absolute difference `0.0`.
+
+This result is `PASS_SHIMMER_FRESH_SPEAKER_PANEL`. **Plain conclusion:** LTAS
+tilt and Shimmer % have now each passed a speaker-disjoint exact waveform
+panel. HNR still fails its waveform-effect threshold even though its
+predictor is accurate. The next scientific step is one combined, bounded
+LTAS-tilt + Shimmer-% waveform pilot; the present decision remains
 `NO_GO_AVQI_T2_TRAINING`: generator optimizer steps remain zero. This is a
-bounded result for the current formulas, not a claim that dual-head or
-independent-predictor research can never work.
+component-level promotion, not evidence for putting a combined AVQI loss into
+generator training, and not a claim that dual-head or independent-predictor
+research can never work.
 
 The current locked receipts are on Triton under
 `runs/avqi_component_direct_c_v5_multiseed_20260817_01/`,
@@ -191,6 +218,15 @@ The deterministic local Shimmer receipts are
 `runs/avqi_shimmer_internal_v6c_historical_20260821_04/`; both report files
 have SHA256
 `a3eee583c799753a52c4c8a298aecabec96c3dfcd9c11080574515539b8e962c`.
+The fresh primary and numerical-repeat receipts are
+`runs/avqi_route_c_shimmer_v6_fresh_panel_20260821_02/` and
+`runs/avqi_route_c_shimmer_v6_fresh_panel_20260821_03_repeat/`. Their report
+SHA256 values are respectively
+`f40a8e16c0467c0d52654173a48c1b515eb68c223a2097557dc14eb1999350ac`
+and
+`b73c3bfbf52a7bb688fbf4a699a67fa9a29ea694ad30a4adac805c0e78da3258`.
+The sealed exact-repeat audit is Slurm job `19858012`; its log SHA256 is
+`1a826d3f5b4f3dee9c280a469c5365f6ee3d3050bf06248e8d96ffecb1f04c78`.
 
 ## Repository and retained artifacts
 
@@ -224,6 +260,7 @@ the audio itself is shared privately after checking the data-sharing boundary.
 - AVQI diagnostic: `scripts/evaluate_avqi_component_backprop.py`
 - AVQI multi-seed consensus: `scripts/summarize_avqi_component_multiseed.py`
 - exact-scored waveform backprop check: `scripts/evaluate_direct_avqi_waveform_optimization.py`
+- fresh Shimmer exact panel: `scripts/evaluate_avqi_shimmer_fresh_panel.py`
 - local verification: `CUDA_VISIBLE_DEVICES='' python -m pytest -q`
 
 Python 3.10 is the reference environment. Slurm launchers require
