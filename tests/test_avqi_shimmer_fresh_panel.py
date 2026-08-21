@@ -221,3 +221,15 @@ def test_repository_test_runner_executes_the_verified_source_worktree() -> None:
 
     assert 'cd "$SOURCE_ROOT"' in source
     assert 'cd "$ROOT_DIR"' not in source
+
+
+def test_fresh_panel_imports_helpers_from_its_verified_worktree() -> None:
+    source = (
+        REPO_ROOT / "scripts" / "evaluate_avqi_shimmer_fresh_panel.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'SCRIPTS_DIR = REPO_ROOT / "scripts"' in source
+    assert "sys.path.insert(0, str(import_root))" in source
+    assert "from evaluate_direct_avqi_waveform_optimization import" in source
+    assert "from prepare_avqi_component_expanded_data import" in source
+    assert "from scripts.evaluate_direct_avqi_waveform_optimization" not in source

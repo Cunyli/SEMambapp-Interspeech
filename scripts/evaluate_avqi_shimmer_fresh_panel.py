@@ -34,8 +34,11 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+for import_root in (REPO_ROOT, SCRIPTS_DIR):
+    if str(import_root) in sys.path:
+        sys.path.remove(str(import_root))
+    sys.path.insert(0, str(import_root))
 
 from model.avqi_components import (
     AVQI_COMPONENT_NAMES,
@@ -43,7 +46,7 @@ from model.avqi_components import (
     PraatDifferentiableAVQIComponentEstimator,
     denormalize_components,
 )
-from scripts.evaluate_direct_avqi_waveform_optimization import (
+from evaluate_direct_avqi_waveform_optimization import (
     STEP_VERSIONS,
     aggregate_denoising,
     aggregate_pathology_guardrails,
@@ -51,7 +54,7 @@ from scripts.evaluate_direct_avqi_waveform_optimization import (
     full_band_pathology_guardrails,
     waveform_safety,
 )
-from scripts.prepare_avqi_component_expanded_data import (
+from prepare_avqi_component_expanded_data import (
     WdsReader,
     crop_or_tile,
     match_length,
@@ -1034,7 +1037,7 @@ def main() -> None:
     if str(args.simulation_root) not in sys.path:
         sys.path.insert(0, str(args.simulation_root))
     from simulate_degradation import apply_degradation_with_wind
-    from scripts.evaluate_avqi_component_backprop import (
+    from evaluate_avqi_component_backprop import (
         enhance_waveform,
         load_generator,
     )
