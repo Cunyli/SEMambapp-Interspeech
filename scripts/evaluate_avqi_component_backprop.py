@@ -854,6 +854,12 @@ def train_waveform_predictor(
             cpps_mode="praat_relative_log1p_v10",
             cpps_power_floor=1e-6,
         )
+    elif architecture == "direct_praat_hard_cpps_view_input_v12":
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            cpps_mode="praat_view_input_v12",
+            cpps_power_floor=1e-6,
+        )
     elif architecture == "direct_praat_hard_shimmer_rms_v3":
         predictor = PraatDifferentiableAVQIComponentEstimator(
             peak_mode="hard",
@@ -1116,6 +1122,20 @@ def predict_shared(
     return torch.cat(predictions)
 
 
+def forward_waveform_predictor(
+    predictor: torch.nn.Module,
+    waveform: torch.Tensor,
+    speaking_type: str | None = None,
+) -> torch.Tensor:
+    """Forward one scorer while supplying exact AVQI CS/SV topology metadata."""
+    if (
+        isinstance(predictor, PraatDifferentiableAVQIComponentEstimator)
+        and predictor.cpps_mode == "praat_view_input_v12"
+    ):
+        return predictor(waveform, speaking_type=speaking_type)
+    return predictor(waveform)
+
+
 def predict_waveforms(
     predictor: torch.nn.Module,
     examples: list[Example],
@@ -1129,7 +1149,11 @@ def predict_waveforms(
     with torch.inference_mode():
         for index, example in enumerate(examples):
             if cached_inputs is None:
-                normalized = predictor(example.waveform.to(device))
+                normalized = forward_waveform_predictor(
+                    predictor,
+                    example.waveform.to(device),
+                    example.view,
+                )
             else:
                 normalized = cached_waveform_prediction(
                     predictor,
@@ -1193,7 +1217,18 @@ def cache_direct_component_features(
     predictor.eval()
     with torch.inference_mode():
         for index, example in enumerate(examples, start=1):
-            raw = predictor.raw_components(example.waveform.to(device))
+            raw = (
+                predictor.raw_components(
+                    example.waveform.to(device),
+                    speaking_type=example.view,
+                )
+                if isinstance(
+                    predictor,
+                    PraatDifferentiableAVQIComponentEstimator,
+                )
+                and predictor.cpps_mode == "praat_view_input_v12"
+                else predictor.raw_components(example.waveform.to(device))
+            )
             components.append(raw.cpu()[0])
             if index % 50 == 0 or index == len(examples):
                 print(
@@ -1654,6 +1689,7 @@ def training_segment_transfer_report(
     predict: Callable[[torch.Tensor], torch.Tensor],
     train_scale: torch.Tensor,
     target_attribute: str,
+    predict_with_view: Callable[[torch.Tensor, str], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     """Check full-utterance exact targets on the 3 s deployment input domain."""
     normalized_errors: list[torch.Tensor] = []
@@ -1665,7 +1701,11 @@ def training_segment_transfer_report(
         target = getattr(example, target_attribute).cpu()
         example_count += 1
         for segment in deterministic_training_segments(example.waveform):
-            prediction = predict(segment)
+            prediction = (
+                predict_with_view(segment, example.view)
+                if predict_with_view is not None
+                else predict(segment)
+            )
             normalized_errors.append(
                 (prediction - target).abs()
                 / train_scale.cpu().clamp_min(1e-8)
@@ -1729,7 +1769,11 @@ def independent_gradient_smoke(
     waveform_predictor.zero_grad(set_to_none=True)
     freeze_module_for_input_gradient(waveform_predictor)
     enhanced = enhance_waveform(generator, waveform, config)
-    normalized_prediction = waveform_predictor(enhanced)
+    normalized_prediction = forward_waveform_predictor(
+        waveform_predictor,
+        enhanced,
+        example.view,
+    )
     normalized_prediction = calibrated_normalized_prediction(
         normalized_prediction,
         waveform_mean,
@@ -1756,7 +1800,11 @@ def independent_gradient_smoke(
         predictor_input = enhance_waveform(generator, waveform, config)
 
     def component_prediction(output_waveform: torch.Tensor) -> torch.Tensor:
-        normalized = waveform_predictor(output_waveform)
+        normalized = forward_waveform_predictor(
+            waveform_predictor,
+            output_waveform,
+            example.view,
+        )
         return calibrated_normalized_prediction(
             normalized,
             waveform_mean,
@@ -2012,7 +2060,11 @@ def external_stress_test(
         for index, row in enumerate(selected, start=1):
             path = Path(row[f"{row['view']}_path"])
             waveform = load_waveform(path).to(device)
-            normalized = predictor(waveform)
+            normalized = forward_waveform_predictor(
+                predictor,
+                waveform,
+                row["view"],
+            )
             raw_prediction = denormalize_components(
                 normalized,
                 target_mean,

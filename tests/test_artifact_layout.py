@@ -52,6 +52,8 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"direct_praat_hard_cpps_relative_log1p_v10"' in source
     assert '"direct_praat_hard_cpps_relative_log1p_v10"' in direct_source
     assert '"direct_praat_hard_cpps_relative_log1p_v10"' in multiseed
+    assert '"direct_praat_hard_cpps_view_input_v12"' in source
+    assert '"direct_praat_hard_cpps_view_input_v12"' in direct_source
     assert '"shared_dual_head": {"status": "SKIPPED_USER_SCOPE"}' in direct_source
     assert (
         '"frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"}'

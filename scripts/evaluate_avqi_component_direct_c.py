@@ -40,6 +40,7 @@ from evaluate_avqi_component_backprop import (
     eligible_components,
     external_stress_test,
     fit_component_calibrator,
+    forward_waveform_predictor,
     freeze_module,
     independent_gradient_smoke,
     load_config,
@@ -63,6 +64,7 @@ DIRECT_ARCHITECTURES = (
     "direct_praat_soft_v2",
     "direct_praat_hard_v2",
     "direct_praat_hard_cpps_relative_log1p_v10",
+    "direct_praat_hard_cpps_view_input_v12",
     "direct_praat_hard_shimmer_rms_v3",
     "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
     "direct_praat_hard_shimmer_pulse_chain_v5",
@@ -165,6 +167,17 @@ def direct_contract(
                 "exact_praat_role": "frozen final judge",
                 "metric_branch_only_preprocessing": True,
                 "full_band_enhancement_path_preserved": True,
+                "cpps_view_input_v12": (
+                    {
+                        "speaking_type_required": True,
+                        "cs_topology": "exact-inspired AVQI voiced-segment extraction",
+                        "sv_topology": "last 3 seconds after metric-branch high-pass",
+                        "hard_topology_detached": True,
+                        "selected_waveform_values_differentiable": True,
+                    }
+                    if "direct_praat_hard_cpps_view_input_v12" in architectures
+                    else None
+                ),
             },
         },
         "calibration": {
@@ -386,6 +399,9 @@ def main() -> None:
                 "trainable_parameter_count": 0,
                 "optimizer_steps": 0,
                 "direct_alignment": training["direct_alignment"],
+                "speaking_type_required": (
+                    architecture == "direct_praat_hard_cpps_view_input_v12"
+                ),
             },
             args.checkpoint_dir / f"direct_{architecture}_estimator.pt",
         )
@@ -413,13 +429,18 @@ def main() -> None:
 
         def direct_predict(
             waveform: torch.Tensor,
+            speaking_type: str | None = None,
             current_predictor: torch.nn.Module = predictor,
             current_mean: torch.Tensor = mean,
             current_scale: torch.Tensor = scale,
             current_calibrator: Any = calibrator,
         ) -> torch.Tensor:
             with torch.inference_mode():
-                normalized = current_predictor(waveform.to(device))
+                normalized = forward_waveform_predictor(
+                    current_predictor,
+                    waveform.to(device),
+                    speaking_type,
+                )
                 raw = normalized * current_scale + current_mean
                 return current_calibrator(raw).cpu()[0]
 
@@ -443,7 +464,7 @@ def main() -> None:
         }
         anti_shortcut = anti_shortcut_report(
             examples,
-            direct_predict,
+            lambda waveform: direct_predict(waveform, "sv"),
             scale,
             expect_degradation_sensitivity=True,
         )
@@ -452,6 +473,7 @@ def main() -> None:
             direct_predict,
             scale,
             "own_target",
+            predict_with_view=direct_predict,
         )
         gradient = independent_gradient_smoke(
             generator,
@@ -474,7 +496,7 @@ def main() -> None:
         )
         vctk_external, vctk_rows = vctk_external_test(
             args.vctk_external_label_bank,
-            direct_predict,
+            lambda waveform: direct_predict(waveform, "cs"),
             scale,
             surrogate_speaker_ids,
         )

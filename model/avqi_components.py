@@ -3328,6 +3328,15 @@ class PraatDifferentiableAVQIComponentEstimator(
             [self._raw_one(row, speaking_type) for row in waveform]
         )
 
+    def forward(
+        self,
+        waveform: torch.Tensor,
+        speaking_type: str | None = None,
+    ) -> torch.Tensor:
+        return self.forward_proxy_features(
+            self.raw_components(waveform, speaking_type)
+        )
+
 
 class ComponentAffineCalibrator(nn.Module):
     """A fixed per-component affine calibration fitted outside this module."""
