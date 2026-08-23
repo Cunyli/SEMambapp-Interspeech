@@ -189,10 +189,32 @@ def optional_median(values: np.ndarray) -> float | None:
     return float(np.median(values)) if values.size else None
 
 
+def validate_fresh_output_dir(output_dir: Path, slurm_job_id: str) -> None:
+    if not output_dir.exists():
+        return
+    if not slurm_job_id or not output_dir.is_dir() or output_dir.is_symlink():
+        raise FileExistsError(f"refusing to overwrite {output_dir}")
+    entries = list(output_dir.iterdir())
+    if len(entries) != 1 or entries[0].name != "logs":
+        raise FileExistsError(f"refusing to overwrite {output_dir}")
+    log_dir = entries[0]
+    if not log_dir.is_dir() or log_dir.is_symlink():
+        raise FileExistsError(f"refusing to overwrite {output_dir}")
+    allowed_logs = {
+        f"slurm_{slurm_job_id}.out",
+        f"slurm_{slurm_job_id}.err",
+        f"shimmer_confidence_{slurm_job_id}.log",
+    }
+    if any(
+        child.name not in allowed_logs or not child.is_file() or child.is_symlink()
+        for child in log_dir.iterdir()
+    ):
+        raise FileExistsError(f"refusing to overwrite {output_dir}")
+
+
 def main() -> None:
     args = parse_args()
-    if args.output_dir.exists():
-        raise FileExistsError(f"refusing to overwrite {args.output_dir}")
+    validate_fresh_output_dir(args.output_dir, args.slurm_job_id)
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
