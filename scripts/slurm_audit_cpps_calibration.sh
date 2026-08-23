@@ -75,7 +75,7 @@ REPORT="$OUTPUT_DIR/cpps_calibration_report.json"
 RECEIPT="$OUTPUT_DIR/completion_receipt.json"
 echo "event=start job=$SLURM_JOB_ID source_commit=$SOURCE_COMMIT time=$(date -Is)" | tee -a "$LIVE_LOG"
 python -m pytest tests/test_avqi_components.py -k cpps -q 2>&1 | tee -a "$LIVE_LOG"
-python scripts/audit_cpps_calibration.py \
+python -m scripts.audit_cpps_calibration \
   --label-bank "$LABEL_BANK" \
   --label-bank-sha256 "$LABEL_BANK_SHA256" \
   --output "$REPORT" \
