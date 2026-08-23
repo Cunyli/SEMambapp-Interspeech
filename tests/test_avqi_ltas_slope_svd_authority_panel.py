@@ -77,3 +77,7 @@ def test_runner_requires_separate_seal_and_score_stages() -> None:
     assert "Score stage requires PANEL_SEAL_SHA256" in source
     assert "Refusing to reopen an already scored SVD LTAS panel" in source
     assert "CONFIRM_SLURM_SUBMIT" in source
+    assert (
+        "465c15e46c9c9e325c14e5672abead050bbfd9a4bba75d0ace46bf5d58884966"
+        in source
+    )
