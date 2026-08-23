@@ -18,9 +18,14 @@ MEMORY="${MEMORY:-48G}"
 TIME_LIMIT="${TIME_LIMIT:-00:20:00}"
 AUDIT_STAGE="${AUDIT_STAGE:-torch}"
 ROW_INDICES="${ROW_INDICES:-3,16,20}"
+RUN_CPPS_TESTS="${RUN_CPPS_TESTS:-0}"
 
 if [[ "$AUDIT_STAGE" != "torch" && "$AUDIT_STAGE" != "gradient" ]]; then
   echo "Unsupported AUDIT_STAGE: $AUDIT_STAGE" >&2
+  exit 2
+fi
+if [[ "$RUN_CPPS_TESTS" != "0" && "$RUN_CPPS_TESTS" != "1" ]]; then
+  echo "RUN_CPPS_TESTS must be 0 or 1" >&2
   exit 2
 fi
 
@@ -43,7 +48,7 @@ fi
 
 export SOURCE_ROOT RUN_ROOT OUTPUT_DIR LOG_DIR LABEL_BANK LABEL_BANK_SHA256
 export AVQI_ROOT SOURCE_COMMIT PARTITION GPU_TYPE CPUS_PER_TASK MEMORY TIME_LIMIT
-export AUDIT_STAGE ROW_INDICES
+export AUDIT_STAGE ROW_INDICES RUN_CPPS_TESTS
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
@@ -83,6 +88,9 @@ mkdir -p "$LOG_DIR"
 LIVE_LOG="$LOG_DIR/torch_stage_${SLURM_JOB_ID}.log"
 echo "event=start job=$SLURM_JOB_ID stage=$AUDIT_STAGE source_commit=$SOURCE_COMMIT time=$(date -Is)" | tee -a "$LIVE_LOG"
 python -c 'import os, torch; print("torch", torch.__version__); print("cuda", torch.cuda.is_available()); print("device", torch.cuda.get_device_name(0)); print("CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES"))' | tee -a "$LIVE_LOG"
+if [[ "$RUN_CPPS_TESTS" == "1" ]]; then
+  python -m pytest tests/test_avqi_components.py -k cpps -q 2>&1 | tee -a "$LIVE_LOG"
+fi
 python "$SOURCE_ROOT/scripts/audit_cpps_parity.py" \
   --label-bank "$LABEL_BANK" \
   --label-bank-sha256 "$LABEL_BANK_SHA256" \

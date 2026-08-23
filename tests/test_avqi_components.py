@@ -535,7 +535,7 @@ def test_praat_cppsv7_has_finite_input_gradient_and_isolates_other_components() 
     assert float(gradient.norm()) > 0.0
 
 
-def test_praat_spectrum_endpoint_guards_preserve_forward_and_gradients() -> None:
+def test_praat_cpps_spectrum_guards_preserve_forward_and_gradients() -> None:
     sample_rate = 16_000
     time = torch.arange(8_000, dtype=torch.float32) / sample_rate
     waveform = 0.01 * torch.sin(2.0 * math.pi * 175.0 * time)
