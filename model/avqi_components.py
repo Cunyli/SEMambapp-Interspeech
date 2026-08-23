@@ -1215,6 +1215,7 @@ class PraatDifferentiableAVQIComponentEstimator(
             "current_v2",
             "praat_topology_v7",
             "praat_centered_dc_guard_v8",
+            "praat_spectrum_endpoint_guard_v9",
         }:
             raise ValueError(f"unsupported CPPS mode: {cpps_mode}")
         if not math.isfinite(cpps_power_floor) or cpps_power_floor <= 0.0:
@@ -1603,6 +1604,19 @@ class PraatDifferentiableAVQIComponentEstimator(
                 (exact_log_power[..., :1].detach(), exact_log_power[..., 1:]),
                 dim=-1,
             )
+        elif self.cpps_mode == "praat_spectrum_endpoint_guard_v9":
+            # RFFT's DC and Nyquist bins are unique real-valued endpoints and
+            # are half-weighted by Praat. Keep both exact forward values, but
+            # exclude near-zero endpoint log singularities from the surrogate
+            # derivative while retaining every interior spectral gradient.
+            log_power = torch.cat(
+                (
+                    exact_log_power[..., :1].detach(),
+                    exact_log_power[..., 1:-1],
+                    exact_log_power[..., -1:].detach(),
+                ),
+                dim=-1,
+            )
         else:
             log_power = exact_log_power
         real_cepstrum = torch.fft.irfft(
@@ -1765,6 +1779,8 @@ class PraatDifferentiableAVQIComponentEstimator(
         if self.cpps_mode == "praat_topology_v7":
             return self._cpps_praat_topology_v7(prepared)
         if self.cpps_mode == "praat_centered_dc_guard_v8":
+            return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
+        if self.cpps_mode == "praat_spectrum_endpoint_guard_v9":
             return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
         return self._cpps_current(prepared)
 

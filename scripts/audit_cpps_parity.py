@@ -26,7 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_RATE = 16_000
 CURRENT_TORCH_PEAK_MODE = "hard"
 CPPS_BASELINE_MODE = "praat_topology_v7"
-CPPS_CANDIDATE_MODE = "praat_centered_dc_guard_v8"
+CPPS_DC_GUARD_MODE = "praat_centered_dc_guard_v8"
+CPPS_CANDIDATE_MODE = "praat_spectrum_endpoint_guard_v9"
 CPPS_CANDIDATE_POWER_FLOOR = 1e-6
 EXACT_BANK_TOLERANCE = 1e-4
 DEFAULT_GRADIENT_ROW_INDICES = "3,16,20"
@@ -592,11 +593,11 @@ def torch_stage(args: argparse.Namespace) -> None:
             exact_values,
             torch_full_values,
         ),
-        "torch_candidate_direct_praat_centered_dc_guard_v8": summarize_pairs(
+        "torch_candidate_direct_praat_spectrum_endpoint_guard_v9": summarize_pairs(
             exact_values,
             candidate_values,
         ),
-        "torch_candidate_full_raw_components_praat_centered_dc_guard_v8": summarize_pairs(
+        "torch_candidate_full_raw_components_praat_spectrum_endpoint_guard_v9": summarize_pairs(
             exact_values,
             candidate_full_values,
         ),
@@ -823,6 +824,11 @@ def gradient_stage(args: argparse.Namespace) -> None:
     )
     dc_guard_estimator = PraatDifferentiableAVQIComponentEstimator(
         peak_mode=CURRENT_TORCH_PEAK_MODE,
+        cpps_mode=CPPS_DC_GUARD_MODE,
+        cpps_power_floor=CPPS_CANDIDATE_POWER_FLOOR,
+    )
+    endpoint_guard_estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode=CURRENT_TORCH_PEAK_MODE,
         cpps_mode=CPPS_CANDIDATE_MODE,
         cpps_power_floor=CPPS_CANDIDATE_POWER_FLOOR,
     )
@@ -893,11 +899,35 @@ def gradient_stage(args: argparse.Namespace) -> None:
             dc_guard_terms,
         )
 
+        endpoint_guard_waveform = torch.from_numpy(
+            exact_input.copy()
+        ).requires_grad_()
+        endpoint_guard_terms = (
+            endpoint_guard_estimator._cpps_praat_topology_v7_terms(
+                endpoint_guard_waveform
+            )
+        )
+        endpoint_guard_topology, endpoint_guard_gradient = topology_gradient_record(
+            torch,
+            waveform=endpoint_guard_waveform,
+            peak_scalar=endpoint_guard_terms["parabolic_peak_value"].mean(),
+            baseline_scalar=endpoint_guard_terms["exact_baseline"].mean(),
+            cpps_scalar=endpoint_guard_terms["exact_cpps"],
+        )
+        endpoint_guard_intermediate = intermediate_gradient_stats(
+            torch,
+            endpoint_guard_terms["exact_cpps"],
+            endpoint_guard_terms,
+        )
+
         forward_values = {
             "exact_topology_floor_1e_30": float(exact_terms["exact_cpps"]),
             "exact_topology_floor_1e_6": float(bounded_terms["exact_cpps"]),
             "detached_topology_floor_1e_6": float(bounded_terms["current_cpps"]),
             "praat_centered_dc_guard_v8": float(dc_guard_terms["exact_cpps"]),
+            "praat_spectrum_endpoint_guard_v9": float(
+                endpoint_guard_terms["exact_cpps"]
+            ),
         }
         if max(forward_values.values()) - min(forward_values.values()) > 1e-10:
             raise AssertionError(
@@ -942,11 +972,13 @@ def gradient_stage(args: argparse.Namespace) -> None:
                 "exact_topology_floor_1e_6": floor_only_topology,
                 "detached_topology_floor_1e_6": detached_topology,
                 "praat_centered_dc_guard_v8": dc_guard_topology,
+                "praat_spectrum_endpoint_guard_v9": endpoint_guard_topology,
             },
             "intermediate_gradient_sensitivity": {
                 "exact_topology_floor_1e_30": exact_intermediate,
                 "detached_topology_floor_1e_6": detached_intermediate,
                 "praat_centered_dc_guard_v8": dc_guard_intermediate,
+                "praat_spectrum_endpoint_guard_v9": endpoint_guard_intermediate,
             },
             "cross_mode_gradient": {
                 "exact_vs_floor_only_cosine": float(
@@ -979,6 +1011,18 @@ def gradient_stage(args: argparse.Namespace) -> None:
                         detached_gradient.reshape(1, -1),
                     )[0]
                 ),
+                "exact_vs_endpoint_guard_cosine": float(
+                    torch.nn.functional.cosine_similarity(
+                        exact_gradient.reshape(1, -1),
+                        endpoint_guard_gradient.reshape(1, -1),
+                    )[0]
+                ),
+                "dc_guard_vs_endpoint_guard_cosine": float(
+                    torch.nn.functional.cosine_similarity(
+                        dc_guard_gradient.reshape(1, -1),
+                        endpoint_guard_gradient.reshape(1, -1),
+                    )[0]
+                ),
             },
         }
         records.append(record)
@@ -988,7 +1032,8 @@ def gradient_stage(args: argparse.Namespace) -> None:
             f"{exact_topology['cpps']['norm']:.6f} floor_norm="
             f"{floor_only_topology['cpps']['norm']:.6f} detached_norm="
             f"{detached_topology['cpps']['norm']:.6f} dc_guard_norm="
-            f"{dc_guard_topology['cpps']['norm']:.6f}",
+            f"{dc_guard_topology['cpps']['norm']:.6f} endpoint_guard_norm="
+            f"{endpoint_guard_topology['cpps']['norm']:.6f}",
             flush=True,
         )
 
@@ -1017,7 +1062,7 @@ def gradient_stage(args: argparse.Namespace) -> None:
         },
     }
     report = {
-        "schema_version": "avqi-route-c-cpps-gradient-decomposition-v2",
+        "schema_version": "avqi-route-c-cpps-gradient-decomposition-v3",
         "stage": "gradient",
         "decision": "GRADIENT_DECOMPOSITION_COMPLETE_NO_PROMOTION",
         "generator_optimizer_steps": 0,
@@ -1030,9 +1075,10 @@ def gradient_stage(args: argparse.Namespace) -> None:
         "label_bank_sha256": args.label_bank_sha256,
         "candidate_configuration": {
             "baseline_mode": CPPS_BASELINE_MODE,
+            "dc_guard_mode": CPPS_DC_GUARD_MODE,
             "cpps_mode": CPPS_CANDIDATE_MODE,
             "bounded_floor": CPPS_CANDIDATE_POWER_FLOOR,
-            "backward_guard": "detach centered-frame spectrum DC log-power only",
+            "backward_guard": "detach RFFT DC and Nyquist log-power endpoints only",
         },
         "iteration_compact": {
             "goal": "preserve exact CPPS forward values while localizing gradient outliers",
@@ -1040,7 +1086,7 @@ def gradient_stage(args: argparse.Namespace) -> None:
             "baseline": "praat_topology_v7 at ab695ec",
             "primary_metric": "waveform gradient norm and peak/baseline cancellation",
             "guardrails": "forward equality, fixed rows, no scorer promotion or optimizer step",
-            "next_experiment": "screen the centered-DC guard before full 24-row parity",
+            "next_experiment": "screen the endpoint guard before full 24-row parity",
         },
         "summary": summary,
         "records": records,
