@@ -29,6 +29,7 @@ from scripts.evaluate_avqi_shimmer_pulse_oracle_pilot import EXACT_SCORER
 SAMPLE_RATE = 16_000
 METRIC_SAMPLE_COUNT = 3 * SAMPLE_RATE
 CONFIDENCE_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+PERIOD_CONSISTENCY_THRESHOLDS = (0.0, 0.7, 0.8, 0.9, 0.95)
 MATERIAL_DB_GAP = 0.05
 CONFIDENCE_MATCH_AUC_GATE = 0.65
 CONFIDENCE_RETAINED_FRACTION_GATE = 0.75
@@ -189,6 +190,31 @@ def optional_median(values: np.ndarray) -> float | None:
     return float(np.median(values)) if values.size else None
 
 
+def pulse_period_consistency(pulses: np.ndarray) -> np.ndarray:
+    if pulses.ndim != 1:
+        raise ValueError("pulse consistency expects one-dimensional positions")
+    scores = np.ones(pulses.shape, dtype=np.float64)
+    if pulses.size < 3:
+        return scores
+    periods = np.diff(pulses)
+    if np.any(periods <= 0.0):
+        raise ValueError("pulse positions must be strictly increasing")
+    scores[1:-1] = np.minimum(periods[:-1], periods[1:]) / np.maximum(
+        periods[:-1], periods[1:]
+    )
+    return scores
+
+
+def true_run_lengths(mask: np.ndarray) -> np.ndarray:
+    if mask.ndim != 1:
+        raise ValueError("run-length input must be one-dimensional")
+    padded = np.pad(mask.astype(np.int8), (1, 1))
+    transitions = np.diff(padded)
+    starts = np.flatnonzero(transitions == 1)
+    ends = np.flatnonzero(transitions == -1)
+    return (ends - starts).astype(np.int64)
+
+
 def validate_fresh_output_dir(output_dir: Path, slurm_job_id: str) -> None:
     if not output_dir.exists():
         return
@@ -234,6 +260,7 @@ def main() -> None:
     result_rows: list[dict[str, Any]] = []
     all_confidence: list[np.ndarray] = []
     all_matches: list[np.ndarray] = []
+    all_period_consistency: list[np.ndarray] = []
     for record in records:
         identifier = f"{record['speaker_id']}:{record['condition']}"
         print(f"event=record_start id={identifier}", flush=True)
@@ -272,8 +299,10 @@ def main() -> None:
         reference_period = float(np.median(np.diff(exact_pulses))) if exact_pulses.size > 1 else 0.0
         tolerance = 0.25 * reference_period
         current_matches = current_to_exact <= tolerance
+        period_consistency = pulse_period_consistency(current_pulses)
         all_confidence.append(current_confidence)
         all_matches.append(current_matches)
+        all_period_consistency.append(period_consistency)
         threshold_diagnostics: list[dict[str, Any]] = []
         for threshold in CONFIDENCE_THRESHOLDS:
             retained = current_confidence >= threshold
@@ -311,6 +340,44 @@ def main() -> None:
                 }
             )
         unmatched_confidence = current_confidence[~current_matches]
+        period_threshold_diagnostics: list[dict[str, Any]] = []
+        for threshold in PERIOD_CONSISTENCY_THRESHOLDS:
+            retained = period_consistency >= threshold
+            retained_pulses = current_pulses[retained]
+            exact_to_retained = nearest_errors(exact_pulses, retained_pulses)
+            retained_db = float(
+                estimator.raw_shimmer_from_pulse_positions(
+                    waveform,
+                    torch.from_numpy(retained_pulses.astype(np.float32)).to(device),
+                    metric_sample_count=METRIC_SAMPLE_COUNT,
+                )[1]
+            )
+            if threshold == PERIOD_CONSISTENCY_THRESHOLDS[0] and not np.isclose(
+                retained_db,
+                current_pulse_db,
+                rtol=0.0,
+                atol=1e-7,
+            ):
+                raise RuntimeError("baseline period threshold changed v6 shimmer")
+            period_threshold_diagnostics.append(
+                {
+                    "threshold": threshold,
+                    "retained_count": int(retained.sum()),
+                    "retained_fraction": float(np.mean(retained)),
+                    "retained_match_fraction": float(
+                        np.mean(current_matches[retained])
+                    ),
+                    "exact_coverage_fraction": float(
+                        np.mean(exact_to_retained <= tolerance)
+                    ),
+                    "shimmer_db": retained_db,
+                    "shimmer_db_gap": abs(
+                        retained_db - float(exact_row["shimmer_db"])
+                    ),
+                }
+            )
+        unmatched_runs = true_run_lengths(~current_matches)
+        unmatched_count = int((~current_matches).sum())
         result_rows.append(
             {
                 "speaker_id": record["speaker_id"],
@@ -337,11 +404,26 @@ def main() -> None:
                 "v6_unmatched_pulse_confidence_median": optional_median(
                     unmatched_confidence
                 ),
+                "v6_matched_period_consistency_median": optional_median(
+                    period_consistency[current_matches]
+                ),
+                "v6_unmatched_period_consistency_median": optional_median(
+                    period_consistency[~current_matches]
+                ),
+                "v6_unmatched_run_count": int(unmatched_runs.size),
+                "v6_unmatched_long_run_fraction": (
+                    float(unmatched_runs[unmatched_runs >= 3].sum() / unmatched_count)
+                    if unmatched_count
+                    else 0.0
+                ),
                 "v6_shimmer_db_with_v6_pulses": current_pulse_db,
                 "v6_shimmer_db_with_exact_pulses": exact_pulse_db,
                 "v6_pulse_db_gap": abs(current_pulse_db - float(exact_row["shimmer_db"])),
                 "exact_pulse_db_gap": abs(exact_pulse_db - float(exact_row["shimmer_db"])),
                 "confidence_threshold_diagnostics": threshold_diagnostics,
+                "period_consistency_threshold_diagnostics": (
+                    period_threshold_diagnostics
+                ),
             }
         )
         print(f"event=record_complete id={identifier}", flush=True)
@@ -351,6 +433,7 @@ def main() -> None:
 
     confidence = np.concatenate(all_confidence)
     matches = np.concatenate(all_matches)
+    period_consistency = np.concatenate(all_period_consistency)
     threshold_aggregates: list[dict[str, Any]] = []
     for threshold in CONFIDENCE_THRESHOLDS:
         diagnostics = [
@@ -427,9 +510,84 @@ def main() -> None:
         and confidence_match_auc >= CONFIDENCE_MATCH_AUC_GATE
         and bool(viable_thresholds)
     )
+    period_threshold_aggregates: list[dict[str, Any]] = []
+    for threshold in PERIOD_CONSISTENCY_THRESHOLDS:
+        diagnostics = [
+            next(
+                item
+                for item in row["period_consistency_threshold_diagnostics"]
+                if item["threshold"] == threshold
+            )
+            for row in result_rows
+        ]
+        material = [
+            (item, row)
+            for item, row in zip(diagnostics, result_rows)
+            if row["v6_pulse_db_gap"] >= MATERIAL_DB_GAP
+        ]
+        period_threshold_aggregates.append(
+            {
+                "threshold": threshold,
+                "median_retained_fraction": float(
+                    np.median([item["retained_fraction"] for item in diagnostics])
+                ),
+                "median_retained_match_fraction": float(
+                    np.median(
+                        [item["retained_match_fraction"] for item in diagnostics]
+                    )
+                ),
+                "median_exact_coverage_fraction": float(
+                    np.median(
+                        [item["exact_coverage_fraction"] for item in diagnostics]
+                    )
+                ),
+                "median_shimmer_db_gap": float(
+                    np.median([item["shimmer_db_gap"] for item in diagnostics])
+                ),
+                "median_gap_change_from_v6": float(
+                    np.median(
+                        [
+                            item["shimmer_db_gap"] - row["v6_pulse_db_gap"]
+                            for item, row in zip(diagnostics, result_rows)
+                        ]
+                    )
+                ),
+                "improved_rows": int(
+                    sum(
+                        item["shimmer_db_gap"] < row["v6_pulse_db_gap"]
+                        for item, row in zip(diagnostics, result_rows)
+                    )
+                ),
+                "material_outlier_rows": len(material),
+                "material_outlier_improved_rows": sum(
+                    item["shimmer_db_gap"] < row["v6_pulse_db_gap"]
+                    for item, row in material
+                ),
+            }
+        )
+    period_consistency_match_auc = binary_rank_auc(period_consistency, matches)
+    viable_period_thresholds = [
+        item["threshold"]
+        for item in period_threshold_aggregates
+        if item["threshold"] > PERIOD_CONSISTENCY_THRESHOLDS[0]
+        and item["median_retained_fraction"]
+        >= CONFIDENCE_RETAINED_FRACTION_GATE
+        and item["median_exact_coverage_fraction"]
+        >= CONFIDENCE_EXACT_COVERAGE_GATE
+        and item["median_gap_change_from_v6"]
+        <= CONFIDENCE_MEDIAN_GAP_INCREASE_MAX
+        and item["material_outlier_rows"] > 0
+        and item["material_outlier_improved_rows"]
+        == item["material_outlier_rows"]
+    ]
+    period_consistency_hypothesis_supported = (
+        period_consistency_match_auc is not None
+        and period_consistency_match_auc >= CONFIDENCE_MATCH_AUC_GATE
+        and bool(viable_period_thresholds)
+    )
 
     report = {
-        "schema_version": "avqi-route-c-shimmer-vctk-topology-audit-v2",
+        "schema_version": "avqi-route-c-shimmer-vctk-topology-audit-v3",
         "decision": "COMPLETED_SHIMMER_TOPOLOGY_DIAGNOSTIC_NO_PROMOTION",
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id or None,
@@ -477,6 +635,14 @@ def main() -> None:
                 confidence[~matches]
             ),
             "confidence_thresholds": threshold_aggregates,
+            "period_consistency_match_auc": period_consistency_match_auc,
+            "matched_period_consistency_median": optional_median(
+                period_consistency[matches]
+            ),
+            "unmatched_period_consistency_median": optional_median(
+                period_consistency[~matches]
+            ),
+            "period_consistency_thresholds": period_threshold_aggregates,
         },
         "confidence_hypothesis": {
             "decision": (
@@ -487,6 +653,26 @@ def main() -> None:
             "viable_thresholds_not_selected": viable_thresholds,
             "gates": {
                 "confidence_match_auc_min": CONFIDENCE_MATCH_AUC_GATE,
+                "median_retained_fraction_min": CONFIDENCE_RETAINED_FRACTION_GATE,
+                "median_exact_coverage_fraction_min": CONFIDENCE_EXACT_COVERAGE_GATE,
+                "median_gap_increase_max_db": CONFIDENCE_MEDIAN_GAP_INCREASE_MAX,
+                "material_db_gap_min": MATERIAL_DB_GAP,
+                "all_material_outliers_must_improve": True,
+            },
+            "interpretation": (
+                "A pass authorizes only a fresh calibration-only threshold study; "
+                "it is not a scorer, external, waveform, or training promotion."
+            ),
+        },
+        "period_consistency_hypothesis": {
+            "decision": (
+                "SUPPORTED_FOR_CALIBRATION_ONLY_FOLLOWUP"
+                if period_consistency_hypothesis_supported
+                else "FALSIFIED_NO_PERIOD_CONSISTENCY_CANDIDATE"
+            ),
+            "viable_thresholds_not_selected": viable_period_thresholds,
+            "gates": {
+                "period_consistency_match_auc_min": CONFIDENCE_MATCH_AUC_GATE,
                 "median_retained_fraction_min": CONFIDENCE_RETAINED_FRACTION_GATE,
                 "median_exact_coverage_fraction_min": CONFIDENCE_EXACT_COVERAGE_GATE,
                 "median_gap_increase_max_db": CONFIDENCE_MEDIAN_GAP_INCREASE_MAX,
