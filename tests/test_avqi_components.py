@@ -712,6 +712,31 @@ def test_praat_pulse_path_v6_uses_candidate_strength_and_unvoiced_state() -> Non
     assert float(gradient.norm()) > 0.0
 
 
+def test_praat_pulse_path_v6_confidence_is_diagnostic_only() -> None:
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="praat_pulse_path_v6",
+    )
+    sample_rate = 16_000
+    waveform = torch.sin(
+        2.0
+        * math.pi
+        * 180.0
+        * torch.arange(2_000, dtype=torch.float32)
+        / sample_rate
+    )
+    prepared = estimator._prepare(waveform.detach())
+    frozen_pulses = estimator._praat_shimmer_pulse_chain(prepared)
+    diagnostic_pulses, confidence = (
+        estimator._praat_shimmer_pulse_chain_with_confidence(prepared)
+    )
+    assert diagnostic_pulses.numel() > 2
+    assert torch.equal(frozen_pulses, diagnostic_pulses)
+    assert confidence.shape == diagnostic_pulses.shape
+    assert torch.isfinite(confidence).all()
+    assert torch.all((confidence >= 0.0) & (confidence <= 1.0))
+
+
 def test_praat_pulse_path_v6_matches_praat_sample_geometry() -> None:
     estimator = PraatDifferentiableAVQIComponentEstimator(
         peak_mode="hard",

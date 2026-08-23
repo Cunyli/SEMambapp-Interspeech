@@ -28,6 +28,13 @@ from scripts.evaluate_avqi_shimmer_pulse_oracle_pilot import EXACT_SCORER
 
 SAMPLE_RATE = 16_000
 METRIC_SAMPLE_COUNT = 3 * SAMPLE_RATE
+CONFIDENCE_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+MATERIAL_DB_GAP = 0.05
+CONFIDENCE_MATCH_AUC_GATE = 0.65
+CONFIDENCE_RETAINED_FRACTION_GATE = 0.75
+CONFIDENCE_EXACT_COVERAGE_GATE = 0.90
+CONFIDENCE_MEDIAN_GAP_INCREASE_MAX = 0.005
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +50,8 @@ def parse_args() -> argparse.Namespace:
         default="praat_pulse_path_v6",
     )
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--slurm-job-id", default="")
+    parser.add_argument("--device", default="cpu")
     return parser.parse_args()
 
 
@@ -153,10 +162,40 @@ def nearest_errors(reference: np.ndarray, candidate: np.ndarray) -> np.ndarray:
     return np.abs(reference[:, None] - candidate[None, :]).min(axis=1)
 
 
+def binary_rank_auc(scores: np.ndarray, positive: np.ndarray) -> float | None:
+    """Return tie-aware rank AUC without adding a statistics dependency."""
+    if scores.ndim != 1 or positive.shape != scores.shape:
+        raise ValueError("confidence AUC expects aligned one-dimensional arrays")
+    positive_count = int(positive.sum())
+    negative_count = int((~positive).sum())
+    if positive_count == 0 or negative_count == 0:
+        return None
+    order = np.argsort(scores, kind="mergesort")
+    ranks = np.empty(scores.size, dtype=np.float64)
+    start = 0
+    while start < scores.size:
+        end = start + 1
+        while end < scores.size and scores[order[end]] == scores[order[start]]:
+            end += 1
+        ranks[order[start:end]] = 0.5 * (start + 1 + end)
+        start = end
+    positive_rank_sum = float(ranks[positive].sum())
+    return (
+        positive_rank_sum - positive_count * (positive_count + 1) / 2.0
+    ) / (positive_count * negative_count)
+
+
+def optional_median(values: np.ndarray) -> float | None:
+    return float(np.median(values)) if values.size else None
+
+
 def main() -> None:
     args = parse_args()
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite {args.output_dir}")
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is unavailable")
     rows = read_rows(args.label_bank, args.label_bank_sha256)
     records = select_records(rows, args.max_speakers)
     items = [
@@ -164,33 +203,45 @@ def main() -> None:
         for record in records
     ]
     exact = run_exact(items, args.exact_python)
+    print(f"event=exact_complete records={len(exact['rows'])}", flush=True)
     exact_index = {row["id"]: row for row in exact["rows"]}
     estimator = PraatDifferentiableAVQIComponentEstimator(
         peak_mode="hard",
         shimmer_mode=args.shimmer_mode,
-    ).eval()
+    ).to(device).eval()
     result_rows: list[dict[str, Any]] = []
+    all_confidence: list[np.ndarray] = []
+    all_matches: list[np.ndarray] = []
     for record in records:
         identifier = f"{record['speaker_id']}:{record['condition']}"
+        print(f"event=record_start id={identifier}", flush=True)
         exact_row = exact_index[identifier]
         audio = load_audio(record)
-        waveform = torch.from_numpy(audio)
+        waveform = torch.from_numpy(audio).to(device)
         prepared = estimator._prepare(waveform)
         if prepared.numel() > METRIC_SAMPLE_COUNT:
             prepared = prepared[-METRIC_SAMPLE_COUNT:]
-        current_pulses = estimator._praat_shimmer_pulse_chain(prepared).detach().cpu().numpy()
+        current_pulse_tensor, current_confidence_tensor = (
+            estimator._praat_shimmer_pulse_chain_with_confidence(prepared)
+        )
+        current_pulses = current_pulse_tensor.detach().cpu().numpy()
+        current_confidence = current_confidence_tensor.detach().cpu().numpy()
+        if current_confidence.shape != current_pulses.shape:
+            raise RuntimeError("pulse confidence shape does not match pulse positions")
         exact_pulses = np.asarray(exact_row["pulse_positions_samples"], dtype=np.float64)
+        if current_pulses.size == 0 or exact_pulses.size == 0:
+            raise RuntimeError(f"empty pulse topology for {identifier}")
         current_pulse_db = float(
             estimator.raw_shimmer_from_pulse_positions(
                 waveform,
-                torch.from_numpy(current_pulses.astype(np.float32)),
+                torch.from_numpy(current_pulses.astype(np.float32)).to(device),
                 metric_sample_count=METRIC_SAMPLE_COUNT,
             )[1]
         )
         exact_pulse_db = float(
             estimator.raw_shimmer_from_pulse_positions(
                 waveform,
-                torch.from_numpy(exact_pulses.astype(np.float32)),
+                torch.from_numpy(exact_pulses.astype(np.float32)).to(device),
                 metric_sample_count=METRIC_SAMPLE_COUNT,
             )[1]
         )
@@ -198,6 +249,46 @@ def main() -> None:
         current_to_exact = nearest_errors(current_pulses, exact_pulses)
         reference_period = float(np.median(np.diff(exact_pulses))) if exact_pulses.size > 1 else 0.0
         tolerance = 0.25 * reference_period
+        current_matches = current_to_exact <= tolerance
+        all_confidence.append(current_confidence)
+        all_matches.append(current_matches)
+        threshold_diagnostics: list[dict[str, Any]] = []
+        for threshold in CONFIDENCE_THRESHOLDS:
+            retained = current_confidence >= threshold
+            retained_pulses = current_pulses[retained]
+            exact_to_retained = nearest_errors(exact_pulses, retained_pulses)
+            retained_db = float(
+                estimator.raw_shimmer_from_pulse_positions(
+                    waveform,
+                    torch.from_numpy(retained_pulses.astype(np.float32)).to(device),
+                    metric_sample_count=METRIC_SAMPLE_COUNT,
+                )[1]
+            )
+            if threshold == CONFIDENCE_THRESHOLDS[0] and not np.isclose(
+                retained_db,
+                current_pulse_db,
+                rtol=0.0,
+                atol=1e-7,
+            ):
+                raise RuntimeError("baseline confidence threshold changed v6 shimmer")
+            threshold_diagnostics.append(
+                {
+                    "threshold": threshold,
+                    "retained_count": int(retained.sum()),
+                    "retained_fraction": float(np.mean(retained)),
+                    "retained_match_fraction": float(
+                        np.mean(current_matches[retained])
+                    ),
+                    "exact_coverage_fraction": float(
+                        np.mean(exact_to_retained <= tolerance)
+                    ),
+                    "shimmer_db": retained_db,
+                    "shimmer_db_gap": abs(
+                        retained_db - float(exact_row["shimmer_db"])
+                    ),
+                }
+            )
+        unmatched_confidence = current_confidence[~current_matches]
         result_rows.append(
             {
                 "speaker_id": record["speaker_id"],
@@ -212,20 +303,132 @@ def main() -> None:
                 "exact_to_v6_fraction_within_quarter_period": float(
                     np.mean(exact_to_current <= tolerance)
                 ),
+                "v6_to_exact_fraction_within_quarter_period": float(
+                    np.mean(current_matches)
+                ),
+                "v6_pulse_confidence_median": float(
+                    np.median(current_confidence)
+                ),
+                "v6_matched_pulse_confidence_median": optional_median(
+                    current_confidence[current_matches]
+                ),
+                "v6_unmatched_pulse_confidence_median": optional_median(
+                    unmatched_confidence
+                ),
                 "v6_shimmer_db_with_v6_pulses": current_pulse_db,
                 "v6_shimmer_db_with_exact_pulses": exact_pulse_db,
                 "v6_pulse_db_gap": abs(current_pulse_db - float(exact_row["shimmer_db"])),
                 "exact_pulse_db_gap": abs(exact_pulse_db - float(exact_row["shimmer_db"])),
+                "confidence_threshold_diagnostics": threshold_diagnostics,
             }
         )
+        print(f"event=record_complete id={identifier}", flush=True)
 
     def median(field: str) -> float:
         return float(np.median([row[field] for row in result_rows]))
 
+    confidence = np.concatenate(all_confidence)
+    matches = np.concatenate(all_matches)
+    threshold_aggregates: list[dict[str, Any]] = []
+    for threshold in CONFIDENCE_THRESHOLDS:
+        diagnostics = [
+            next(
+                item
+                for item in row["confidence_threshold_diagnostics"]
+                if item["threshold"] == threshold
+            )
+            for row in result_rows
+        ]
+        material = [
+            (item, row)
+            for item, row in zip(diagnostics, result_rows)
+            if row["v6_pulse_db_gap"] >= MATERIAL_DB_GAP
+        ]
+        threshold_aggregates.append(
+            {
+                "threshold": threshold,
+                "median_retained_fraction": float(
+                    np.median([item["retained_fraction"] for item in diagnostics])
+                ),
+                "median_retained_match_fraction": float(
+                    np.median(
+                        [item["retained_match_fraction"] for item in diagnostics]
+                    )
+                ),
+                "median_exact_coverage_fraction": float(
+                    np.median(
+                        [item["exact_coverage_fraction"] for item in diagnostics]
+                    )
+                ),
+                "median_shimmer_db_gap": float(
+                    np.median([item["shimmer_db_gap"] for item in diagnostics])
+                ),
+                "median_gap_change_from_v6": float(
+                    np.median(
+                        [
+                            item["shimmer_db_gap"] - row["v6_pulse_db_gap"]
+                            for item, row in zip(diagnostics, result_rows)
+                        ]
+                    )
+                ),
+                "improved_rows": int(
+                    sum(
+                        item["shimmer_db_gap"] < row["v6_pulse_db_gap"]
+                        for item, row in zip(diagnostics, result_rows)
+                    )
+                ),
+                "material_outlier_rows": len(material),
+                "material_outlier_improved_rows": sum(
+                    item["shimmer_db_gap"] < row["v6_pulse_db_gap"]
+                    for item, row in material
+                ),
+            }
+        )
+
+    confidence_match_auc = binary_rank_auc(confidence, matches)
+    viable_thresholds = [
+        item["threshold"]
+        for item in threshold_aggregates
+        if item["threshold"] > CONFIDENCE_THRESHOLDS[0]
+        and item["median_retained_fraction"]
+        >= CONFIDENCE_RETAINED_FRACTION_GATE
+        and item["median_exact_coverage_fraction"]
+        >= CONFIDENCE_EXACT_COVERAGE_GATE
+        and item["median_gap_change_from_v6"]
+        <= CONFIDENCE_MEDIAN_GAP_INCREASE_MAX
+        and item["material_outlier_rows"] > 0
+        and item["material_outlier_improved_rows"]
+        == item["material_outlier_rows"]
+    ]
+    confidence_hypothesis_supported = (
+        confidence_match_auc is not None
+        and confidence_match_auc >= CONFIDENCE_MATCH_AUC_GATE
+        and bool(viable_thresholds)
+    )
+
     report = {
-        "schema_version": "avqi-route-c-shimmer-vctk-topology-audit-v1",
+        "schema_version": "avqi-route-c-shimmer-vctk-topology-audit-v2",
         "decision": "COMPLETED_SHIMMER_TOPOLOGY_DIAGNOSTIC_NO_PROMOTION",
         "source_commit": args.source_commit,
+        "slurm_job_id": args.slurm_job_id or None,
+        "runtime": {
+            "device": str(device),
+            "torch_version": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device_name": (
+                torch.cuda.get_device_name(device)
+                if device.type == "cuda"
+                else None
+            ),
+        },
+        "source_files_sha256": {
+            "model/avqi_components.py": sha256_file(
+                REPO_ROOT / "model/avqi_components.py"
+            ),
+            "scripts/evaluate_avqi_shimmer_vctk_topology_audit.py": sha256_file(
+                Path(__file__).resolve()
+            ),
+        },
         "label_bank": str(args.label_bank.resolve()),
         "label_bank_sha256": args.label_bank_sha256,
         "exact_python": str(args.exact_python),
@@ -244,6 +447,34 @@ def main() -> None:
             "median_exact_pulse_shimmer_db_gap": median("exact_pulse_db_gap"),
             "exact_pulse_gap_minus_v6_gap": median("exact_pulse_db_gap")
             - median("v6_pulse_db_gap"),
+            "confidence_match_auc": confidence_match_auc,
+            "matched_pulse_confidence_median": optional_median(
+                confidence[matches]
+            ),
+            "unmatched_pulse_confidence_median": optional_median(
+                confidence[~matches]
+            ),
+            "confidence_thresholds": threshold_aggregates,
+        },
+        "confidence_hypothesis": {
+            "decision": (
+                "SUPPORTED_FOR_CALIBRATION_ONLY_FOLLOWUP"
+                if confidence_hypothesis_supported
+                else "FALSIFIED_NO_CONFIDENCE_CANDIDATE"
+            ),
+            "viable_thresholds_not_selected": viable_thresholds,
+            "gates": {
+                "confidence_match_auc_min": CONFIDENCE_MATCH_AUC_GATE,
+                "median_retained_fraction_min": CONFIDENCE_RETAINED_FRACTION_GATE,
+                "median_exact_coverage_fraction_min": CONFIDENCE_EXACT_COVERAGE_GATE,
+                "median_gap_increase_max_db": CONFIDENCE_MEDIAN_GAP_INCREASE_MAX,
+                "material_db_gap_min": MATERIAL_DB_GAP,
+                "all_material_outliers_must_improve": True,
+            },
+            "interpretation": (
+                "A pass authorizes only a fresh calibration-only threshold study; "
+                "it is not a scorer, external, waveform, or training promotion."
+            ),
         },
         "rows": result_rows,
         "generator_optimizer_steps": 0,

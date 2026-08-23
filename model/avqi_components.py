@@ -2268,12 +2268,22 @@ class PraatDifferentiableAVQIComponentEstimator(
         )
 
     @torch.no_grad()
-    def _praat_shimmer_pulse_chain(self, prepared: torch.Tensor) -> torch.Tensor:
-        """Construct a detached recursive pulse chain for AVQI shimmer."""
+    def _praat_shimmer_pulse_chain_with_confidence(
+        self,
+        prepared: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Construct detached pulses plus their existing propagation scores.
+
+        The scores are diagnostic only.  Anchors receive confidence one; every
+        propagated pulse keeps the normalized correlation already used by the
+        frozen v5/v6 acceptance rule.  The default shimmer path discards these
+        scores and therefore remains numerically unchanged.
+        """
         waveform = prepared.detach()
         centers, periods, voiced, hop_length = self._shimmer_pitch_contour(waveform)
         if not bool(voiced.any()):
-            return waveform.new_empty(0)
+            empty = waveform.new_empty(0)
+            return empty, empty
         voiced_indices = voiced.nonzero(as_tuple=False).flatten().tolist()
         intervals: list[tuple[int, int]] = []
         first = voiced_indices[0]
@@ -2286,7 +2296,7 @@ class PraatDifferentiableAVQIComponentEstimator(
                 first = last = index
         intervals.append((first, last))
 
-        pulses: list[float] = []
+        pulse_entries: list[tuple[float, float]] = []
         global_peak = float(waveform.abs().amax())
         added_right = -math.inf
         minimum_period = self.sample_rate / 400.0
@@ -2309,7 +2319,7 @@ class PraatDifferentiableAVQIComponentEstimator(
                 middle - 0.5 * middle_period,
                 middle + 0.5 * middle_period,
             )
-            pulses.append(anchor)
+            pulse_entries.append((anchor, 1.0))
             iteration_limit = int(
                 math.ceil((right_edge - left_edge) / minimum_period)
             ) + 4
@@ -2340,14 +2350,18 @@ class PraatDifferentiableAVQIComponentEstimator(
                         and local_peak > 0.023333 * global_peak
                         and candidate - added_right > 0.8 * period
                     ):
-                        pulses.append(candidate)
+                        pulse_entries.append(
+                            (candidate, min(max(float(correlation), 0.0), 1.0))
+                        )
                     break
                 if (
                     correlation > 0.3
                     and (local_peak == 0.0 or local_peak > 0.01 * global_peak)
                     and candidate - added_right > 0.8 * period
                 ):
-                    pulses.append(candidate)
+                    pulse_entries.append(
+                        (candidate, min(max(float(correlation), 0.0), 1.0))
+                    )
                 current = candidate
 
             current = anchor
@@ -2375,26 +2389,43 @@ class PraatDifferentiableAVQIComponentEstimator(
                         correlation > 0.7
                         and local_peak > 0.023333 * global_peak
                     ):
-                        pulses.append(candidate)
+                        pulse_entries.append(
+                            (candidate, min(max(float(correlation), 0.0), 1.0))
+                        )
                         added_right = candidate
                     break
                 if correlation > 0.3 and (
                     local_peak == 0.0 or local_peak > 0.01 * global_peak
                 ):
-                    pulses.append(candidate)
+                    pulse_entries.append(
+                        (candidate, min(max(float(correlation), 0.0), 1.0))
+                    )
                     added_right = candidate
                 current = candidate
 
         ordered = sorted(
-            pulse
-            for pulse in pulses
-            if 0.0 <= pulse <= float(waveform.numel() - 1)
+            entry
+            for entry in pulse_entries
+            if 0.0 <= entry[0] <= float(waveform.numel() - 1)
         )
-        unique: list[float] = []
-        for pulse in ordered:
-            if not unique or pulse - unique[-1] > 1e-3:
-                unique.append(pulse)
-        return waveform.new_tensor(unique)
+        unique: list[tuple[float, float]] = []
+        for pulse, confidence in ordered:
+            if not unique or pulse - unique[-1][0] > 1e-3:
+                unique.append((pulse, confidence))
+            else:
+                unique[-1] = (
+                    unique[-1][0],
+                    max(unique[-1][1], confidence),
+                )
+        return (
+            waveform.new_tensor([entry[0] for entry in unique]),
+            waveform.new_tensor([entry[1] for entry in unique]),
+        )
+
+    def _praat_shimmer_pulse_chain(self, prepared: torch.Tensor) -> torch.Tensor:
+        """Construct the frozen detached recursive pulse chain for shimmer."""
+        pulses, _ = self._praat_shimmer_pulse_chain_with_confidence(prepared)
+        return pulses
 
     def _praat_asymmetric_hann_rms(
         self,
