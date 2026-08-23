@@ -1131,6 +1131,7 @@ def score_panel(args: argparse.Namespace) -> None:
         "selection_field": "scoring_status",
         "primary_speakers": primary_speakers,
         "failed_primary_speakers": failed_primary,
+        "failed_primary_receipts": exact_failure_receipts(primary_exact_rows),
         "reserve_speakers_by_sex": reserve_by_sex,
         "reserve_attempts": reserve_attempts,
         "substitutions": [

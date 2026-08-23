@@ -6,6 +6,7 @@ from scripts.evaluate_avqi_ltas_slope_svd_authority_panel import (
     PRIMARY_ROWS,
     RESERVE_ROWS,
     V9_PANEL_ROWS,
+    exact_failure_receipts,
     exact_speaker_complete,
     level_metrics,
     paired_lowpass_delta,
@@ -65,6 +66,7 @@ def test_exact_speaker_completion_uses_status_not_metric_value() -> None:
             rows.append(
                 {
                     "id": f"SVD:42:99:{view}:{variant}",
+                    "view": view,
                     "scoring_status": "ok",
                     "slope": 1e9,
                 }
@@ -72,7 +74,20 @@ def test_exact_speaker_completion_uses_status_not_metric_value() -> None:
 
     assert exact_speaker_complete(rows, "SVD:42") is True
     rows[-1]["scoring_status"] = "error"
+    rows[-1]["error_type"] = "PraatError"
+    rows[-1]["error_message"] = "LTAS input too short"
     assert exact_speaker_complete(rows, "SVD:42") is False
+    receipts = exact_failure_receipts(rows)
+    assert receipts == [
+        {
+            "id": "SVD:42:99:sv:lowpass_3khz",
+            "view": "sv",
+            "scoring_status": "error",
+            "error_type": "PraatError",
+            "error_message": "LTAS input too short",
+        }
+    ]
+    assert "slope" not in receipts[0]
 
 
 def test_exact_scorer_uses_view_correct_authoritative_preprocessing() -> None:
