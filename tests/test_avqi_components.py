@@ -535,6 +535,46 @@ def test_praat_cppsv7_has_finite_input_gradient_and_isolates_other_components() 
     assert float(gradient.norm()) > 0.0
 
 
+def test_praat_centered_dc_guard_v8_preserves_forward_and_component_gradients() -> None:
+    sample_rate = 16_000
+    time = torch.arange(8_000, dtype=torch.float32) / sample_rate
+    waveform = 0.01 * torch.sin(2.0 * math.pi * 175.0 * time)
+    baseline = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        cpps_mode="praat_topology_v7",
+        cpps_power_floor=1e-6,
+        cpps_max_frames=128,
+    )
+    candidate = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        cpps_mode="praat_centered_dc_guard_v8",
+        cpps_power_floor=1e-6,
+        cpps_max_frames=128,
+    )
+    torch.testing.assert_close(
+        candidate._cpps(waveform),
+        baseline._cpps(waveform),
+        rtol=0.0,
+        atol=1e-6,
+    )
+
+    gradient_waveform = waveform.clone().requires_grad_()
+    terms = candidate._cpps_praat_topology_v7_terms(gradient_waveform)
+    peak_gradient = torch.autograd.grad(
+        terms["parabolic_peak_value"].mean(),
+        gradient_waveform,
+        retain_graph=True,
+    )[0]
+    baseline_gradient = torch.autograd.grad(
+        terms["exact_baseline"].mean(),
+        gradient_waveform,
+    )[0]
+    assert torch.isfinite(peak_gradient).all()
+    assert torch.isfinite(baseline_gradient).all()
+    assert float(peak_gradient.norm()) > 0.0
+    assert float(baseline_gradient.norm()) > 0.0
+
+
 def test_praat_differentiable_default_keeps_linear_ac_v2_hnr() -> None:
     sample_rate = 16_000
     time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate

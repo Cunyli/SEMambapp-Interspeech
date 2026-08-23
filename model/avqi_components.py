@@ -1211,7 +1211,11 @@ class PraatDifferentiableAVQIComponentEstimator(
     ):
         if peak_mode not in {"soft", "hard"}:
             raise ValueError(f"unsupported peak mode: {peak_mode}")
-        if cpps_mode not in {"current_v2", "praat_topology_v7"}:
+        if cpps_mode not in {
+            "current_v2",
+            "praat_topology_v7",
+            "praat_centered_dc_guard_v8",
+        }:
             raise ValueError(f"unsupported CPPS mode: {cpps_mode}")
         if not math.isfinite(cpps_power_floor) or cpps_power_floor <= 0.0:
             raise ValueError("CPPS power floor must be finite and positive")
@@ -1589,7 +1593,18 @@ class PraatDifferentiableAVQIComponentEstimator(
         power = power.clone()
         power[..., 0] *= 0.5
         power[..., -1] *= 0.5
-        log_power = torch.log(power + 1e-30)
+        exact_log_power = torch.log(power + 1e-30)
+        if self.cpps_mode == "praat_centered_dc_guard_v8":
+            # Frame demeaning removes unwindowed DC, while Gaussian weighting
+            # can leave a residual endpoint arbitrarily close to zero. Preserve
+            # Praat's exact forward value without letting its log derivative
+            # dominate the CPPS waveform gradient.
+            log_power = torch.cat(
+                (exact_log_power[..., :1].detach(), exact_log_power[..., 1:]),
+                dim=-1,
+            )
+        else:
+            log_power = exact_log_power
         real_cepstrum = torch.fft.irfft(
             log_power,
             n=self.cpps_praat_n_fft,
@@ -1707,6 +1722,7 @@ class PraatDifferentiableAVQIComponentEstimator(
             "preemphasized": preemphasized,
             "windowed": windowed,
             "spectrum_power": power,
+            "exact_log_power": exact_log_power,
             "log_power": log_power,
             "real_cepstrum": real_cepstrum,
             "power_cepstrum": power_cepstrum,
@@ -1748,6 +1764,8 @@ class PraatDifferentiableAVQIComponentEstimator(
     ) -> torch.Tensor:
         if self.cpps_mode == "praat_topology_v7":
             return self._cpps_praat_topology_v7(prepared)
+        if self.cpps_mode == "praat_centered_dc_guard_v8":
+            return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
         return self._cpps_current(prepared)
 
     def _soft_voiced_ltas_input(self, prepared: torch.Tensor) -> torch.Tensor:
