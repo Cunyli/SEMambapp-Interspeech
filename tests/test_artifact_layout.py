@@ -54,6 +54,7 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"direct_praat_hard_cpps_relative_log1p_v10"' in multiseed
     assert '"direct_praat_hard_cpps_view_input_v12"' in source
     assert '"direct_praat_hard_cpps_view_input_v12"' in direct_source
+    assert '"direct_praat_hard_cpps_view_input_v12"' in multiseed
     assert '"shared_dual_head": {"status": "SKIPPED_USER_SCOPE"}' in direct_source
     assert (
         '"frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"}'
@@ -688,6 +689,24 @@ def test_avqi_multiseed_accepts_route_c_only_screen() -> None:
     namespace["validate_screen_contract"](
         screen,
         Path("route-c-screen.json"),
+    )
+
+    cpps_architecture = "direct_praat_hard_cpps_view_input_v12"
+    screen["contract"]["routes"]["direct_differentiable_estimator"][
+        "architectures"
+    ] = [cpps_architecture]
+    route = screen["routes"]["direct_differentiable_estimator"]
+    route["selected_architecture"] = cpps_architecture
+    route["training"] = {
+        cpps_architecture: {
+            "best_calibration_loss": 0.01,
+            "optimizer_steps": 0,
+            "trainable_parameter_count": 0,
+        }
+    }
+    namespace["validate_screen_contract"](
+        screen,
+        Path("route-c-cpps-v12-screen.json"),
     )
 
 
