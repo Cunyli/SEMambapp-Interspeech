@@ -55,6 +55,11 @@ def parse_args() -> argparse.Namespace:
         default=12,
         help="maximum rows in prepare stage; zero audits every eligible row",
     )
+    parser.add_argument(
+        "--views",
+        default="cs,sv",
+        help="comma-separated task views to include; default excludes combined both",
+    )
     return parser.parse_args()
 
 
@@ -78,6 +83,7 @@ def select_rows(
     rows: Iterable[dict[str, str]],
     splits: tuple[str, ...],
     max_rows: int,
+    views: tuple[str, ...],
 ) -> list[dict[str, str]]:
     if max_rows < 0:
         raise ValueError("max rows must be non-negative")
@@ -85,7 +91,7 @@ def select_rows(
         (
             row
             for row in rows
-            if row.get("view") in {"cs", "sv", "both"}
+            if row.get("view") in views
             and row.get("scoring_status") == "ok"
             and row.get("split") in splits
         ),
@@ -105,27 +111,23 @@ def select_rows(
         for split in splits
     }
     present_splits = sum(bool(grouped[split]) for split in splits)
-    quota = max(1, max_rows // present_splits)
+    base_quota, remainder = divmod(max_rows, present_splits)
     selected: list[dict[str, str]] = []
-    for split in splits:
-        selected.extend(grouped[split][:quota])
-    if len(selected) < max_rows:
-        selected_keys = {
-            (row["speaker_id"], row["sample_id"], row["split"], row["view"])
-            for row in selected
-        }
-        selected.extend(
-            row
-            for row in eligible
-            if (
-                row["speaker_id"],
-                row["sample_id"],
-                row["split"],
-                row["view"],
+    for split_index, split in enumerate(splits):
+        if not grouped[split]:
+            continue
+        quota = base_quota + int(split_index < remainder)
+        by_speaker: dict[str, list[dict[str, str]]] = {}
+        for row in grouped[split]:
+            by_speaker.setdefault(row["speaker_id"], []).append(row)
+        speakers = sorted(by_speaker)
+        for speaker_index, speaker in enumerate(speakers[:quota]):
+            speaker_rows = sorted(
+                by_speaker[speaker],
+                key=lambda row: (row["condition_id"], row["view"], row["sample_id"]),
             )
-            not in selected_keys
-        )
-    return selected[:max_rows]
+            selected.append(speaker_rows[speaker_index % len(speaker_rows)])
+    return selected
 
 
 def prepare_exact_input(
@@ -330,7 +332,9 @@ def write_records_csv(path: Path, records: list[dict[str, Any]]) -> None:
         writer.writerows(records)
 
 
-def validate_common_inputs(args: argparse.Namespace) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+def validate_common_inputs(
+    args: argparse.Namespace,
+) -> tuple[tuple[str, ...], tuple[str, ...], list[dict[str, str]]]:
     if not args.label_bank.is_file():
         raise FileNotFoundError(args.label_bank)
     if not args.avqi_root.is_dir():
@@ -343,13 +347,16 @@ def validate_common_inputs(args: argparse.Namespace) -> tuple[tuple[str, ...], l
     splits = tuple(value.strip() for value in args.splits.split(",") if value.strip())
     if not splits:
         raise ValueError("at least one split is required")
-    return splits, select_rows(read_rows(args.label_bank), splits, args.max_rows)
+    views = tuple(value.strip() for value in args.views.split(",") if value.strip())
+    if not views:
+        raise ValueError("at least one view is required")
+    return splits, views, select_rows(read_rows(args.label_bank), splits, args.max_rows, views)
 
 
 def prepare_stage(args: argparse.Namespace) -> None:
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite output: {args.output_dir}")
-    splits, rows = validate_common_inputs(args)
+    splits, views, rows = validate_common_inputs(args)
 
     # The exact scorer and Torch live in separate locked environments. These
     # stage-local imports are intentional and avoid package shadowing.
@@ -413,6 +420,7 @@ def prepare_stage(args: argparse.Namespace) -> None:
     summary = {
         "rows": len(records),
         "splits": list(splits),
+        "views": list(views),
         "exact_bank_max_absolute_error": float(np.max(np.abs(bank_errors))),
         "exact_bank_reproduction": (
             "PASS" if np.max(np.abs(bank_errors)) <= EXACT_BANK_TOLERANCE else "FAIL"

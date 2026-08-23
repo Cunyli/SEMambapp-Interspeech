@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="${SOURCE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_cpps_v7_parity_20260823_01}"
+RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_cpps_v7_parity_20260823_02}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 LABEL_BANK="${LABEL_BANK:-/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_component_direct_c_v5_data_20260817_03/outputs/label_bank/exact_component_label_bank_v4.csv}"
@@ -78,6 +78,7 @@ python "$SOURCE_ROOT/scripts/audit_cpps_parity.py" \
   --output-dir "$OUTPUT_DIR" \
   --source-commit "$SOURCE_COMMIT" \
   --stage torch \
-  --max-rows 12 \
+  --max-rows 24 \
+  --views cs,sv \
   2>&1 | tee -a "$LIVE_LOG"
 echo "event=complete job=$SLURM_JOB_ID time=$(date -Is)" | tee -a "$LIVE_LOG"
