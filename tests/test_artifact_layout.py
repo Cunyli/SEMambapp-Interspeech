@@ -49,6 +49,9 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"direct_praat_hard_shimmer_pulse_path_v6"' in source
     assert '"direct_praat_hard_shimmer_pulse_path_v6"' in direct_source
     assert '"direct_praat_hard_shimmer_pulse_path_v6"' in multiseed
+    assert '"direct_praat_hard_cpps_relative_log1p_v10"' in source
+    assert '"direct_praat_hard_cpps_relative_log1p_v10"' in direct_source
+    assert '"direct_praat_hard_cpps_relative_log1p_v10"' in multiseed
     assert '"shared_dual_head": {"status": "SKIPPED_USER_SCOPE"}' in direct_source
     assert (
         '"frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"}'
@@ -216,6 +219,7 @@ def test_avqi_phaseaware_v4_is_speaker_disjoint_and_no_train_highpass() -> None:
     assert "direct_praat_hard_shimmer_raw_cc_surrogate_v4" in confirm
     assert "direct_praat_hard_shimmer_pulse_chain_v5" in confirm
     assert "direct_praat_hard_shimmer_pulse_path_v6" in confirm
+    assert "direct_praat_hard_cpps_relative_log1p_v10" in confirm
     assert 'full:pretrained_full_tfgrid' in confirm
     assert 'CONFIRM_RUN_STEM="avqi_component_direct_c_v6_confirm"' in confirm
     assert 'SHARED_CANDIDATES="$(jq -er' in confirm

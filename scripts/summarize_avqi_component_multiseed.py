@@ -64,6 +64,7 @@ EXPECTED_FULL_V4_SCREEN_FORMS = {
 }
 EXPECTED_DIRECT_C_SCREEN_FORMS = (
     {DIRECT_ROUTE: ["direct_praat_hard_v2"]},
+    {DIRECT_ROUTE: ["direct_praat_hard_cpps_relative_log1p_v10"]},
     {
         DIRECT_ROUTE: [
             "direct_praat_hard_v2",

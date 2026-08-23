@@ -848,6 +848,12 @@ def train_waveform_predictor(
         predictor = PraatDifferentiableAVQIComponentEstimator(peak_mode="soft")
     elif architecture == "direct_praat_hard_v2":
         predictor = PraatDifferentiableAVQIComponentEstimator(peak_mode="hard")
+    elif architecture == "direct_praat_hard_cpps_relative_log1p_v10":
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            cpps_mode="praat_relative_log1p_v10",
+            cpps_power_floor=1e-6,
+        )
     elif architecture == "direct_praat_hard_shimmer_rms_v3":
         predictor = PraatDifferentiableAVQIComponentEstimator(
             peak_mode="hard",
@@ -2610,6 +2616,7 @@ def main() -> None:
         "direct_exact_inspired",
         "direct_praat_soft_v2",
         "direct_praat_hard_v2",
+        "direct_praat_hard_cpps_relative_log1p_v10",
         "direct_praat_hard_shimmer_rms_v3",
         "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
         "direct_praat_hard_shimmer_pulse_chain_v5",
@@ -2788,6 +2795,26 @@ def main() -> None:
                         ],
                     }
                     if "direct_praat_hard_v2" in waveform_architectures
+                    else None
+                ),
+                "direct_praat_hard_cpps_relative_log1p_v10": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "piecewise-differentiable maximum",
+                        "formulas": [
+                            "Praat 34 Hz stop-Hann metric-branch high-pass",
+                            "overlap-normalized linear autocorrelation HNR",
+                            "periodicity-aware soft voiced mask",
+                            "exact-aligned Praat PowerCepstrogram/Get CPPS forward",
+                            "frame-relative log1p CPPS surrogate derivative",
+                            "cycle-lag analytic-envelope shimmer",
+                            "global LTAS slope and trend tilt",
+                        ],
+                    }
+                    if "direct_praat_hard_cpps_relative_log1p_v10"
+                    in waveform_architectures
                     else None
                 ),
                 "direct_praat_hard_shimmer_rms_v3": (
@@ -3038,6 +3065,7 @@ def main() -> None:
         "direct_exact_inspired",
         "direct_praat_soft_v2",
         "direct_praat_hard_v2",
+        "direct_praat_hard_cpps_relative_log1p_v10",
         "direct_praat_hard_shimmer_rms_v3",
         "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
         "direct_praat_hard_shimmer_pulse_chain_v5",

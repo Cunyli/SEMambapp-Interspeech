@@ -62,6 +62,7 @@ DIRECT_ARCHITECTURES = (
     "direct_exact_inspired",
     "direct_praat_soft_v2",
     "direct_praat_hard_v2",
+    "direct_praat_hard_cpps_relative_log1p_v10",
     "direct_praat_hard_shimmer_rms_v3",
     "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
     "direct_praat_hard_shimmer_pulse_chain_v5",
