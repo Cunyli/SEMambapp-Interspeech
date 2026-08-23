@@ -47,6 +47,22 @@ VIEWS = ("cs", "sv")
 # still reported as a validated component, but is not co-weighted with HNR and
 # LTAS tilt in this two-term waveform diagnostic.
 OPTIMIZED_COMPONENTS = ("hnr", "tilt")
+LEGACY_PILOT_PROFILE = "hnr_tilt_v2"
+CPPS_PILOT_PROFILE = "cpps_view_input_v12"
+PILOT_PROFILE_CONFIGS = {
+    LEGACY_PILOT_PROFILE: {
+        "architecture": "direct_praat_hard_v2",
+        "components": OPTIMIZED_COMPONENTS,
+        "consensus_must_match_exactly": True,
+        "speaking_type_required": False,
+    },
+    CPPS_PILOT_PROFILE: {
+        "architecture": "direct_praat_hard_cpps_view_input_v12",
+        "components": ("cpps",),
+        "consensus_must_match_exactly": False,
+        "speaking_type_required": True,
+    },
+}
 EXACT_IMPROVEMENT_FRACTION_GATE = 2.0 / 3.0
 SURROGATE_IMPROVEMENT_FRACTION_GATE = 0.75
 NORMALIZED_GAP_REDUCTION_GATE = 0.02
@@ -124,6 +140,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--slurm-job-id", required=True)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--pilot-profile",
+        choices=tuple(PILOT_PROFILE_CONFIGS),
+        default=LEGACY_PILOT_PROFILE,
+    )
+    parser.add_argument("--panel-selection-salt", default="")
     parser.add_argument("--seed", type=int, default=20260814)
     parser.add_argument("--speakers-per-severity", type=int, default=3)
     parser.add_argument("--speaker-offset", type=int, default=0)
@@ -133,6 +155,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fidelity-weight", type=float, default=0.05)
     parser.add_argument("--residual-ceiling-db", type=float, default=-30.0)
     return parser.parse_args()
+
+
+def pilot_profile_config(profile: str) -> dict[str, Any]:
+    try:
+        return PILOT_PROFILE_CONFIGS[profile]
+    except KeyError as error:
+        raise ValueError(f"unknown waveform pilot profile: {profile}") from error
 
 
 def sha256_file(path: Path) -> str:
@@ -160,6 +189,22 @@ def validate_file_hash(path: Path, expected: str, label: str) -> str:
     return actual
 
 
+def require_authorized_components(
+    observed: Any,
+    required: tuple[str, ...],
+    exact_match: bool,
+    label: str,
+) -> None:
+    values = tuple(observed or ())
+    valid = values == required if exact_match else set(required) <= set(values)
+    if not valid:
+        qualifier = "exactly" if exact_match else "at least"
+        raise ValueError(
+            f"{label} must contain {qualifier} the authorized components: "
+            f"{values} vs {required}"
+        )
+
+
 def validate_route_c_authorization(
     consensus_path: Path,
     consensus_sha256: str,
@@ -169,7 +214,12 @@ def validate_route_c_authorization(
     screen_completion_receipt_sha256: str,
     predictor_checkpoint_path: Path,
     predictor_checkpoint_sha256: str,
+    pilot_profile: str = LEGACY_PILOT_PROFILE,
 ) -> tuple[dict[str, float], dict[str, float], dict[str, Any]]:
+    profile = pilot_profile_config(pilot_profile)
+    optimized_components = tuple(profile["components"])
+    expected_architecture = str(profile["architecture"])
+    exact_component_match = bool(profile["consensus_must_match_exactly"])
     consensus_hash = validate_file_hash(
         consensus_path,
         consensus_sha256,
@@ -211,18 +261,30 @@ def validate_route_c_authorization(
         raise ValueError("Route C consensus does not authorize a bounded pilot")
     if promotion.get("routes") != ["direct_differentiable_estimator"]:
         raise ValueError("Route C promotion route differs")
-    if tuple(promotion.get("components", ())) != OPTIMIZED_COMPONENTS:
-        raise ValueError("Route C promotion components differ")
+    require_authorized_components(
+        promotion.get("components"),
+        optimized_components,
+        exact_component_match,
+        "Route C promotion",
+    )
     route_consensus = consensus.get("routes", {}).get(
         "direct_differentiable_estimator",
         {},
     )
     if route_consensus.get("decision") != "RELIABLE":
         raise ValueError("Route C multi-seed result is not reliable")
-    if tuple(route_consensus.get("consensus_components", ())) != OPTIMIZED_COMPONENTS:
-        raise ValueError("Route C consensus component list differs")
+    require_authorized_components(
+        route_consensus.get("consensus_components"),
+        optimized_components,
+        exact_component_match,
+        "Route C consensus",
+    )
+    if pilot_profile == CPPS_PILOT_PROFILE and route_consensus.get(
+        "selected_form"
+    ) != expected_architecture:
+        raise ValueError("Route C consensus selected form differs")
     pass_counts = route_consensus.get("component_pass_counts", {})
-    if any(pass_counts.get(component) != 3 for component in OPTIMIZED_COMPONENTS):
+    if any(pass_counts.get(component) != 3 for component in optimized_components):
         raise ValueError("Route C components did not pass all three locked seeds")
     if consensus.get("source_report_sha256", {}).get("screen") != screen_hash:
         raise ValueError("Route C consensus does not bind the supplied screen report")
@@ -244,18 +306,35 @@ def validate_route_c_authorization(
     if screen.get("contract", {}).get("route_scope") != "direct_only":
         raise ValueError("Route C screen scope differs")
     route = screen.get("routes", {}).get("direct_differentiable_estimator", {})
-    if route.get("selected_architecture") != "direct_praat_hard_v2":
+    if route.get("selected_architecture") != expected_architecture:
         raise ValueError("Route C selected estimator differs")
     if route.get("decision") != "ELIGIBLE_FOR_MULTISEED_CONFIRMATION":
         raise ValueError("Route C screen did not pass its scorer gates")
-    if tuple(route.get("eligible_components", ())) != OPTIMIZED_COMPONENTS:
-        raise ValueError("Route C screen eligible components differ")
+    require_authorized_components(
+        route.get("eligible_components"),
+        optimized_components,
+        exact_component_match,
+        "Route C screen eligible list",
+    )
+    if pilot_profile == CPPS_PILOT_PROFILE:
+        topology = screen.get("contract", {}).get("routes", {}).get(
+            "direct_differentiable_estimator",
+            {},
+        ).get("cpps_view_input_v12", {})
+        if topology.get("speaking_type_required") is not True:
+            raise ValueError("CPPS v12 screen does not require speaking type")
+        pathology = route.get("external_evaluation_by_architecture", {}).get(
+            expected_architecture,
+            {},
+        ).get("pathology", {})
+        if pathology.get("speaker_overlap_with_surrogate") != 0:
+            raise ValueError("CPPS pilot speakers are not external to surrogate data")
     gradient = route.get("gradient", {})
     if gradient.get("decision") != "PASS":
         raise ValueError("Route C screen gradient gate failed")
     component_gradients = gradient.get("component_input_gradients", {})
     screen_component_gradient_norms: dict[str, float] = {}
-    for component in OPTIMIZED_COMPONENTS:
+    for component in optimized_components:
         item = component_gradients.get(component, {})
         norm = float(item.get("gradient_norm", math.nan))
         if item.get("decision") != "PASS" or not math.isfinite(norm) or norm <= 0.0:
@@ -268,8 +347,12 @@ def validate_route_c_authorization(
         raise ValueError("Route C screen receipt scope differs")
     if screen_receipt.get("route_c") != route["decision"]:
         raise ValueError("Route C screen receipt route decision differs")
-    if tuple(screen_receipt.get("eligible_components", ())) != OPTIMIZED_COMPONENTS:
-        raise ValueError("Route C screen receipt components differ")
+    require_authorized_components(
+        screen_receipt.get("eligible_components"),
+        optimized_components,
+        exact_component_match,
+        "Route C screen receipt",
+    )
     if screen_receipt.get("generator_optimizer_steps") != 0:
         raise ValueError("Route C screen receipt contains generator updates")
     if screen_receipt.get("bounded_waveform_pilot_submitted") is not False:
@@ -295,17 +378,22 @@ def validate_route_c_authorization(
     minimum_norm = min(screen_component_gradient_norms.values())
     optimization_component_weights = {
         component: minimum_norm / screen_component_gradient_norms[component]
-        for component in OPTIMIZED_COMPONENTS
+        for component in optimized_components
     }
     authorization = {
         "decision": promotion["decision"],
         "route": "direct_differentiable_estimator",
-        "components": list(OPTIMIZED_COMPONENTS),
+        "components": list(optimized_components),
+        "pilot_profile": pilot_profile,
+        "selected_architecture": expected_architecture,
         "consensus_sha256": consensus_hash,
         "screen_report_sha256": screen_hash,
         "screen_completion_receipt_sha256": screen_receipt_hash,
         "predictor_checkpoint_sha256": predictor_hash,
         "screen_source_commit": screen["contract"]["source_commit"],
+        "screen_external_exact_csv_sha256": screen.get("contract", {})
+        .get("source_sha256", {})
+        .get("external_exact_csv"),
     }
     return (
         screen_component_gradient_norms,
@@ -374,14 +462,26 @@ def component_tensor(row: dict[str, str], prefix: str) -> torch.Tensor:
     return tensor
 
 
+def speaker_selection_rank(
+    selection_salt: str,
+    severity_group: str,
+    speaker_id: str,
+) -> str:
+    payload = f"{selection_salt}\0{severity_group}\0{speaker_id}".encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 def load_cases(
     path: Path,
     speakers_per_severity: int,
     expected_cases: int,
     speaker_offset: int = 0,
+    selection_salt: str | None = None,
 ) -> list[Case]:
     if speakers_per_severity <= 0 or speaker_offset < 0:
         raise ValueError("speaker count must be positive and offset non-negative")
+    if selection_salt is not None and speaker_offset != 0:
+        raise ValueError("hash-ranked panel selection requires speaker_offset=0")
     with path.open(newline="", encoding="utf-8-sig") as handle:
         all_rows = list(csv.DictReader(handle))
     rows = [
@@ -412,16 +512,29 @@ def load_cases(
         clean_by_speaker_view[key] = row
     selected_speakers: dict[str, list[str]] = {}
     for group in SEVERITY_GROUPS:
-        speakers = sorted(
-            {row["speaker_id"] for row in rows if row["sample_group"] == group}
+        speaker_ids = {
+            row["speaker_id"] for row in rows if row["sample_group"] == group
+        }
+        speakers = (
+            sorted(
+                speaker_ids,
+                key=lambda speaker_id: speaker_selection_rank(
+                    selection_salt,
+                    group,
+                    speaker_id,
+                ),
+            )
+            if selection_salt is not None
+            else sorted(speaker_ids)
         )
-        stop = speaker_offset + speakers_per_severity
+        start = 0 if selection_salt is not None else speaker_offset
+        stop = start + speakers_per_severity
         if len(speakers) < stop:
             raise ValueError(
                 f"insufficient {group} speakers for offset {speaker_offset}: "
                 f"{len(speakers)}"
             )
-        selected_speakers[group] = speakers[speaker_offset:stop]
+        selected_speakers[group] = speakers[start:stop]
     required_clean_keys = {
         (speaker_id, view)
         for speakers in selected_speakers.values()
@@ -497,22 +610,34 @@ def load_waveform(path: Path) -> tuple[torch.Tensor, str]:
 def load_predictor(
     path: Path,
     device: torch.device,
+    pilot_profile: str = LEGACY_PILOT_PROFILE,
 ) -> tuple[
     PraatDifferentiableAVQIComponentEstimator,
     ComponentAffineCalibrator,
     torch.Tensor,
     torch.Tensor,
 ]:
+    profile = pilot_profile_config(pilot_profile)
+    expected_architecture = str(profile["architecture"])
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    if checkpoint["architecture"] != "direct_praat_hard_v2":
+    if checkpoint["architecture"] != expected_architecture:
         raise ValueError(
-            f"expected direct_praat_hard_v2, got {checkpoint['architecture']}"
+            f"expected {expected_architecture}, got {checkpoint['architecture']}"
         )
     if tuple(checkpoint["components"]) != AVQI_COMPONENT_NAMES:
         raise ValueError("predictor component order differs")
-    predictor = PraatDifferentiableAVQIComponentEstimator(
-        peak_mode="hard"
-    ).to(device)
+    if bool(profile["speaking_type_required"]):
+        if checkpoint.get("speaking_type_required") is not True:
+            raise ValueError("CPPS v12 checkpoint does not require speaking type")
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            cpps_mode="praat_view_input_v12",
+            cpps_power_floor=1e-6,
+        ).to(device)
+    else:
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard"
+        ).to(device)
     predictor.load_state_dict(checkpoint["state_dict"])
     predictor.eval()
     calibrator = ComponentAffineCalibrator(
@@ -531,8 +656,9 @@ def predict_components(
     target_mean: torch.Tensor,
     target_scale: torch.Tensor,
     waveform: torch.Tensor,
+    speaking_type: str | None = None,
 ) -> torch.Tensor:
-    normalized = predictor(waveform)
+    normalized = predictor(waveform, speaking_type=speaking_type)
     raw = denormalize_components(normalized, target_mean, target_scale)
     return calibrator(raw)
 
@@ -859,12 +985,14 @@ def optimize_waveform(
     learning_rate_scale: float,
     fidelity_weight: float,
     residual_ceiling_db: float,
+    speaking_type: str | None = None,
+    optimized_components: tuple[str, ...] = OPTIMIZED_COMPONENTS,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     if steps <= 0 or learning_rate_scale <= 0.0 or fidelity_weight < 0.0:
         raise ValueError("invalid optimization hyperparameters")
     if residual_ceiling_db >= 0.0:
         raise ValueError("residual ceiling must be below 0 dB")
-    if set(optimization_component_weights) != set(OPTIMIZED_COMPONENTS):
+    if set(optimization_component_weights) != set(optimized_components):
         raise ValueError(
             "optimization component weights differ from authorized components"
         )
@@ -874,11 +1002,11 @@ def optimize_waveform(
     ):
         raise ValueError("optimization component weights must be finite and positive")
     selected_indices = torch.tensor(
-        [AVQI_COMPONENT_NAMES.index(name) for name in OPTIMIZED_COMPONENTS],
+        [AVQI_COMPONENT_NAMES.index(name) for name in optimized_components],
         device=base.device,
     )
     component_weights = base.new_tensor(
-        [optimization_component_weights[name] for name in OPTIMIZED_COMPONENTS]
+        [optimization_component_weights[name] for name in optimized_components]
     )
     base = base.reshape(1, -1)
     target = target.to(base.device).reshape(1, -1)
@@ -897,6 +1025,7 @@ def optimize_waveform(
         target_mean,
         target_scale,
         base,
+        speaking_type,
     ).detach()
     for step in range(1, steps + 1):
         candidate = (base + residual).clamp(-0.999, 0.999)
@@ -906,6 +1035,7 @@ def optimize_waveform(
             target_mean,
             target_scale,
             candidate,
+            speaking_type,
         )
         normalized_gap = (
             prediction.index_select(-1, selected_indices)
@@ -942,6 +1072,7 @@ def optimize_waveform(
                     target_mean,
                     target_scale,
                     (base + residual).clamp(-0.999, 0.999),
+                    speaking_type,
                 )
                 trajectory.append(
                     {
@@ -965,6 +1096,7 @@ def optimize_waveform(
         target_mean,
         target_scale,
         optimized,
+        speaking_type,
     ).detach()
     safety = waveform_safety(base.cpu(), optimized.cpu())
     return optimized[0], {
@@ -1172,11 +1304,12 @@ def aggregate_denoising(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def nonselected_normalized_gap_increase(
     rows: list[dict[str, Any]],
     target_scale: torch.Tensor,
+    optimized_components: tuple[str, ...] = OPTIMIZED_COMPONENTS,
 ) -> float:
     nonselected = [
         component
         for component in AVQI_COMPONENT_NAMES
-        if component not in OPTIMIZED_COMPONENTS
+        if component not in optimized_components
     ]
     values = [
         np.mean(
@@ -1197,6 +1330,7 @@ def nonselected_normalized_gap_increase(
 def slice_reports(
     rows: list[dict[str, Any]],
     target_scale: torch.Tensor,
+    optimized_components: tuple[str, ...] = OPTIMIZED_COMPONENTS,
 ) -> dict[str, Any]:
     predicates = {
         "view=cs": lambda row: row["view"] == "cs",
@@ -1214,7 +1348,7 @@ def slice_reports(
         if not selected:
             raise ValueError(f"empty required waveform slice: {slice_name}")
         components: dict[str, Any] = {}
-        for component in OPTIMIZED_COMPONENTS:
+        for component in optimized_components:
             aggregate = aggregate_component(
                 selected,
                 component,
@@ -1239,6 +1373,7 @@ def slice_reports(
         nonselected_increase = nonselected_normalized_gap_increase(
             selected,
             target_scale,
+            optimized_components,
         )
         nonselected_passed = (
             nonselected_increase <= NONSELECTED_MEDIAN_INCREASE_GATE
@@ -1273,6 +1408,7 @@ def summarize(
     rows: list[dict[str, Any]],
     target_scale: torch.Tensor,
     residual_ceiling_db: float,
+    optimized_components: tuple[str, ...] = OPTIMIZED_COMPONENTS,
 ) -> dict[str, Any]:
     aggregates: dict[str, dict[str, Any]] = {}
     for domain in ("surrogate", "exact"):
@@ -1287,7 +1423,7 @@ def summarize(
         }
     selected_indices = [
         AVQI_COMPONENT_NAMES.index(component)
-        for component in OPTIMIZED_COMPONENTS
+        for component in optimized_components
     ]
     exact_total_before = np.array(
         [
@@ -1295,7 +1431,7 @@ def summarize(
                 row[f"exact_absolute_gap_before_{component}"]
                 / float(target_scale[index])
                 for component, index in zip(
-                    OPTIMIZED_COMPONENTS,
+                    optimized_components,
                     selected_indices,
                     strict=True,
                 )
@@ -1309,7 +1445,7 @@ def summarize(
                 row[f"exact_absolute_gap_after_{component}"]
                 / float(target_scale[index])
                 for component, index in zip(
-                    OPTIMIZED_COMPONENTS,
+                    optimized_components,
                     selected_indices,
                     strict=True,
                 )
@@ -1320,6 +1456,7 @@ def summarize(
     nonselected_increase = nonselected_normalized_gap_increase(
         rows,
         target_scale,
+        optimized_components,
     )
     selected_relative_reduction = float(
         1.0
@@ -1327,7 +1464,7 @@ def summarize(
         / max(exact_total_before.mean(), 1e-8)
     )
     component_gates = {}
-    for component in OPTIMIZED_COMPONENTS:
+    for component in optimized_components:
         surrogate = aggregates["surrogate"][component]
         exact = aggregates["exact"][component]
         gates = {
@@ -1382,7 +1519,7 @@ def summarize(
     }
     pathology_guardrails = aggregate_pathology_guardrails(rows)
     denoising = aggregate_denoising(rows)
-    slices = slice_reports(rows, target_scale)
+    slices = slice_reports(rows, target_scale, optimized_components)
     complete_slices = all(
         report["decision"] == "PASS" for report in slices.values()
     )
@@ -1413,7 +1550,10 @@ def summarize(
     }
 
 
-def markdown_summary(report: dict[str, Any]) -> str:
+def markdown_summary(
+    report: dict[str, Any],
+    optimized_components: tuple[str, ...] = OPTIMIZED_COMPONENTS,
+) -> str:
     summary = report["summary"]
     lines = [
         "# Direct AVQI waveform-optimization diagnostic",
@@ -1423,7 +1563,7 @@ def markdown_summary(report: dict[str, Any]) -> str:
         "| Component | Exact improved cases | Median normalized reduction | Decision |",
         "|---|---:|---:|---|",
     ]
-    for component in OPTIMIZED_COMPONENTS:
+    for component in optimized_components:
         aggregate = summary["aggregates"]["exact"][component]
         decision = summary["component_gates"][component]["decision"]
         lines.append(
@@ -1463,6 +1603,11 @@ def markdown_summary(report: dict[str, Any]) -> str:
 
 def main() -> None:
     args = parse_args()
+    profile = pilot_profile_config(args.pilot_profile)
+    optimized_components = tuple(profile["components"])
+    panel_selection_salt = args.panel_selection_salt or None
+    if args.pilot_profile == CPPS_PILOT_PROFILE and panel_selection_salt is None:
+        raise ValueError("CPPS v12 pilot requires a fresh panel selection salt")
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite output: {args.output_dir}")
     if repository_head(REPO_ROOT) != args.source_commit:
@@ -1490,7 +1635,14 @@ def main() -> None:
         args.screen_completion_receipt_sha256,
         args.predictor_checkpoint,
         args.predictor_checkpoint_sha256,
+        args.pilot_profile,
     )
+    if (
+        args.pilot_profile == CPPS_PILOT_PROFILE
+        and authorization["screen_external_exact_csv_sha256"]
+        != args.external_exact_csv_sha256
+    ):
+        raise ValueError("CPPS pilot panel differs from the speaker-disjoint screen")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
@@ -1505,10 +1657,26 @@ def main() -> None:
         args.speakers_per_severity,
         args.expected_cases,
         args.speaker_offset,
+        panel_selection_salt,
     )
+    panel_case_ids = [case.case_id for case in cases]
+    panel_manifest_sha256 = hashlib.sha256(
+        ("\n".join(panel_case_ids) + "\n").encode()
+    ).hexdigest()
+    panel_speakers = {
+        group: sorted(
+            {
+                case.speaker_id
+                for case in cases
+                if case.sample_group == group
+            }
+        )
+        for group in SEVERITY_GROUPS
+    }
     predictor, calibrator, target_mean, target_scale = load_predictor(
         args.predictor_checkpoint,
         device,
+        args.pilot_profile,
     )
     args.output_dir.mkdir(parents=True)
     wav_dir = args.output_dir / "wav"
@@ -1530,6 +1698,8 @@ def main() -> None:
             args.learning_rate_scale,
             args.fidelity_weight,
             args.residual_ceiling_db,
+            speaking_type=case.view,
+            optimized_components=optimized_components,
         )
         output_path = wav_dir / f"{case.case_id}.wav"
         sf.write(
@@ -1552,6 +1722,7 @@ def main() -> None:
                 target_mean,
                 target_scale,
                 written.to(device).unsqueeze(0),
+                case.view,
             ).cpu()[0]
         exact_after = score_exact(
             output_path,
@@ -1608,9 +1779,18 @@ def main() -> None:
         trajectories[case.case_id] = optimization["trajectory"]
         print(f"optimized_cases={index}/{len(cases)} case={case.case_id}", flush=True)
 
-    summary = summarize(rows, target_scale.cpu(), args.residual_ceiling_db)
+    summary = summarize(
+        rows,
+        target_scale.cpu(),
+        args.residual_ceiling_db,
+        optimized_components,
+    )
     report = {
-        "schema_version": "direct-avqi-waveform-optimization-v2",
+        "schema_version": (
+            "direct-avqi-waveform-optimization-v3"
+            if args.pilot_profile == CPPS_PILOT_PROFILE
+            else "direct-avqi-waveform-optimization-v2"
+        ),
         "decision": summary["decision"],
         "waveform_optimizer_steps": len(rows) * args.steps,
         "generator_optimizer_steps": 0,
@@ -1619,6 +1799,7 @@ def main() -> None:
         "contract": {
             "source_commit": args.source_commit,
             "slurm_job_id": args.slurm_job_id,
+            "pilot_profile": args.pilot_profile,
             "candidate": CANDIDATE,
             "condition": CONDITION,
             "severity_groups": list(SEVERITY_GROUPS),
@@ -1626,10 +1807,23 @@ def main() -> None:
             "speakers_per_severity": args.speakers_per_severity,
             "speaker_offset": args.speaker_offset,
             "case_selection": (
-                "lexicographic severity slice beginning at speaker_offset"
+                "sha256 rank by frozen salt, severity group, and speaker ID"
+                if panel_selection_salt is not None
+                else "lexicographic severity slice beginning at speaker_offset"
             ),
+            "panel_selection_salt": panel_selection_salt,
+            "panel_speakers": panel_speakers,
+            "panel_case_ids": panel_case_ids,
+            "panel_manifest_sha256": panel_manifest_sha256,
+            "speaker_overlap_with_surrogate": 0,
             "expected_cases": args.expected_cases,
-            "optimized_components": list(OPTIMIZED_COMPONENTS),
+            "optimized_components": list(optimized_components),
+            "loss_target": (
+                "normalized bidirectional gap to same-speaker clean pathological "
+                "CS/SV target"
+            ),
+            "avqi_scalar_coefficient_used_for_direction": False,
+            "final_output_highpass_applied": False,
             "screen_component_gradient_norms": screen_component_gradient_norms,
             "optimization_component_weights": optimization_component_weights,
             "steps": args.steps,
@@ -1730,7 +1924,10 @@ def main() -> None:
     summary_path = args.output_dir / "SUMMARY.md"
     write_csv(results_path, rows)
     write_json(report_path, report)
-    summary_path.write_text(markdown_summary(report), encoding="utf-8")
+    summary_path.write_text(
+        markdown_summary(report, optimized_components),
+        encoding="utf-8",
+    )
     receipt = {
         "decision": report["decision"],
         "waveform_optimizer_steps": report["waveform_optimizer_steps"],
@@ -1738,6 +1935,8 @@ def main() -> None:
         "formal_pathology_training_submitted": False,
         "authorization_decision": authorization["decision"],
         "bounded_waveform_pilot_completed": True,
+        "pilot_profile": args.pilot_profile,
+        "panel_manifest_sha256": panel_manifest_sha256,
         "authorization_sha256": {
             "consensus": authorization["consensus_sha256"],
             "screen_report": authorization["screen_report_sha256"],

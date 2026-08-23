@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import runpy
 from pathlib import Path
@@ -77,6 +78,34 @@ def test_waveform_optimization_summary_rejects_surrogate_only_move() -> None:
     summary = namespace["summarize"](rows, torch.ones(6), -30.0)
     assert summary["decision"] == "FAIL_WAVEFORM_OPTIMIZATION"
     assert summary["component_gates"]["hnr"]["decision"] == "FAIL"
+
+
+def test_waveform_optimization_summary_supports_cpps_only_profile() -> None:
+    namespace = load_namespace()
+    rows = synthetic_rows()
+    for row in rows:
+        for domain in ("surrogate", "exact"):
+            row[f"{domain}_absolute_gap_after_hnr"] = 1.0
+            row[f"{domain}_absolute_gap_after_tilt"] = 1.0
+            row[f"{domain}_absolute_gap_after_cpps"] = 0.5
+    summary = namespace["summarize"](
+        rows,
+        torch.ones(6),
+        -30.0,
+        ("cpps",),
+    )
+    assert summary["decision"] == "PASS_WAVEFORM_OPTIMIZATION"
+    assert summary["component_gates"] == {
+        "cpps": {
+            "gates": {
+                "surrogate_improvement_fraction_ge_0_75": True,
+                "surrogate_median_normalized_reduction_ge_0_02": True,
+                "exact_improvement_fraction_ge_two_thirds": True,
+                "exact_median_normalized_reduction_ge_0_02": True,
+            },
+            "decision": "PASS",
+        }
+    }
 
 
 def test_project_residual_enforces_rms_and_peak_limits() -> None:
@@ -318,6 +347,28 @@ def test_load_cases_honors_speaker_offset(tmp_path: Path) -> None:
         for case in cases
     )
 
+    selection_salt = "cpps-v12-fresh-test-panel"
+    fresh_cases = namespace["load_cases"](
+        csv_path,
+        2,
+        8,
+        0,
+        selection_salt,
+    )
+    expected_speakers = set()
+    for group, prefix in (
+        ("pathological_mild", "mild"),
+        ("pathological_severe", "severe"),
+    ):
+        ranked = sorted(
+            (f"{prefix}_{index}" for index in range(5)),
+            key=lambda speaker_id: hashlib.sha256(
+                f"{selection_salt}\0{group}\0{speaker_id}".encode()
+            ).hexdigest(),
+        )
+        expected_speakers.update(ranked[:2])
+    assert {case.speaker_id for case in fresh_cases} == expected_speakers
+
 
 def test_route_c_authorization_binds_screen_and_checkpoint(
     tmp_path: Path,
@@ -424,3 +475,73 @@ def test_route_c_authorization_binds_screen_and_checkpoint(
             predictor,
             predictor_sha256,
         )
+
+    cpps_profile = namespace["CPPS_PILOT_PROFILE"]
+    cpps_architecture = "direct_praat_hard_cpps_view_input_v12"
+    cpps_predictor = tmp_path / f"direct_{cpps_architecture}_estimator.pt"
+    cpps_predictor.write_bytes(b"frozen CPPS v12 estimator")
+    cpps_predictor_sha256 = sha256_file(cpps_predictor)
+    screen["contract"]["source_sha256"] = {
+        "external_exact_csv": "a" * 64,
+    }
+    screen["contract"]["routes"] = {
+        "direct_differentiable_estimator": {
+            "cpps_view_input_v12": {"speaking_type_required": True},
+        }
+    }
+    route = screen["routes"]["direct_differentiable_estimator"]
+    route["selected_architecture"] = cpps_architecture
+    route["eligible_components"] = ["cpps", "hnr", "tilt"]
+    route["gradient"] = {
+        "decision": "PASS",
+        "component_input_gradients": {
+            "cpps": {"decision": "PASS", "gradient_norm": 1.25},
+        },
+    }
+    route["external_evaluation_by_architecture"] = {
+        cpps_architecture: {
+            "pathology": {"speaker_overlap_with_surrogate": 0},
+        }
+    }
+    screen_path.write_text(json.dumps(screen), encoding="utf-8")
+    screen_sha256 = sha256_file(screen_path)
+
+    screen_receipt["eligible_components"] = ["cpps", "hnr", "tilt"]
+    screen_receipt["artifact_sha256"] = {
+        "diagnostic_report.json": screen_sha256,
+    }
+    screen_receipt["checkpoint_sha256"] = {
+        cpps_predictor.name: cpps_predictor_sha256,
+    }
+    receipt_path.write_text(json.dumps(screen_receipt), encoding="utf-8")
+    receipt_sha256 = sha256_file(receipt_path)
+
+    consensus["promotion"]["decision"] = "GO_BOUNDED_ROUTE_C_WAVEFORM_PILOT"
+    consensus["promotion"]["components"] = ["cpps", "hnr", "tilt"]
+    consensus_route = consensus["routes"]["direct_differentiable_estimator"]
+    consensus_route["selected_form"] = cpps_architecture
+    consensus_route["consensus_components"] = ["cpps", "hnr", "tilt"]
+    consensus_route["component_pass_counts"] = {
+        "cpps": 3,
+        "hnr": 3,
+        "tilt": 3,
+    }
+    consensus["source_report_sha256"] = {"screen": screen_sha256}
+    consensus_path.write_text(json.dumps(consensus), encoding="utf-8")
+    consensus_sha256 = sha256_file(consensus_path)
+
+    gradient_norms, weights, authorization = validate(
+        consensus_path,
+        consensus_sha256,
+        screen_path,
+        screen_sha256,
+        receipt_path,
+        receipt_sha256,
+        cpps_predictor,
+        cpps_predictor_sha256,
+        cpps_profile,
+    )
+    assert gradient_norms == {"cpps": 1.25}
+    assert weights == {"cpps": 1.0}
+    assert authorization["components"] == ["cpps"]
+    assert authorization["screen_external_exact_csv_sha256"] == "a" * 64

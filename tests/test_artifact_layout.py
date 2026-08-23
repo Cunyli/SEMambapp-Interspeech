@@ -385,9 +385,14 @@ def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None
     audit = read("scripts/audit_avqi_waveform_guardrails.py")
     audit_runner = read("scripts/run_avqi_waveform_guardrail_audit.sh")
     pilot_runner = read("scripts/run_avqi_component_direct_c_waveform_pilot.sh")
+    cpps_pilot_runner = read("scripts/run_avqi_cpps_v12_waveform_pilot.sh")
     assert 'CANDIDATE = "S3_500"' in source
     assert 'CONDITION = "snr10"' in source
     assert 'OPTIMIZED_COMPONENTS = ("hnr", "tilt")' in source
+    assert 'CPPS_PILOT_PROFILE = "cpps_view_input_v12"' in source
+    assert '"components": ("cpps",)' in source
+    assert "speaker_selection_rank" in source
+    assert '"final_output_highpass_applied": False' in source
     assert "validate_route_c_authorization" in source
     assert 'parser.add_argument("--authorization-consensus"' in source
     assert 'parser.add_argument("--screen-report"' in source
@@ -433,6 +438,15 @@ def test_direct_avqi_waveform_optimization_is_exact_scored_and_bounded() -> None
     assert "verify_sha256" in pilot_runner
     assert '--authorization-consensus "$CONSENSUS_REPORT"' in pilot_runner
     assert '--slurm-job-id "$SLURM_JOB_ID"' in pilot_runner
+    assert 'PILOT_PROFILE="cpps_view_input_v12"' in cpps_pilot_runner
+    assert "cpps-v12-fresh-speaker-panel-4b6712c0-20260823" in cpps_pilot_runner
+    assert 'SPEAKER_OFFSET=0' in cpps_pilot_runner
+    assert 'STEPS="${STEPS:-30}"' in cpps_pilot_runner
+    assert 'LEARNING_RATE_SCALE="${LEARNING_RATE_SCALE:-0.001}"' in cpps_pilot_runner
+    assert "component_pass_counts.cpps" in cpps_pilot_runner
+    assert '--pilot-profile "$PILOT_PROFILE"' in cpps_pilot_runner
+    assert '--panel-selection-salt "$PANEL_SELECTION_SALT"' in cpps_pilot_runner
+    assert '"generator_optimizer_steps": 0' in source
     assert "CONFIRM_SLURM_SUBMIT" in pilot_runner
     assert "FAIL_WAVEFORM_OPTIMIZATION" in source
 
