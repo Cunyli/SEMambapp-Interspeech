@@ -28,6 +28,7 @@ CURRENT_TORCH_PEAK_MODE = "hard"
 CPPS_CANDIDATE_MODE = "praat_topology_v7"
 CPPS_CANDIDATE_POWER_FLOOR = 1e-6
 EXACT_BANK_TOLERANCE = 1e-4
+DEFAULT_GRADIENT_ROW_INDICES = "3,16,20"
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -42,9 +43,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-commit", required=True)
     parser.add_argument(
         "--stage",
-        choices=("prepare", "torch"),
+        choices=("prepare", "torch", "gradient"),
         required=True,
-        help="prepare exact/NumPy inputs or add Torch results to prepared inputs",
+        help=(
+            "prepare exact/NumPy inputs, add Torch parity results, or audit "
+            "selected CPPS gradient terms"
+        ),
     )
     parser.add_argument(
         "--splits",
@@ -61,6 +65,11 @@ def parse_args() -> argparse.Namespace:
         "--views",
         default="cs,sv",
         help="comma-separated task views to include; default excludes combined both",
+    )
+    parser.add_argument(
+        "--row-indices",
+        default=DEFAULT_GRADIENT_ROW_INDICES,
+        help="comma-separated prepared row indices for the gradient stage",
     )
     return parser.parse_args()
 
@@ -475,6 +484,14 @@ def torch_stage(args: argparse.Namespace) -> None:
     inputs_path = args.output_dir / "cpps_parity_inputs.npz"
     if not prepare_path.is_file() or not inputs_path.is_file():
         raise FileNotFoundError("prepare stage artifacts are incomplete")
+    if not args.label_bank.is_file():
+        raise FileNotFoundError(args.label_bank)
+    actual_label_hash = sha256_file(args.label_bank)
+    if actual_label_hash != args.label_bank_sha256:
+        raise ValueError(
+            f"label-bank hash mismatch: expected {args.label_bank_sha256}, "
+            f"got {actual_label_hash}"
+        )
 
     # The semambapp Torch import is intentionally isolated to the Slurm stage.
     import torch
@@ -482,6 +499,8 @@ def torch_stage(args: argparse.Namespace) -> None:
     from model.avqi_components import PraatDifferentiableAVQIComponentEstimator
 
     prepare_report = json.loads(prepare_path.read_text(encoding="utf-8"))
+    if prepare_report["label_bank_sha256"] != args.label_bank_sha256:
+        raise ValueError("prepared inputs use a different label-bank hash")
     records = prepare_report["records"]
     input_archive = np.load(inputs_path, allow_pickle=False)
     estimator = PraatDifferentiableAVQIComponentEstimator(
@@ -616,12 +635,390 @@ def torch_stage(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
 
 
+def parse_gradient_row_indices(raw_indices: str, row_count: int) -> tuple[int, ...]:
+    values = tuple(
+        int(value.strip())
+        for value in raw_indices.split(",")
+        if value.strip()
+    )
+    if not values:
+        raise ValueError("gradient stage requires at least one row index")
+    if len(set(values)) != len(values):
+        raise ValueError(f"gradient row indices must be unique: {values}")
+    invalid = tuple(value for value in values if value < 0 or value >= row_count)
+    if invalid:
+        raise IndexError(
+            f"gradient row indices {invalid} are outside prepared row count {row_count}"
+        )
+    return values
+
+
+def tensor_distribution(values: Any) -> dict[str, float | int]:
+    flat = values.detach().reshape(-1).double()
+    finite = flat[flat.isfinite()]
+    if finite.numel() != flat.numel():
+        raise FloatingPointError("gradient audit encountered a non-finite tensor")
+    quantile_levels = finite.new_tensor((0.0, 0.001, 0.01, 0.5, 0.99, 1.0))
+    quantiles = finite.quantile(quantile_levels)
+    positive = finite[finite > 0.0]
+    return {
+        "count": int(finite.numel()),
+        "min": float(quantiles[0]),
+        "q001": float(quantiles[1]),
+        "q01": float(quantiles[2]),
+        "median": float(quantiles[3]),
+        "q99": float(quantiles[4]),
+        "max": float(quantiles[5]),
+        "min_positive": float(positive.min()) if positive.numel() else 0.0,
+        "mean": float(finite.mean()),
+        "mean_abs": float(finite.abs().mean()),
+        "rms": float(finite.square().mean().sqrt()),
+    }
+
+
+def vector_stats(vector: Any) -> dict[str, float | int]:
+    flat = vector.detach().reshape(-1).double()
+    if not flat.isfinite().all():
+        raise FloatingPointError("gradient audit produced a non-finite vector")
+    energy = flat.square()
+    total_energy = energy.sum()
+    statistics: dict[str, float | int] = {
+        "count": int(flat.numel()),
+        "norm": float(flat.norm()),
+        "max_abs": float(flat.abs().max()),
+        "mean_abs": float(flat.abs().mean()),
+        "max_abs_index": int(flat.abs().argmax()),
+    }
+    for top_k in (1, 10, 100):
+        selected = min(top_k, flat.numel())
+        fraction = energy.topk(selected).values.sum() / total_energy.clamp_min(1e-300)
+        statistics[f"top_{top_k}_energy_fraction"] = float(fraction)
+    return statistics
+
+
+def gradient_vector(torch_module: Any, scalar: Any, waveform: Any) -> Any:
+    gradient = torch_module.autograd.grad(
+        scalar,
+        waveform,
+        retain_graph=True,
+    )[0]
+    if not gradient.isfinite().all():
+        raise FloatingPointError("CPPS decomposition produced a non-finite gradient")
+    return gradient
+
+
+def gradient_pair_metrics(peak_gradient: Any, baseline_gradient: Any) -> dict[str, float]:
+    peak_flat = peak_gradient.detach().reshape(-1).double()
+    baseline_flat = baseline_gradient.detach().reshape(-1).double()
+    difference = peak_flat - baseline_flat
+    peak_norm = peak_flat.norm()
+    baseline_norm = baseline_flat.norm()
+    denominator = (peak_norm * baseline_norm).clamp_min(1e-300)
+    return {
+        "cosine_similarity": float(peak_flat.dot(baseline_flat) / denominator),
+        "difference_norm": float(difference.norm()),
+        "cancellation_ratio": float(
+            difference.norm() / (peak_norm + baseline_norm).clamp_min(1e-300)
+        ),
+    }
+
+
+def intermediate_gradient_stats(
+    torch_module: Any,
+    scalar: Any,
+    terms: dict[str, Any],
+) -> dict[str, dict[str, float | int]]:
+    statistics: dict[str, dict[str, float | int]] = {}
+    for name in (
+        "spectrum_power",
+        "log_power",
+        "real_cepstrum",
+        "power_cepstrum",
+        "cepstrum_db",
+    ):
+        gradient = torch_module.autograd.grad(
+            scalar,
+            terms[name],
+            retain_graph=True,
+        )[0]
+        statistics[name] = vector_stats(gradient)
+    return statistics
+
+
+def topology_gradient_record(
+    torch_module: Any,
+    *,
+    waveform: Any,
+    peak_scalar: Any,
+    baseline_scalar: Any,
+    cpps_scalar: Any,
+) -> tuple[dict[str, Any], Any]:
+    peak_gradient = gradient_vector(torch_module, peak_scalar, waveform)
+    baseline_gradient = gradient_vector(torch_module, baseline_scalar, waveform)
+    cpps_gradient = gradient_vector(torch_module, cpps_scalar, waveform)
+    reconstructed = peak_gradient - baseline_gradient
+    reconstruction_error = (
+        reconstructed - cpps_gradient
+    ).norm() / cpps_gradient.norm().clamp_min(1e-300)
+    return (
+        {
+            "peak": vector_stats(peak_gradient),
+            "baseline": vector_stats(baseline_gradient),
+            "cpps": vector_stats(cpps_gradient),
+            "peak_minus_baseline": gradient_pair_metrics(
+                peak_gradient,
+                baseline_gradient,
+            ),
+            "gradient_reconstruction_relative_error": float(reconstruction_error),
+        },
+        cpps_gradient,
+    )
+
+
+def gradient_stage(args: argparse.Namespace) -> None:
+    if not args.output_dir.is_dir():
+        raise FileNotFoundError(f"prepare output is missing: {args.output_dir}")
+    result_path = args.output_dir / "cpps_gradient_decomposition.json"
+    if result_path.exists():
+        raise FileExistsError(
+            f"refusing to overwrite completed gradient audit: {result_path}"
+        )
+    prepare_path = args.output_dir / "cpps_parity_prepare.json"
+    inputs_path = args.output_dir / "cpps_parity_inputs.npz"
+    if not prepare_path.is_file() or not inputs_path.is_file():
+        raise FileNotFoundError("prepare stage artifacts are incomplete")
+    if not args.label_bank.is_file():
+        raise FileNotFoundError(args.label_bank)
+    actual_label_hash = sha256_file(args.label_bank)
+    if actual_label_hash != args.label_bank_sha256:
+        raise ValueError(
+            f"label-bank hash mismatch: expected {args.label_bank_sha256}, "
+            f"got {actual_label_hash}"
+        )
+
+    # The semambapp Torch import is intentionally isolated to the Slurm stage.
+    import torch
+
+    from model.avqi_components import PraatDifferentiableAVQIComponentEstimator
+
+    prepare_report = json.loads(prepare_path.read_text(encoding="utf-8"))
+    if prepare_report["label_bank_sha256"] != args.label_bank_sha256:
+        raise ValueError("prepared inputs use a different label-bank hash")
+    prepared_records = prepare_report["records"]
+    row_indices = parse_gradient_row_indices(
+        args.row_indices,
+        len(prepared_records),
+    )
+    input_archive = np.load(inputs_path, allow_pickle=False)
+    exact_backward_estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode=CURRENT_TORCH_PEAK_MODE,
+        cpps_mode=CPPS_CANDIDATE_MODE,
+        cpps_power_floor=1e-30,
+    )
+    bounded_floor_estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode=CURRENT_TORCH_PEAK_MODE,
+        cpps_mode=CPPS_CANDIDATE_MODE,
+        cpps_power_floor=CPPS_CANDIDATE_POWER_FLOOR,
+    )
+
+    records: list[dict[str, Any]] = []
+    for row_index in row_indices:
+        prepared_record = prepared_records[row_index]
+        exact_input = np.asarray(
+            input_archive[prepared_record["input_key"]],
+            dtype=np.float64,
+        )
+
+        exact_waveform = torch.from_numpy(exact_input.copy()).requires_grad_()
+        exact_terms = exact_backward_estimator._cpps_praat_topology_v7_terms(
+            exact_waveform
+        )
+        exact_topology, exact_gradient = topology_gradient_record(
+            torch,
+            waveform=exact_waveform,
+            peak_scalar=exact_terms["parabolic_peak_value"].mean(),
+            baseline_scalar=exact_terms["exact_baseline"].mean(),
+            cpps_scalar=exact_terms["exact_cpps"],
+        )
+        exact_intermediate = intermediate_gradient_stats(
+            torch,
+            exact_terms["exact_cpps"],
+            exact_terms,
+        )
+
+        bounded_waveform = torch.from_numpy(exact_input.copy()).requires_grad_()
+        bounded_terms = bounded_floor_estimator._cpps_praat_topology_v7_terms(
+            bounded_waveform
+        )
+        floor_only_topology, floor_only_gradient = topology_gradient_record(
+            torch,
+            waveform=bounded_waveform,
+            peak_scalar=bounded_terms["parabolic_peak_value"].mean(),
+            baseline_scalar=bounded_terms["exact_baseline"].mean(),
+            cpps_scalar=bounded_terms["exact_cpps"],
+        )
+        detached_topology, detached_gradient = topology_gradient_record(
+            torch,
+            waveform=bounded_waveform,
+            peak_scalar=bounded_terms["stable_peak_value"].mean(),
+            baseline_scalar=bounded_terms["baseline"].mean(),
+            cpps_scalar=bounded_terms["current_cpps"],
+        )
+        detached_intermediate = intermediate_gradient_stats(
+            torch,
+            bounded_terms["current_cpps"],
+            bounded_terms,
+        )
+
+        forward_values = {
+            "exact_topology_floor_1e_30": float(exact_terms["exact_cpps"]),
+            "exact_topology_floor_1e_6": float(bounded_terms["exact_cpps"]),
+            "detached_topology_floor_1e_6": float(bounded_terms["current_cpps"]),
+        }
+        if max(forward_values.values()) - min(forward_values.values()) > 1e-10:
+            raise AssertionError(
+                f"gradient variants changed CPPS forward value at row {row_index}: "
+                f"{forward_values}"
+            )
+
+        search_power = bounded_terms["power_cepstrum"][
+            :, bounded_terms["search_mask"]
+        ]
+        trend_power = bounded_terms["power_cepstrum"][
+            :, bounded_terms["trend_mask"]
+        ]
+        record = {
+            "row_index": row_index,
+            "input_key": prepared_record["input_key"],
+            "speaker_id": prepared_record["speaker_id"],
+            "sample_id": prepared_record["sample_id"],
+            "split": prepared_record["split"],
+            "condition_id": prepared_record["condition_id"],
+            "view": prepared_record["view"],
+            "sample_count": prepared_record["sample_count"],
+            "exact_runtime_cpps": prepared_record["exact_runtime_cpps"],
+            "forward_values": forward_values,
+            "input_distribution": tensor_distribution(bounded_waveform),
+            "intermediate_distributions": {
+                "spectrum_power": tensor_distribution(
+                    bounded_terms["spectrum_power"]
+                ),
+                "power_cepstrum": tensor_distribution(
+                    bounded_terms["power_cepstrum"]
+                ),
+                "search_power_cepstrum": tensor_distribution(search_power),
+                "trend_power_cepstrum": tensor_distribution(trend_power),
+                "parabolic_denominator": tensor_distribution(
+                    bounded_terms["parabolic_denominator"]
+                ),
+                "peak_offset": tensor_distribution(bounded_terms["peak_offset"]),
+            },
+            "gradient_modes": {
+                "exact_topology_floor_1e_30": exact_topology,
+                "exact_topology_floor_1e_6": floor_only_topology,
+                "detached_topology_floor_1e_6": detached_topology,
+            },
+            "intermediate_gradient_sensitivity": {
+                "exact_topology_floor_1e_30": exact_intermediate,
+                "detached_topology_floor_1e_6": detached_intermediate,
+            },
+            "cross_mode_gradient": {
+                "exact_vs_floor_only_cosine": float(
+                    torch.nn.functional.cosine_similarity(
+                        exact_gradient.reshape(1, -1),
+                        floor_only_gradient.reshape(1, -1),
+                    )[0]
+                ),
+                "exact_vs_detached_cosine": float(
+                    torch.nn.functional.cosine_similarity(
+                        exact_gradient.reshape(1, -1),
+                        detached_gradient.reshape(1, -1),
+                    )[0]
+                ),
+                "floor_only_vs_detached_cosine": float(
+                    torch.nn.functional.cosine_similarity(
+                        floor_only_gradient.reshape(1, -1),
+                        detached_gradient.reshape(1, -1),
+                    )[0]
+                ),
+            },
+        }
+        records.append(record)
+        print(
+            f"gradient_row={row_index} speaker={record['speaker_id']} "
+            f"view={record['view']} exact_norm="
+            f"{exact_topology['cpps']['norm']:.6f} floor_norm="
+            f"{floor_only_topology['cpps']['norm']:.6f} detached_norm="
+            f"{detached_topology['cpps']['norm']:.6f}",
+            flush=True,
+        )
+
+    mode_names = tuple(records[0]["gradient_modes"])
+    summary = {
+        "rows": len(records),
+        "row_indices": list(row_indices),
+        "gradient_norm_by_mode": {
+            mode: {
+                "min": float(
+                    min(record["gradient_modes"][mode]["cpps"]["norm"] for record in records)
+                ),
+                "median": float(
+                    np.median(
+                        [
+                            record["gradient_modes"][mode]["cpps"]["norm"]
+                            for record in records
+                        ]
+                    )
+                ),
+                "max": float(
+                    max(record["gradient_modes"][mode]["cpps"]["norm"] for record in records)
+                ),
+            }
+            for mode in mode_names
+        },
+    }
+    report = {
+        "schema_version": "avqi-route-c-cpps-gradient-decomposition-v1",
+        "stage": "gradient",
+        "decision": "GRADIENT_DECOMPOSITION_COMPLETE_NO_PROMOTION",
+        "generator_optimizer_steps": 0,
+        "formal_pathology_training_submitted": False,
+        "source_commit": args.source_commit,
+        "prepare_source_commit": prepare_report["source_commit"],
+        "prepare_artifact_sha256": sha256_file(prepare_path),
+        "input_archive_sha256": sha256_file(inputs_path),
+        "label_bank": str(args.label_bank),
+        "label_bank_sha256": args.label_bank_sha256,
+        "candidate_configuration": {
+            "cpps_mode": CPPS_CANDIDATE_MODE,
+            "bounded_floor": CPPS_CANDIDATE_POWER_FLOOR,
+        },
+        "iteration_compact": {
+            "goal": "preserve exact CPPS forward values while localizing gradient outliers",
+            "dataset": "frozen 24-row exact parity inputs",
+            "baseline": "praat_topology_v7 at ab695ec",
+            "primary_metric": "waveform gradient norm and peak/baseline cancellation",
+            "guardrails": "forward equality, fixed rows, no scorer promotion or optimizer step",
+            "next_experiment": "choose one bounded derivative from measured singular layer",
+        },
+        "summary": summary,
+        "records": records,
+    }
+    result_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
+
+
 def main() -> None:
     args = parse_args()
     if args.stage == "prepare":
         prepare_stage(args)
-    else:
+    elif args.stage == "torch":
         torch_stage(args)
+    else:
+        gradient_stage(args)
 
 
 if __name__ == "__main__":

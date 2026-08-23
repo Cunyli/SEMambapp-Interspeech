@@ -521,7 +521,15 @@ def test_praat_cppsv7_has_finite_input_gradient_and_isolates_other_components() 
     assert torch.isfinite(candidate_components).all()
 
     gradient_waveform = waveform.clone().requires_grad_()
+    terms = candidate._cpps_praat_topology_v7_terms(gradient_waveform)
     cpps = candidate._cpps_praat_topology_v7(gradient_waveform)
+    torch.testing.assert_close(cpps, terms["current_cpps"], rtol=0.0, atol=1e-6)
+    torch.testing.assert_close(
+        terms["exact_cpps"],
+        terms["current_cpps"],
+        rtol=0.0,
+        atol=1e-6,
+    )
     gradient = torch.autograd.grad(cpps, gradient_waveform)[0]
     assert torch.isfinite(gradient).all()
     assert float(gradient.norm()) > 0.0

@@ -1536,11 +1536,11 @@ class PraatDifferentiableAVQIComponentEstimator(
             order[..., middle : middle + 1],
         ).squeeze(-1)
 
-    def _cpps_praat_topology_v7(
+    def _cpps_praat_topology_v7_terms(
         self,
         prepared: torch.Tensor,
-    ) -> torch.Tensor:
-        """Praat-aligned CPPS with detached topology and differentiable values.
+    ) -> dict[str, torch.Tensor]:
+        """Return Praat-aligned CPPS intermediates for gradient auditing.
 
         The fixed resampling, Gaussian2 window geometry, PowerCepstrum square,
         rectangular smoothing, parabolic peak, and incomplete-Theil-style
@@ -1632,7 +1632,7 @@ class PraatDifferentiableAVQIComponentEstimator(
         search_values = cepstrum_db[:, search_mask]
         search_quefrency = quefrency[search_mask]
         peak_index = search_values.detach().argmax(dim=-1)
-        peak_value = search_values.gather(
+        peak_center_value = search_values.gather(
             -1,
             peak_index.unsqueeze(-1),
         ).squeeze(-1)
@@ -1640,7 +1640,7 @@ class PraatDifferentiableAVQIComponentEstimator(
         right_index = (peak_index + 1).clamp_max(search_values.shape[-1] - 1)
         left_value = search_values.gather(-1, left_index.unsqueeze(-1)).squeeze(-1)
         right_value = search_values.gather(-1, right_index.unsqueeze(-1)).squeeze(-1)
-        denominator = left_value - 2.0 * peak_value + right_value
+        denominator = left_value - 2.0 * peak_center_value + right_value
         safe_denominator = torch.where(
             denominator.abs() >= 1e-8,
             denominator,
@@ -1661,10 +1661,12 @@ class PraatDifferentiableAVQIComponentEstimator(
             peak_offset,
             torch.zeros_like(peak_offset),
         )
-        parabolic_peak_value = peak_value - 0.25 * (
+        parabolic_peak_value = peak_center_value - 0.25 * (
             left_value - right_value
         ) * peak_offset
-        peak_value = peak_value + (parabolic_peak_value - peak_value).detach()
+        stable_peak_value = peak_center_value + (
+            parabolic_peak_value - peak_center_value
+        ).detach()
         peak_quefrency = search_quefrency[peak_index] + peak_offset / target_rate
 
         trend_values = cepstrum_db[:, trend_mask]
@@ -1698,7 +1700,47 @@ class PraatDifferentiableAVQIComponentEstimator(
             peak_quefrency.detach() - trend_quefrency.mean()
         )
         baseline = stable_baseline + (exact_baseline - stable_baseline).detach()
-        return (peak_value - baseline).mean()
+        exact_frame_cpps = parabolic_peak_value - exact_baseline
+        current_frame_cpps = stable_peak_value - baseline
+        return {
+            "resampled": resampled,
+            "preemphasized": preemphasized,
+            "windowed": windowed,
+            "spectrum_power": power,
+            "log_power": log_power,
+            "real_cepstrum": real_cepstrum,
+            "power_cepstrum": power_cepstrum,
+            "exact_cepstrum_db": exact_cepstrum_db,
+            "stable_cepstrum_db": stable_cepstrum_db,
+            "cepstrum_db": cepstrum_db,
+            "search_mask": search_mask,
+            "trend_mask": trend_mask,
+            "search_values": search_values,
+            "trend_values": trend_values,
+            "peak_center_value": peak_center_value,
+            "parabolic_peak_value": parabolic_peak_value,
+            "stable_peak_value": stable_peak_value,
+            "parabolic_denominator": denominator,
+            "safe_parabolic_denominator": safe_denominator,
+            "peak_offset": peak_offset,
+            "peak_quefrency": peak_quefrency,
+            "robust_slope": robust_slope,
+            "robust_intercept": robust_intercept,
+            "exact_baseline": exact_baseline,
+            "stable_baseline": stable_baseline,
+            "baseline": baseline,
+            "exact_frame_cpps": exact_frame_cpps,
+            "current_frame_cpps": current_frame_cpps,
+            "exact_cpps": exact_frame_cpps.mean(),
+            "current_cpps": current_frame_cpps.mean(),
+        }
+
+    def _cpps_praat_topology_v7(
+        self,
+        prepared: torch.Tensor,
+    ) -> torch.Tensor:
+        """Praat-aligned CPPS with detached topology and differentiable values."""
+        return self._cpps_praat_topology_v7_terms(prepared)["current_cpps"]
 
     def _cpps(
         self,

@@ -16,6 +16,13 @@ GPU_TYPE="${GPU_TYPE:-v100}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-4}"
 MEMORY="${MEMORY:-48G}"
 TIME_LIMIT="${TIME_LIMIT:-00:20:00}"
+AUDIT_STAGE="${AUDIT_STAGE:-torch}"
+ROW_INDICES="${ROW_INDICES:-3,16,20}"
+
+if [[ "$AUDIT_STAGE" != "torch" && "$AUDIT_STAGE" != "gradient" ]]; then
+  echo "Unsupported AUDIT_STAGE: $AUDIT_STAGE" >&2
+  exit 2
+fi
 
 if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
   echo "Refusing to run from a dirty source tree: $SOURCE_ROOT" >&2
@@ -25,13 +32,18 @@ if [[ ! -f "$OUTPUT_DIR/cpps_parity_prepare.json" || ! -f "$OUTPUT_DIR/cpps_pari
   echo "Missing exact prepare artifacts under: $OUTPUT_DIR" >&2
   exit 2
 fi
-if [[ -e "$OUTPUT_DIR/cpps_parity_report.json" ]]; then
+if [[ "$AUDIT_STAGE" == "torch" && -e "$OUTPUT_DIR/cpps_parity_report.json" ]]; then
   echo "Refusing to overwrite completed parity report: $OUTPUT_DIR/cpps_parity_report.json" >&2
+  exit 2
+fi
+if [[ "$AUDIT_STAGE" == "gradient" && -e "$OUTPUT_DIR/cpps_gradient_decomposition.json" ]]; then
+  echo "Refusing to overwrite completed gradient audit: $OUTPUT_DIR/cpps_gradient_decomposition.json" >&2
   exit 2
 fi
 
 export SOURCE_ROOT RUN_ROOT OUTPUT_DIR LOG_DIR LABEL_BANK LABEL_BANK_SHA256
 export AVQI_ROOT SOURCE_COMMIT PARTITION GPU_TYPE CPUS_PER_TASK MEMORY TIME_LIMIT
+export AUDIT_STAGE ROW_INDICES
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   if [[ "${CONFIRM_SLURM_SUBMIT:-0}" != "1" ]]; then
@@ -41,7 +53,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   mkdir -p "$LOG_DIR"
   sbatch \
     --parsable \
-    --job-name="avqi-cpps-parity" \
+    --job-name="avqi-cpps-$AUDIT_STAGE" \
     --partition="$PARTITION" \
     --nodes=1 \
     --ntasks=1 \
@@ -69,7 +81,7 @@ cd "$SOURCE_ROOT"
 mkdir -p "$LOG_DIR"
 
 LIVE_LOG="$LOG_DIR/torch_stage_${SLURM_JOB_ID}.log"
-echo "event=start job=$SLURM_JOB_ID source_commit=$SOURCE_COMMIT time=$(date -Is)" | tee -a "$LIVE_LOG"
+echo "event=start job=$SLURM_JOB_ID stage=$AUDIT_STAGE source_commit=$SOURCE_COMMIT time=$(date -Is)" | tee -a "$LIVE_LOG"
 python -c 'import os, torch; print("torch", torch.__version__); print("cuda", torch.cuda.is_available()); print("device", torch.cuda.get_device_name(0)); print("CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES"))' | tee -a "$LIVE_LOG"
 python "$SOURCE_ROOT/scripts/audit_cpps_parity.py" \
   --label-bank "$LABEL_BANK" \
@@ -77,8 +89,9 @@ python "$SOURCE_ROOT/scripts/audit_cpps_parity.py" \
   --avqi-root "$AVQI_ROOT" \
   --output-dir "$OUTPUT_DIR" \
   --source-commit "$SOURCE_COMMIT" \
-  --stage torch \
+  --stage "$AUDIT_STAGE" \
   --max-rows 24 \
   --views cs,sv \
+  --row-indices "$ROW_INDICES" \
   2>&1 | tee -a "$LIVE_LOG"
 echo "event=complete job=$SLURM_JOB_ID time=$(date -Is)" | tee -a "$LIVE_LOG"
