@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_RATE = 16_000
 CURRENT_TORCH_PEAK_MODE = "hard"
 CPPS_CANDIDATE_MODE = "praat_topology_v7"
-CPPS_CANDIDATE_POWER_FLOOR = 1e-8
+CPPS_CANDIDATE_POWER_FLOOR = 1e-6
 EXACT_BANK_TOLERANCE = 1e-4
 
 if str(REPO_ROOT) not in sys.path:
@@ -595,6 +595,8 @@ def torch_stage(args: argparse.Namespace) -> None:
     report = dict(prepare_report)
     report["stage"] = "complete"
     report["decision"] = "BASELINE_PARITY_COMPLETE"
+    report["source_commit"] = args.source_commit
+    report["prepare_source_commit"] = prepare_report["source_commit"]
     report["candidate_configuration"] = {
         "cpps_mode": CPPS_CANDIDATE_MODE,
         "cpps_power_floor": CPPS_CANDIDATE_POWER_FLOOR,
