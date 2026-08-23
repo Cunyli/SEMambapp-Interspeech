@@ -477,6 +477,17 @@ def test_praat_differentiable_rejects_unknown_hnr_mode() -> None:
     raise AssertionError("unknown differentiable HNR mode was accepted")
 
 
+def test_praat_differentiable_rejects_unknown_cpps_mode() -> None:
+    try:
+        PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            cpps_mode="unknown",
+        )
+    except ValueError:
+        return
+    raise AssertionError("unknown differentiable CPPS mode was accepted")
+
+
 def test_praat_differentiable_rejects_unknown_shimmer_mode() -> None:
     try:
         PraatDifferentiableAVQIComponentEstimator(
@@ -486,6 +497,34 @@ def test_praat_differentiable_rejects_unknown_shimmer_mode() -> None:
     except ValueError:
         return
     raise AssertionError("unknown differentiable shimmer mode was accepted")
+
+
+def test_praat_cppsv7_has_finite_input_gradient_and_isolates_other_components() -> None:
+    sample_rate = 16_000
+    time = torch.arange(8_000, dtype=torch.float32) / sample_rate
+    waveform = torch.sin(2.0 * math.pi * 175.0 * time)
+    current = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+    candidate = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        cpps_mode="praat_topology_v7",
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+
+    current_components = current.raw_components(waveform.unsqueeze(0))[0]
+    candidate_components = candidate.raw_components(waveform.unsqueeze(0))[0]
+    assert torch.equal(current_components[1:], candidate_components[1:])
+    assert torch.isfinite(candidate_components).all()
+
+    gradient_waveform = waveform.clone().requires_grad_()
+    cpps = candidate._cpps_praat_topology_v7(gradient_waveform)
+    gradient = torch.autograd.grad(cpps, gradient_waveform)[0]
+    assert torch.isfinite(gradient).all()
+    assert float(gradient.norm()) > 0.0
 
 
 def test_praat_differentiable_default_keeps_linear_ac_v2_hnr() -> None:

@@ -25,6 +25,7 @@ from scipy import stats
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_RATE = 16_000
 CURRENT_TORCH_PEAK_MODE = "hard"
+CPPS_CANDIDATE_MODE = "praat_topology_v7"
 EXACT_BANK_TOLERANCE = 1e-4
 
 if str(REPO_ROOT) not in sys.path:
@@ -485,20 +486,43 @@ def torch_stage(args: argparse.Namespace) -> None:
     estimator = PraatDifferentiableAVQIComponentEstimator(
         peak_mode=CURRENT_TORCH_PEAK_MODE,
     )
+    candidate_estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode=CURRENT_TORCH_PEAK_MODE,
+        cpps_mode=CPPS_CANDIDATE_MODE,
+    )
     exact_values: list[float] = []
     torch_direct_values: list[float] = []
     torch_full_values: list[float] = []
+    candidate_values: list[float] = []
+    candidate_full_values: list[float] = []
+    candidate_gradient_norms: list[float] = []
     for index, record in enumerate(records):
         exact_input = np.asarray(input_archive[record["input_key"]], dtype=np.float64)
         waveform = torch.from_numpy(exact_input.copy())
         with torch.inference_mode():
             direct_value = float(estimator._cpps(waveform))
             full_value = float(estimator.raw_components(waveform.unsqueeze(0))[0, 0])
+            candidate_value = float(candidate_estimator._cpps(waveform))
+            candidate_full_value = float(
+                candidate_estimator.raw_components(waveform.unsqueeze(0))[0, 0]
+            )
         gradient_waveform = waveform.clone().requires_grad_()
         gradient_value = estimator._cpps(gradient_waveform)
         gradient = torch.autograd.grad(gradient_value, gradient_waveform)[0]
         if not torch.isfinite(gradient).all():
             raise FloatingPointError(f"non-finite CPPS gradient at row {index}")
+        candidate_gradient_waveform = waveform.clone().requires_grad_()
+        candidate_gradient_value = candidate_estimator._cpps(
+            candidate_gradient_waveform
+        )
+        candidate_gradient = torch.autograd.grad(
+            candidate_gradient_value,
+            candidate_gradient_waveform,
+        )[0]
+        if not torch.isfinite(candidate_gradient).all():
+            raise FloatingPointError(
+                f"non-finite candidate CPPS gradient at row {index}"
+            )
         exact_value = float(record["exact_runtime_cpps"])
         record.update(
             {
@@ -508,14 +532,30 @@ def torch_stage(args: argparse.Namespace) -> None:
                 "torch_full_minus_exact_runtime": full_value - exact_value,
                 "torch_direct_input_gradient_norm": float(gradient.norm()),
                 "torch_direct_input_gradient_max_abs": float(gradient.abs().max()),
+                "torch_candidate_cpps": candidate_value,
+                "torch_candidate_minus_exact_runtime": candidate_value - exact_value,
+                "torch_candidate_full_raw_components": candidate_full_value,
+                "torch_candidate_full_minus_exact_runtime": (
+                    candidate_full_value - exact_value
+                ),
+                "torch_candidate_input_gradient_norm": float(
+                    candidate_gradient.norm()
+                ),
+                "torch_candidate_input_gradient_max_abs": float(
+                    candidate_gradient.abs().max()
+                ),
             }
         )
         exact_values.append(exact_value)
         torch_direct_values.append(direct_value)
         torch_full_values.append(full_value)
+        candidate_values.append(candidate_value)
+        candidate_full_values.append(candidate_full_value)
+        candidate_gradient_norms.append(float(candidate_gradient.norm()))
         print(
             f"torch_row={index + 1}/{len(records)} speaker={record['speaker_id']} "
-            f"split={record['split']} view={record['view']} direct={direct_value:.6f}",
+            f"split={record['split']} view={record['view']} "
+            f"direct={direct_value:.6f} candidate={candidate_value:.6f}",
             flush=True,
         )
 
@@ -530,12 +570,23 @@ def torch_stage(args: argparse.Namespace) -> None:
             exact_values,
             torch_full_values,
         ),
+        "torch_candidate_direct_praat_topology_v7": summarize_pairs(
+            exact_values,
+            candidate_values,
+        ),
+        "torch_candidate_full_raw_components_praat_topology_v7": summarize_pairs(
+            exact_values,
+            candidate_full_values,
+        ),
     }
     gradient_norms = [record["torch_direct_input_gradient_norm"] for record in records]
     summary["gradient"] = {
         "min_norm": float(min(gradient_norms)),
         "median_norm": float(np.median(gradient_norms)),
         "max_norm": float(max(gradient_norms)),
+        "candidate_min_norm": float(min(candidate_gradient_norms)),
+        "candidate_median_norm": float(np.median(candidate_gradient_norms)),
+        "candidate_max_norm": float(max(candidate_gradient_norms)),
     }
     summary["exact_environment"] = dict(summary["exact_environment"])
     summary["exact_environment"]["torch"] = torch.__version__

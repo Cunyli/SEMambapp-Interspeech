@@ -13,6 +13,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchaudio.functional as torchaudio_functional
 
 
 AVQI_COMPONENT_NAMES = (
@@ -1202,12 +1203,15 @@ class PraatDifferentiableAVQIComponentEstimator(
         cpps_hop_length: int = 32,
         cpps_max_frames: int = 4_096,
         peak_temperature: float = 80.0,
+        cpps_mode: str = "current_v2",
         hnr_mode: str = "linear_ac_v2",
         hnr_max_frames: int = 4_096,
         shimmer_mode: str = "analytic_envelope_v2",
     ):
         if peak_mode not in {"soft", "hard"}:
             raise ValueError(f"unsupported peak mode: {peak_mode}")
+        if cpps_mode not in {"current_v2", "praat_topology_v7"}:
+            raise ValueError(f"unsupported CPPS mode: {cpps_mode}")
         if hnr_mode not in {"linear_ac_v2", "raw_cc_v3"}:
             raise ValueError(f"unsupported HNR mode: {hnr_mode}")
         if shimmer_mode not in {
@@ -1236,12 +1240,33 @@ class PraatDifferentiableAVQIComponentEstimator(
         self.cpps_frame_length = cpps_frame_length
         self.cpps_hop_length = cpps_hop_length
         self.cpps_max_frames = cpps_max_frames
+        self.cpps_mode = cpps_mode
+        self.cpps_praat_sample_rate = 10_000
+        self.cpps_praat_frame_length = 1_000
+        self.cpps_praat_hop_length = 20
+        self.cpps_praat_n_fft = 1 << (self.cpps_praat_frame_length - 1).bit_length()
         self.hnr_mode = hnr_mode
         self.hnr_max_frames = hnr_max_frames
         self.shimmer_mode = shimmer_mode
         self.register_buffer(
             "cpps_window",
             torch.hann_window(cpps_frame_length, periodic=True),
+            persistent=False,
+        )
+        praat_window_index = torch.arange(self.cpps_praat_frame_length)
+        praat_window_midpoint = 0.5 * (self.cpps_praat_frame_length + 1)
+        praat_window_edge = math.exp(-12.0)
+        praat_window = (
+            torch.exp(
+                -48.0
+                * (praat_window_index + 1 - praat_window_midpoint).square()
+                / (self.cpps_praat_frame_length + 1) ** 2
+            )
+            - praat_window_edge
+        ) / (1.0 - praat_window_edge)
+        self.register_buffer(
+            "cpps_praat_window",
+            praat_window,
             persistent=False,
         )
 
@@ -1382,7 +1407,7 @@ class PraatDifferentiableAVQIComponentEstimator(
             0, upper
         ) * fraction
 
-    def _cpps(
+    def _cpps_current(
         self,
         prepared: torch.Tensor,
     ) -> torch.Tensor:
@@ -1471,6 +1496,199 @@ class PraatDifferentiableAVQIComponentEstimator(
         baseline = y_mean + robust_slope * (peak_quefrency - x_mean)
         frame_cpps = 10.0 * (peak_value - baseline) / math.log(10.0)
         return self._weighted_mean(frame_cpps, selection_weight)
+
+    @staticmethod
+    def _moving_average_axis(
+        values: torch.Tensor,
+        kernel_size: int,
+        axis: int,
+    ) -> torch.Tensor:
+        if kernel_size <= 1:
+            return values
+        if axis not in {0, 1} or values.ndim != 2:
+            raise ValueError("CPPS smoothing expects a two-dimensional tensor")
+        if axis == 0:
+            work = values.transpose(0, 1).unsqueeze(1)
+        else:
+            work = values.unsqueeze(1)
+        left = (kernel_size - 1) // 2
+        right = kernel_size - 1 - left
+        kernel = values.new_ones(1, 1, kernel_size)
+        padded = F.pad(work, (left, right))
+        summed = F.conv1d(padded, kernel)
+        counts = F.conv1d(F.pad(torch.ones_like(work), (left, right)), kernel)
+        smoothed = summed / counts.clamp_min(1.0)
+        if axis == 0:
+            return smoothed.squeeze(1).transpose(0, 1)
+        return smoothed.squeeze(1)
+
+    @staticmethod
+    def _select_detached_median(values: torch.Tensor) -> torch.Tensor:
+        """Select a median topology while retaining gradients through its value."""
+        order = values.detach().sort(dim=-1).indices
+        middle = values.shape[-1] // 2
+        return values.gather(
+            -1,
+            order[..., middle : middle + 1],
+        ).squeeze(-1)
+
+    def _cpps_praat_topology_v7(
+        self,
+        prepared: torch.Tensor,
+    ) -> torch.Tensor:
+        """Praat-aligned CPPS with detached topology and differentiable values.
+
+        The fixed resampling, Gaussian2 window geometry, PowerCepstrum square,
+        rectangular smoothing, parabolic peak, and incomplete-Theil-style
+        trend topology follow the audited Praat operation sequence.  Resampling
+        and the robust line fit remain explicit approximations because neither
+        is exposed as a native PyTorch operation.
+        """
+        target_rate = self.cpps_praat_sample_rate
+        if self.sample_rate == target_rate:
+            resampled = prepared
+        else:
+            resampled = torchaudio_functional.resample(
+                prepared,
+                orig_freq=self.sample_rate,
+                new_freq=target_rate,
+                lowpass_filter_width=50,
+                rolloff=0.99,
+                resampling_method="sinc_interp_hann",
+            )
+        if resampled.numel() < self.cpps_praat_frame_length:
+            resampled = F.pad(
+                resampled,
+                (0, self.cpps_praat_frame_length - resampled.numel()),
+            )
+
+        alpha = math.exp(-2.0 * math.pi * 50.0 / target_rate)
+        preemphasized = torch.cat(
+            (
+                resampled[:1],
+                resampled[1:] - alpha * resampled[:-1],
+            )
+        )
+        frames = preemphasized.unfold(
+            0,
+            self.cpps_praat_frame_length,
+            self.cpps_praat_hop_length,
+        )
+        centered = frames - frames.mean(dim=-1, keepdim=True)
+        windowed = centered * self.cpps_praat_window.to(dtype=prepared.dtype)
+        spectrum = torch.fft.rfft(
+            windowed,
+            n=self.cpps_praat_n_fft,
+            dim=-1,
+        )
+        power = spectrum.abs().square()
+        power = power.clone()
+        power[..., 0] *= 0.5
+        power[..., -1] *= 0.5
+        log_power = torch.log(power + 1e-30)
+        real_cepstrum = torch.fft.irfft(
+            log_power,
+            n=self.cpps_praat_n_fft,
+            dim=-1,
+        )
+        power_cepstrum = real_cepstrum.square()[..., : self.cpps_praat_n_fft // 2 + 1]
+        time_kernel = round(0.01 / (self.cpps_praat_hop_length / target_rate))
+        quefrency_kernel = round(
+            0.001 / (1.0 / target_rate)
+        )
+        power_cepstrum = self._moving_average_axis(
+            power_cepstrum,
+            time_kernel,
+            axis=0,
+        )
+        power_cepstrum = self._moving_average_axis(
+            power_cepstrum,
+            quefrency_kernel,
+            axis=1,
+        )
+        cepstrum_db = 10.0 / math.log(10.0) * torch.log(
+            power_cepstrum.clamp_min(1e-30)
+        )
+
+        quefrency = torch.arange(
+            self.cpps_praat_n_fft // 2 + 1,
+            device=prepared.device,
+            dtype=prepared.dtype,
+        ) / target_rate
+        search_mask = (quefrency >= 1.0 / 330.0) & (
+            quefrency <= 1.0 / 60.0
+        )
+        trend_mask = (quefrency >= 0.001) & (quefrency <= 0.05)
+        search_values = cepstrum_db[:, search_mask]
+        search_quefrency = quefrency[search_mask]
+        peak_index = search_values.detach().argmax(dim=-1)
+        peak_value = search_values.gather(
+            -1,
+            peak_index.unsqueeze(-1),
+        ).squeeze(-1)
+        left_index = (peak_index - 1).clamp_min(0)
+        right_index = (peak_index + 1).clamp_max(search_values.shape[-1] - 1)
+        left_value = search_values.gather(-1, left_index.unsqueeze(-1)).squeeze(-1)
+        right_value = search_values.gather(-1, right_index.unsqueeze(-1)).squeeze(-1)
+        denominator = left_value - 2.0 * peak_value + right_value
+        safe_denominator = torch.where(
+            denominator.abs() >= 1e-8,
+            denominator,
+            torch.where(
+                denominator >= 0.0,
+                denominator.new_full((), 1e-8),
+                denominator.new_full((), -1e-8),
+            ),
+        )
+        peak_offset = (
+            0.5 * (left_value - right_value) / safe_denominator
+        ).clamp(-0.5, 0.5)
+        interior = (peak_index > 0) & (
+            peak_index < search_values.shape[-1] - 1
+        )
+        peak_offset = torch.where(
+            interior,
+            peak_offset,
+            torch.zeros_like(peak_offset),
+        )
+        peak_value = peak_value - 0.25 * (
+            left_value - right_value
+        ) * peak_offset
+        peak_quefrency = search_quefrency[peak_index] + peak_offset / target_rate
+
+        trend_values = cepstrum_db[:, trend_mask]
+        trend_quefrency = quefrency[trend_mask]
+        point_count = min(96, trend_values.shape[-1])
+        point_index = torch.linspace(
+            0,
+            trend_values.shape[-1] - 1,
+            point_count,
+            device=prepared.device,
+        ).round().long()
+        trend_values = trend_values.index_select(-1, point_index)
+        trend_quefrency = trend_quefrency.index_select(0, point_index)
+        delta_x = trend_quefrency.unsqueeze(0) - trend_quefrency.unsqueeze(1)
+        pair_mask = torch.triu(
+            torch.ones_like(delta_x, dtype=torch.bool),
+            diagonal=1,
+        )
+        pair_slopes = (
+            trend_values.unsqueeze(1) - trend_values.unsqueeze(2)
+        ) / delta_x.unsqueeze(0).clamp_min(1e-12)
+        valid_slopes = pair_slopes[:, pair_mask]
+        robust_slope = self._select_detached_median(valid_slopes)
+        pair_intercepts = trend_values - robust_slope.unsqueeze(-1) * trend_quefrency
+        robust_intercept = self._select_detached_median(pair_intercepts)
+        baseline = robust_intercept + robust_slope * peak_quefrency
+        return (peak_value - baseline).mean()
+
+    def _cpps(
+        self,
+        prepared: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.cpps_mode == "praat_topology_v7":
+            return self._cpps_praat_topology_v7(prepared)
+        return self._cpps_current(prepared)
 
     def _soft_voiced_ltas_input(self, prepared: torch.Tensor) -> torch.Tensor:
         """Approximate Praat CS frame selection without a hard crop decision."""
