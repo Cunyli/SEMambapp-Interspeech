@@ -580,6 +580,44 @@ def test_praat_cpps_spectrum_guards_preserve_forward_and_gradients() -> None:
         assert float(baseline_gradient.norm()) > 0.0
 
 
+def test_cpps_pow2_highpass_v11_changes_only_cpps_component() -> None:
+    sample_rate = 16_000
+    time = torch.arange(8_321, dtype=torch.float32) / sample_rate
+    waveform = (
+        0.03
+        + 0.02 * torch.sin(2.0 * math.pi * 175.0 * time)
+        + 0.005 * torch.sin(2.0 * math.pi * 17.0 * time)
+    )
+    baseline = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        cpps_mode="praat_relative_log1p_v10",
+        cpps_power_floor=1e-6,
+        cpps_max_frames=256,
+    )
+    candidate = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        cpps_mode="praat_pow2_highpass_v11",
+        cpps_power_floor=1e-6,
+        cpps_max_frames=256,
+    )
+
+    baseline_components = baseline.raw_components(waveform.unsqueeze(0))[0]
+    candidate_components = candidate.raw_components(waveform.unsqueeze(0))[0]
+    assert not torch.isclose(candidate_components[0], baseline_components[0])
+    torch.testing.assert_close(
+        candidate_components[1:],
+        baseline_components[1:],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    gradient_waveform = waveform.clone().requires_grad_()
+    value = candidate.raw_cpps(gradient_waveform)[0]
+    gradient = torch.autograd.grad(value, gradient_waveform)[0]
+    assert torch.isfinite(gradient).all()
+    assert float(gradient.norm()) > 0.0
+
+
 def test_praat_differentiable_default_keeps_linear_ac_v2_hnr() -> None:
     sample_rate = 16_000
     time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate

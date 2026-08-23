@@ -1217,6 +1217,7 @@ class PraatDifferentiableAVQIComponentEstimator(
             "praat_centered_dc_guard_v8",
             "praat_spectrum_endpoint_guard_v9",
             "praat_relative_log1p_v10",
+            "praat_pow2_highpass_v11",
         }:
             raise ValueError(f"unsupported CPPS mode: {cpps_mode}")
         if not math.isfinite(cpps_power_floor) or cpps_power_floor <= 0.0:
@@ -1314,6 +1315,56 @@ class PraatDifferentiableAVQIComponentEstimator(
         # Keep the normalization derivative finite for silent or padded input.
         rms = (highpassed.square().mean() + 1e-10).sqrt()
         return highpassed / rms
+
+    def _prepare_cpps_pow2_highpass(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Apply Praat's zero-padded stop-Hann high-pass for CPPS only."""
+        waveform = waveform.reshape(-1)
+        minimum_samples = max(
+            self.frame_length + self.hop_length,
+            self.cpps_frame_length + self.cpps_hop_length,
+        )
+        if waveform.numel() < minimum_samples:
+            waveform = F.pad(waveform, (0, minimum_samples - waveform.numel()))
+        sample_count = waveform.numel()
+        fft_size = 1 << (sample_count - 1).bit_length()
+        spectrum = torch.fft.rfft(waveform, n=fft_size)
+        frequencies = torch.fft.rfftfreq(
+            fft_size,
+            d=1.0 / self.sample_rate,
+            device=waveform.device,
+        )
+        transition_start = 34.0 - 0.1
+        transition_end = 34.0 + 0.1
+        transition = (
+            (frequencies - transition_start)
+            / (transition_end - transition_start)
+        ).clamp(0.0, 1.0)
+        response = 0.5 - 0.5 * torch.cos(math.pi * transition)
+        response = torch.where(
+            frequencies <= transition_start,
+            torch.zeros_like(response),
+            response,
+        )
+        response = torch.where(
+            frequencies >= transition_end,
+            torch.ones_like(response),
+            response,
+        )
+        highpassed = torch.fft.irfft(
+            spectrum * response,
+            n=fft_size,
+        )[:sample_count]
+        rms = (highpassed.square().mean() + 1e-10).sqrt()
+        return highpassed / rms
+
+    def _prepare_cpps_input(
+        self,
+        waveform: torch.Tensor,
+        default_prepared: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.cpps_mode == "praat_pow2_highpass_v11":
+            return self._prepare_cpps_pow2_highpass(waveform)
+        return default_prepared
 
     @staticmethod
     def _limited_frames(
@@ -1618,7 +1669,10 @@ class PraatDifferentiableAVQIComponentEstimator(
                 ),
                 dim=-1,
             )
-        elif self.cpps_mode == "praat_relative_log1p_v10":
+        elif self.cpps_mode in {
+            "praat_relative_log1p_v10",
+            "praat_pow2_highpass_v11",
+        }:
             # A frame-relative log1p has a finite derivative at spectral nulls
             # and approaches the ordinary log derivative for dominant bins.
             # The straight-through value below remains exact Praat-aligned.
@@ -1794,7 +1848,27 @@ class PraatDifferentiableAVQIComponentEstimator(
             return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
         if self.cpps_mode == "praat_relative_log1p_v10":
             return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
+        if self.cpps_mode == "praat_pow2_highpass_v11":
+            return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
         return self._cpps_current(prepared)
+
+    def raw_cpps(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Return unaligned CPPS with its mode-specific metric preprocessing."""
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        if waveform.ndim != 2:
+            raise ValueError(
+                f"expected a [batch, time] waveform, got {tuple(waveform.shape)}"
+            )
+        values = []
+        for row in waveform:
+            cpps_input = (
+                self._prepare_cpps_pow2_highpass(row)
+                if self.cpps_mode == "praat_pow2_highpass_v11"
+                else self._prepare(row)
+            )
+            values.append(self._cpps(cpps_input))
+        return torch.stack(values)
 
     def _soft_voiced_ltas_input(self, prepared: torch.Tensor) -> torch.Tensor:
         """Approximate Praat CS frame selection without a hard crop decision."""
@@ -2878,6 +2952,7 @@ class PraatDifferentiableAVQIComponentEstimator(
 
     def _raw_one(self, waveform: torch.Tensor) -> torch.Tensor:
         prepared = self._prepare(waveform)
+        cpps_input = self._prepare_cpps_input(waveform, prepared)
         frames, period, voicing_weight, linear_ac_hnr = (
             self._linear_ac_v2_pitch_features(prepared)
         )
@@ -2990,7 +3065,7 @@ class PraatDifferentiableAVQIComponentEstimator(
             )
             shimmer_db = self._weighted_mean(shimmer_db_frames, shimmer_weight)
 
-        cpps = self._cpps(prepared)
+        cpps = self._cpps(cpps_input)
         ltas_input = self._soft_voiced_ltas_input(prepared)
         slope, tilt = self._global_ltas(ltas_input)
         components = torch.stack(
