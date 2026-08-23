@@ -1204,6 +1204,7 @@ class PraatDifferentiableAVQIComponentEstimator(
         cpps_max_frames: int = 4_096,
         peak_temperature: float = 80.0,
         cpps_mode: str = "current_v2",
+        cpps_power_floor: float = 1e-30,
         hnr_mode: str = "linear_ac_v2",
         hnr_max_frames: int = 4_096,
         shimmer_mode: str = "analytic_envelope_v2",
@@ -1212,6 +1213,8 @@ class PraatDifferentiableAVQIComponentEstimator(
             raise ValueError(f"unsupported peak mode: {peak_mode}")
         if cpps_mode not in {"current_v2", "praat_topology_v7"}:
             raise ValueError(f"unsupported CPPS mode: {cpps_mode}")
+        if not math.isfinite(cpps_power_floor) or cpps_power_floor <= 0.0:
+            raise ValueError("CPPS power floor must be finite and positive")
         if hnr_mode not in {"linear_ac_v2", "raw_cc_v3"}:
             raise ValueError(f"unsupported HNR mode: {hnr_mode}")
         if shimmer_mode not in {
@@ -1241,6 +1244,7 @@ class PraatDifferentiableAVQIComponentEstimator(
         self.cpps_hop_length = cpps_hop_length
         self.cpps_max_frames = cpps_max_frames
         self.cpps_mode = cpps_mode
+        self.cpps_power_floor = cpps_power_floor
         self.cpps_praat_sample_rate = 10_000
         self.cpps_praat_frame_length = 1_000
         self.cpps_praat_hop_length = 20
@@ -1607,7 +1611,7 @@ class PraatDifferentiableAVQIComponentEstimator(
             axis=1,
         )
         cepstrum_db = 10.0 / math.log(10.0) * torch.log(
-            power_cepstrum.clamp_min(1e-30)
+            power_cepstrum.clamp_min(self.cpps_power_floor)
         )
 
         quefrency = torch.arange(
