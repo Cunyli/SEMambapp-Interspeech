@@ -62,6 +62,7 @@ DIRECT_ARCHITECTURES = (
     "direct_exact_inspired",
     "direct_praat_soft_v2",
     "direct_praat_hard_v2",
+    "direct_praat_hard_hnr_pitch_path_v7",
     "direct_praat_hard_shimmer_rms_v3",
     "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
     "direct_praat_hard_shimmer_pulse_chain_v5",
@@ -164,6 +165,16 @@ def direct_contract(
                 "exact_praat_role": "frozen final judge",
                 "metric_branch_only_preprocessing": True,
                 "full_band_enhancement_path_preserved": True,
+                "hnr_pitch_path_v7": (
+                    {
+                        "candidate_topology": "detached Praat-style Viterbi path",
+                        "waveform_gradient": "live selected raw-CC strengths",
+                        "aggregation": "arithmetic mean over selected voiced frames",
+                        "backward_endpoint_floor": 1e-3,
+                    }
+                    if "direct_praat_hard_hnr_pitch_path_v7" in architectures
+                    else None
+                ),
             },
         },
         "calibration": {

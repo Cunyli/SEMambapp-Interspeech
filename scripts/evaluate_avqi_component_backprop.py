@@ -848,6 +848,11 @@ def train_waveform_predictor(
         predictor = PraatDifferentiableAVQIComponentEstimator(peak_mode="soft")
     elif architecture == "direct_praat_hard_v2":
         predictor = PraatDifferentiableAVQIComponentEstimator(peak_mode="hard")
+    elif architecture == "direct_praat_hard_hnr_pitch_path_v7":
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            hnr_mode="praat_pitch_path_v7",
+        )
     elif architecture == "direct_praat_hard_shimmer_rms_v3":
         predictor = PraatDifferentiableAVQIComponentEstimator(
             peak_mode="hard",
@@ -2610,6 +2615,7 @@ def main() -> None:
         "direct_exact_inspired",
         "direct_praat_soft_v2",
         "direct_praat_hard_v2",
+        "direct_praat_hard_hnr_pitch_path_v7",
         "direct_praat_hard_shimmer_rms_v3",
         "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
         "direct_praat_hard_shimmer_pulse_chain_v5",
@@ -2788,6 +2794,25 @@ def main() -> None:
                         ],
                     }
                     if "direct_praat_hard_v2" in waveform_architectures
+                    else None
+                ),
+                "direct_praat_hard_hnr_pitch_path_v7": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "detached Praat pitch-candidate path",
+                        "formulas": [
+                            "Praat-timed one-period forward cross-correlation",
+                            "14 voiced candidates plus an unvoiced state",
+                            "octave and voiced/unvoiced Viterbi path costs",
+                            "live selected strengths with voiced-frame HNR mean",
+                            "endpoint-regularized HNR backward transform",
+                            "the other five frozen v2 component formulas",
+                        ],
+                    }
+                    if "direct_praat_hard_hnr_pitch_path_v7"
+                    in waveform_architectures
                     else None
                 ),
                 "direct_praat_hard_shimmer_rms_v3": (
@@ -3038,6 +3063,7 @@ def main() -> None:
         "direct_exact_inspired",
         "direct_praat_soft_v2",
         "direct_praat_hard_v2",
+        "direct_praat_hard_hnr_pitch_path_v7",
         "direct_praat_hard_shimmer_rms_v3",
         "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
         "direct_praat_hard_shimmer_pulse_chain_v5",
