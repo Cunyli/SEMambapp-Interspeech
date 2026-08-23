@@ -618,6 +618,86 @@ def test_cpps_pow2_highpass_v11_changes_only_cpps_component() -> None:
     assert float(gradient.norm()) > 0.0
 
 
+def test_cpps_view_input_v12_matches_sv_crop_and_isolates_components() -> None:
+    sample_rate = 16_000
+    sample_count = 4 * sample_rate + 321
+    time = torch.arange(sample_count, dtype=torch.float32) / sample_rate
+    waveform = torch.where(
+        time >= 1.0,
+        0.02 * torch.sin(2.0 * math.pi * 175.0 * time),
+        torch.zeros_like(time),
+    )
+    baseline = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        cpps_mode="praat_pow2_highpass_v11",
+        cpps_power_floor=1e-6,
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+    candidate = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        cpps_mode="praat_view_input_v12",
+        cpps_power_floor=1e-6,
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+
+    expected = candidate._prepare_cpps_pow2_highpass(waveform)[-3 * sample_rate :]
+    actual = candidate._prepare_cpps_view_input(waveform, "sv")
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+    baseline_components = baseline.raw_components(waveform)[0]
+    candidate_components = candidate.raw_components(
+        waveform,
+        speaking_type="sv",
+    )[0]
+    assert not torch.isclose(candidate_components[0], baseline_components[0])
+    torch.testing.assert_close(
+        candidate_components[1:],
+        baseline_components[1:],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_cpps_view_input_v12_cs_topology_retains_waveform_gradient() -> None:
+    sample_rate = 16_000
+    time = torch.arange(4 * sample_rate, dtype=torch.float32) / sample_rate
+    tone = 0.02 * torch.sin(2.0 * math.pi * 175.0 * time)
+    sounding = ((time >= 0.5) & (time < 1.6)) | (
+        (time >= 2.1) & (time < 3.6)
+    )
+    waveform = torch.where(sounding, tone, torch.zeros_like(tone))
+    candidate = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        cpps_mode="praat_view_input_v12",
+        cpps_power_floor=1e-6,
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+
+    selected = candidate._prepare_cpps_view_input(waveform, "cs")
+    assert selected.numel() > 16
+    assert (selected.numel() - 16) % round(0.03 * sample_rate) == 0
+    assert torch.equal(selected[:16], torch.zeros_like(selected[:16]))
+
+    gradient_waveform = waveform.clone().requires_grad_()
+    value = candidate.raw_cpps(
+        gradient_waveform,
+        speaking_type="cs",
+    )[0]
+    gradient = torch.autograd.grad(value, gradient_waveform)[0]
+    assert torch.isfinite(gradient).all()
+    assert float(gradient.norm()) > 0.0
+
+    try:
+        candidate.raw_cpps(waveform)
+    except ValueError as error:
+        assert "requires speaking_type" in str(error)
+    else:
+        raise AssertionError("view-aware CPPS accepted an ambiguous waveform")
+
+
 def test_praat_differentiable_default_keeps_linear_ac_v2_hnr() -> None:
     sample_rate = 16_000
     time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate

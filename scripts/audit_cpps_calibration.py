@@ -33,7 +33,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-commit", required=True)
     parser.add_argument(
         "--modes",
-        default="praat_relative_log1p_v10,praat_pow2_highpass_v11",
+        default=(
+            "praat_relative_log1p_v10,praat_pow2_highpass_v11,"
+            "praat_view_input_v12"
+        ),
     )
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
@@ -132,7 +135,10 @@ def main() -> None:
                 values.append(
                     (
                         index,
-                        estimator.raw_cpps(example.waveform.to(device))[0],
+                        estimator.raw_cpps(
+                            example.waveform.to(device),
+                            speaking_type=example.view,
+                        )[0],
                     )
                 )
                 if len(values) % 100 == 0:

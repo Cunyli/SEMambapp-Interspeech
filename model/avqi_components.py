@@ -1218,6 +1218,7 @@ class PraatDifferentiableAVQIComponentEstimator(
             "praat_spectrum_endpoint_guard_v9",
             "praat_relative_log1p_v10",
             "praat_pow2_highpass_v11",
+            "praat_view_input_v12",
         }:
             raise ValueError(f"unsupported CPPS mode: {cpps_mode}")
         if not math.isfinite(cpps_power_floor) or cpps_power_floor <= 0.0:
@@ -1357,11 +1358,232 @@ class PraatDifferentiableAVQIComponentEstimator(
         rms = (highpassed.square().mean() + 1e-10).sqrt()
         return highpassed / rms
 
+    @staticmethod
+    def _replace_short_boolean_runs(
+        mask: torch.Tensor,
+        run_value: bool,
+        minimum_length: int,
+    ) -> torch.Tensor:
+        """Replace short detached topology runs with the opposite value."""
+        if mask.ndim != 1 or mask.dtype != torch.bool:
+            raise ValueError("run replacement expects a one-dimensional bool mask")
+        if minimum_length <= 0 or mask.numel() == 0:
+            return mask.detach().clone()
+        result = mask.detach().clone()
+        transitions = torch.nonzero(
+            result[1:] != result[:-1],
+            as_tuple=False,
+        ).flatten() + 1
+        boundaries = torch.cat(
+            (
+                torch.zeros(1, dtype=torch.long, device=result.device),
+                transitions,
+                torch.tensor(
+                    [result.numel()],
+                    dtype=torch.long,
+                    device=result.device,
+                ),
+            )
+        ).tolist()
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            if (
+                bool(result[start].item()) == run_value
+                and end - start < minimum_length
+            ):
+                result[start:end] = not run_value
+        return result
+
+    def _cpps_cs_sounding_mask(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Approximate Praat's detached 50 Hz silence TextGrid topology."""
+        detector = waveform.detach()
+        sample_count = detector.numel()
+        fft_size = 1 << (sample_count - 1).bit_length()
+        spectrum = torch.fft.rfft(detector, n=fft_size)
+        frequencies = torch.fft.rfftfreq(
+            fft_size,
+            d=1.0 / self.sample_rate,
+            device=detector.device,
+        )
+
+        # Sound: To TextGrid (silences) first applies a pass-Hann band from
+        # 80--8000 Hz with 80 Hz smoothing. At 16 kHz, the upper transition
+        # reaches its midpoint at Nyquist.
+        low_transition = (frequencies / 160.0).clamp(0.0, 1.0)
+        low_response = 0.5 - 0.5 * torch.cos(math.pi * low_transition)
+        high_transition = (
+            (frequencies - 7_920.0) / 160.0
+        ).clamp(0.0, 1.0)
+        high_response = 0.5 + 0.5 * torch.cos(math.pi * high_transition)
+        filtered = torch.fft.irfft(
+            spectrum * low_response * high_response,
+            n=fft_size,
+        )[:sample_count]
+
+        pitch_floor = 50.0
+        time_step = 0.003
+        half_window_duration = 3.2 / pitch_floor
+        half_window_samples = math.floor(
+            half_window_duration * self.sample_rate
+        )
+        window_length = 2 * half_window_samples + 1
+        if filtered.numel() < window_length:
+            filtered = F.pad(filtered, (0, window_length - filtered.numel()))
+        hop_length = max(1, round(time_step * self.sample_rate))
+        frames = filtered.unfold(0, window_length, hop_length)
+        frames = frames - frames.mean(dim=-1, keepdim=True)
+        window_position = torch.arange(
+            -half_window_samples,
+            half_window_samples + 1,
+            device=detector.device,
+            dtype=detector.dtype,
+        ) / max(half_window_samples, 1)
+        window_root = (
+            1.0 - window_position.square()
+        ).clamp_min(0.0).sqrt()
+        kaiser20 = torch.special.i0(
+            (2.0 * math.pi * math.pi + 0.5) * window_root
+        )
+        kaiser20 = kaiser20 / kaiser20.max().clamp_min(1e-30)
+        intensity_power = (
+            frames.square() * kaiser20.unsqueeze(0)
+        ).sum(dim=-1) / kaiser20.sum().clamp_min(1e-30)
+        silence_ratio = 10.0 ** (-25.0 / 10.0)
+        sounding = intensity_power > intensity_power.max() * silence_ratio
+
+        minimum_frames = math.ceil(0.1 / time_step)
+        sounding = self._replace_short_boolean_runs(
+            sounding,
+            True,
+            minimum_frames,
+        )
+        sounding = self._replace_short_boolean_runs(
+            sounding,
+            False,
+            minimum_frames,
+        )
+
+        sample_mask = torch.zeros(
+            sample_count,
+            dtype=torch.bool,
+            device=detector.device,
+        )
+        transitions = torch.nonzero(
+            sounding[1:] != sounding[:-1],
+            as_tuple=False,
+        ).flatten() + 1
+        boundaries = torch.cat(
+            (
+                torch.zeros(1, dtype=torch.long, device=detector.device),
+                transitions,
+                torch.tensor(
+                    [sounding.numel()],
+                    dtype=torch.long,
+                    device=detector.device,
+                ),
+            )
+        ).tolist()
+        centres = half_window_samples + torch.arange(
+            sounding.numel(),
+            device=detector.device,
+        ) * hop_length
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            if not bool(sounding[start].item()):
+                continue
+            left = (
+                0
+                if start == 0
+                else int(
+                    ((centres[start - 1] + centres[start]) // 2).item()
+                )
+            )
+            right = (
+                sample_count
+                if end == sounding.numel()
+                else int(((centres[end - 1] + centres[end]) // 2).item())
+            )
+            sample_mask[max(0, left) : min(sample_count, right)] = True
+
+        if not bool(sample_mask.any().item()):
+            peak_frame = int(intensity_power.argmax().item())
+            centre = int(centres[peak_frame].item())
+            left = max(0, centre - half_window_samples)
+            right = min(sample_count, centre + half_window_samples + 1)
+            sample_mask[left:right] = True
+        return sample_mask
+
+    def _prepare_cpps_cs_view(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Select Praat-style sounding 30 ms CS blocks with detached topology."""
+        sounding_mask = self._cpps_cs_sounding_mask(waveform)
+        sounding_indices = torch.nonzero(
+            sounding_mask,
+            as_tuple=False,
+        ).flatten()
+        only_loud = waveform.index_select(0, sounding_indices)
+
+        block_length = round(0.03 * self.sample_rate)
+        if only_loud.numel() < block_length:
+            only_loud = F.pad(
+                only_loud,
+                (0, block_length - only_loud.numel()),
+            )
+        blocks = only_loud.unfold(0, block_length, block_length)
+        candidate_count = max(
+            1,
+            math.ceil(only_loud.numel() / block_length) - 2,
+        )
+        blocks = blocks[: min(candidate_count, blocks.shape[0])]
+        detached_blocks = blocks.detach()
+        global_power = only_loud.detach().square().mean()
+        partial_power = detached_blocks.square().mean(dim=-1)
+        edge = round(0.0025 * self.sample_rate)
+        zero_region = detached_blocks[:, edge:-edge]
+        zero_crossings = (
+            (zero_region[:, 1:] >= 0.0) != (zero_region[:, :-1] >= 0.0)
+        ).sum(dim=-1)
+        zero_crossing_rate = zero_crossings / 0.025
+        keep = (partial_power > 0.30 * global_power) & (
+            zero_crossing_rate < 3_000.0
+        )
+        if not bool(keep.any().item()):
+            keep = torch.zeros_like(keep)
+            keep[partial_power.argmax()] = True
+        selected_blocks = blocks.index_select(
+            0,
+            torch.nonzero(keep, as_tuple=False).flatten(),
+        )
+        selected = selected_blocks.reshape(-1)
+
+        # The exact Praat script initializes onlyVoice as a 1 ms zero Sound
+        # before concatenating accepted blocks.
+        return F.pad(selected, (round(0.001 * self.sample_rate), 0))
+
+    def _prepare_cpps_view_input(
+        self,
+        waveform: torch.Tensor,
+        speaking_type: str | None,
+    ) -> torch.Tensor:
+        if speaking_type not in {"cs", "sv"}:
+            raise ValueError(
+                "praat_view_input_v12 requires speaking_type='cs' or 'sv'"
+            )
+        prepared = self._prepare_cpps_pow2_highpass(waveform)
+        if speaking_type == "sv":
+            maximum_samples = 3 * self.sample_rate
+            return (
+                prepared[-maximum_samples:]
+                if prepared.numel() > maximum_samples
+                else prepared
+            )
+        return self._prepare_cpps_cs_view(prepared)
+
     def _prepare_cpps_input(
         self,
         waveform: torch.Tensor,
         default_prepared: torch.Tensor,
+        speaking_type: str | None = None,
     ) -> torch.Tensor:
+        if self.cpps_mode == "praat_view_input_v12":
+            return self._prepare_cpps_view_input(waveform, speaking_type)
         if self.cpps_mode == "praat_pow2_highpass_v11":
             return self._prepare_cpps_pow2_highpass(waveform)
         return default_prepared
@@ -1672,6 +1894,7 @@ class PraatDifferentiableAVQIComponentEstimator(
         elif self.cpps_mode in {
             "praat_relative_log1p_v10",
             "praat_pow2_highpass_v11",
+            "praat_view_input_v12",
         }:
             # A frame-relative log1p has a finite derivative at spectral nulls
             # and approaches the ordinary log derivative for dominant bins.
@@ -1850,9 +2073,15 @@ class PraatDifferentiableAVQIComponentEstimator(
             return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
         if self.cpps_mode == "praat_pow2_highpass_v11":
             return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
+        if self.cpps_mode == "praat_view_input_v12":
+            return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
         return self._cpps_current(prepared)
 
-    def raw_cpps(self, waveform: torch.Tensor) -> torch.Tensor:
+    def raw_cpps(
+        self,
+        waveform: torch.Tensor,
+        speaking_type: str | None = None,
+    ) -> torch.Tensor:
         """Return unaligned CPPS with its mode-specific metric preprocessing."""
         if waveform.ndim == 1:
             waveform = waveform.unsqueeze(0)
@@ -1862,10 +2091,11 @@ class PraatDifferentiableAVQIComponentEstimator(
             )
         values = []
         for row in waveform:
-            cpps_input = (
-                self._prepare_cpps_pow2_highpass(row)
-                if self.cpps_mode == "praat_pow2_highpass_v11"
-                else self._prepare(row)
+            default_prepared = self._prepare(row)
+            cpps_input = self._prepare_cpps_input(
+                row,
+                default_prepared,
+                speaking_type,
             )
             values.append(self._cpps(cpps_input))
         return torch.stack(values)
@@ -2950,9 +3180,17 @@ class PraatDifferentiableAVQIComponentEstimator(
             )
         return torch.stack([self._hnr_one(self._prepare(row)) for row in waveform])
 
-    def _raw_one(self, waveform: torch.Tensor) -> torch.Tensor:
+    def _raw_one(
+        self,
+        waveform: torch.Tensor,
+        speaking_type: str | None = None,
+    ) -> torch.Tensor:
         prepared = self._prepare(waveform)
-        cpps_input = self._prepare_cpps_input(waveform, prepared)
+        cpps_input = self._prepare_cpps_input(
+            waveform,
+            prepared,
+            speaking_type,
+        )
         frames, period, voicing_weight, linear_ac_hnr = (
             self._linear_ac_v2_pitch_features(prepared)
         )
@@ -3074,6 +3312,21 @@ class PraatDifferentiableAVQIComponentEstimator(
         if not torch.isfinite(components).all():
             raise ValueError("non-finite Praat-inspired differentiable components")
         return components
+
+    def raw_components(
+        self,
+        waveform: torch.Tensor,
+        speaking_type: str | None = None,
+    ) -> torch.Tensor:
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        if waveform.ndim != 2:
+            raise ValueError(
+                f"expected a [batch, time] waveform, got {tuple(waveform.shape)}"
+            )
+        return torch.stack(
+            [self._raw_one(row, speaking_type) for row in waveform]
+        )
 
 
 class ComponentAffineCalibrator(nn.Module):

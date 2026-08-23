@@ -10,7 +10,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 LABEL_BANK="${LABEL_BANK:-/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_component_direct_c_v5_data_20260817_03/outputs/label_bank/exact_component_label_bank_v4.csv}"
 LABEL_BANK_SHA256="${LABEL_BANK_SHA256:-03b8d5e3d0542dbfe60e54723bc89431e8dfd475dcc38284a6058465c5224760}"
-MODES="${MODES:-praat_relative_log1p_v10,praat_pow2_highpass_v11}"
+MODES="${MODES:-praat_relative_log1p_v10,praat_pow2_highpass_v11,praat_view_input_v12}"
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}"
 PARTITION="${PARTITION:-gpu-v100-32g}"
 GPU_TYPE="${GPU_TYPE:-v100}"
@@ -82,6 +82,7 @@ python -m scripts.audit_cpps_calibration \
   --source-commit "$SOURCE_COMMIT" \
   --modes "$MODES" \
   2>&1 | tee -a "$LIVE_LOG"
+echo "event=complete job=$SLURM_JOB_ID time=$(date -Is)" | tee -a "$LIVE_LOG"
 REPORT_SHA256="$(sha256sum "$REPORT" | awk '{print $1}')"
 LOG_SHA256="$(sha256sum "$LIVE_LOG" | awk '{print $1}')"
 jq -n \
@@ -93,4 +94,3 @@ jq -n \
   --arg selected_mode "$(jq -er '.selected_mode' "$REPORT")" \
   '{decision: "CPPS_CALIBRATION_AUDIT_COMPLETE", source_commit: $source_commit, slurm_job_id: $slurm_job_id, selected_mode: $selected_mode, report: $report, report_sha256: $report_sha256, log_sha256: $log_sha256, evaluated_splits: ["surrogate_train", "surrogate_calibration"], holdout_evaluated: false, external_evaluated: false, generator_optimizer_steps: 0, formal_generator_training_submitted: false}' \
   > "$RECEIPT"
-echo "event=complete job=$SLURM_JOB_ID time=$(date -Is)" | tee -a "$LIVE_LOG"
