@@ -1610,9 +1610,15 @@ class PraatDifferentiableAVQIComponentEstimator(
             quefrency_kernel,
             axis=1,
         )
-        cepstrum_db = 10.0 / math.log(10.0) * torch.log(
+        exact_cepstrum_db = 10.0 / math.log(10.0) * torch.log(
+            power_cepstrum.clamp_min(1e-30)
+        )
+        stable_cepstrum_db = 10.0 / math.log(10.0) * torch.log(
             power_cepstrum.clamp_min(self.cpps_power_floor)
         )
+        cepstrum_db = stable_cepstrum_db + (
+            exact_cepstrum_db - stable_cepstrum_db
+        ).detach()
 
         quefrency = torch.arange(
             self.cpps_praat_n_fft // 2 + 1,
@@ -1655,9 +1661,10 @@ class PraatDifferentiableAVQIComponentEstimator(
             peak_offset,
             torch.zeros_like(peak_offset),
         )
-        peak_value = peak_value - 0.25 * (
+        parabolic_peak_value = peak_value - 0.25 * (
             left_value - right_value
         ) * peak_offset
+        peak_value = peak_value + (parabolic_peak_value - peak_value).detach()
         peak_quefrency = search_quefrency[peak_index] + peak_offset / target_rate
 
         trend_values = cepstrum_db[:, trend_mask]
@@ -1683,7 +1690,14 @@ class PraatDifferentiableAVQIComponentEstimator(
         robust_slope = self._select_detached_median(valid_slopes)
         pair_intercepts = trend_values - robust_slope.unsqueeze(-1) * trend_quefrency
         robust_intercept = self._select_detached_median(pair_intercepts)
-        baseline = robust_intercept + robust_slope * peak_quefrency
+        exact_baseline = robust_intercept + robust_slope * peak_quefrency
+        stable_intercept = trend_values.mean(dim=-1) - robust_slope.detach() * (
+            trend_quefrency.mean()
+        )
+        stable_baseline = stable_intercept + robust_slope.detach() * (
+            peak_quefrency.detach() - trend_quefrency.mean()
+        )
+        baseline = stable_baseline + (exact_baseline - stable_baseline).detach()
         return (peak_value - baseline).mean()
 
     def _cpps(
