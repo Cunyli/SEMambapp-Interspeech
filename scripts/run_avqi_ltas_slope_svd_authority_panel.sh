@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hash-locked, two-stage SVD external authority panel for LTAS slope. No training.
+# Hash-locked v10 SVD external authority panel with presealed reserves. No training.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,7 +34,7 @@ CS_VOICED_PRAAT_SHA256="${CS_VOICED_PRAAT_SHA256:-09e874ba3762d5529be3d3e83a737b
 SLOPE_PRAAT_SHA256="${SLOPE_PRAAT_SHA256:-8ba59924ebfae16b8c55d1ea009d887182c31820d5c62a6b8d93ed174c2be8c2}"
 
 STAGE="${STAGE:-seal}"
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_ltas_slope_svd_authority_v9_20260823_01}"
+RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_ltas_slope_svd_authority_v10_20260823_01}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 PANEL_SEAL_SHA256="${PANEL_SEAL_SHA256:-}"

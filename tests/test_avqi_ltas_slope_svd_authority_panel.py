@@ -3,6 +3,10 @@ from pathlib import Path
 from scripts.evaluate_avqi_ltas_slope_svd_authority_panel import (
     EXACT_SCORER,
     PANEL_ROWS,
+    PRIMARY_ROWS,
+    RESERVE_ROWS,
+    V9_PANEL_ROWS,
+    exact_speaker_complete,
     level_metrics,
     paired_lowpass_delta,
     preregistered_contract,
@@ -34,16 +38,41 @@ def synthetic_rows() -> list[dict]:
     return rows
 
 
-def test_panel_is_frozen_to_24_unique_speakers_and_sessions() -> None:
-    speakers = [row[0] for row in PANEL_ROWS]
-    sessions = [row[1] for row in PANEL_ROWS]
-    sexes = [row[2] for row in PANEL_ROWS]
+def test_panel_freezes_disjoint_primary_and_status_only_reserves() -> None:
+    primary_speakers = [row[0] for row in PRIMARY_ROWS]
+    primary_sessions = [row[1] for row in PRIMARY_ROWS]
+    primary_sexes = [row[2] for row in PRIMARY_ROWS]
+    reserve_speakers = [row[0] for row in RESERVE_ROWS]
+    reserve_sexes = [row[2] for row in RESERVE_ROWS]
+    v9_speakers = {row[0] for row in V9_PANEL_ROWS}
 
-    assert len(PANEL_ROWS) == 24
-    assert len(set(speakers)) == 24
-    assert len(set(sessions)) == 24
-    assert sexes.count("female") == 12
-    assert sexes.count("male") == 12
+    assert len(PRIMARY_ROWS) == 24
+    assert len(set(primary_speakers)) == 24
+    assert len(set(primary_sessions)) == 24
+    assert primary_sexes.count("female") == 12
+    assert primary_sexes.count("male") == 12
+    assert len(RESERVE_ROWS) == 8
+    assert reserve_sexes.count("female") == 6
+    assert reserve_sexes.count("male") == 2
+    assert not set(primary_speakers) & set(reserve_speakers)
+    assert not {row[0] for row in PANEL_ROWS} & v9_speakers
+
+
+def test_exact_speaker_completion_uses_status_not_metric_value() -> None:
+    rows = []
+    for view in ("cs", "sv"):
+        for variant in ("clean", "gain", "shift", "lowpass_3khz"):
+            rows.append(
+                {
+                    "id": f"SVD:42:99:{view}:{variant}",
+                    "scoring_status": "ok",
+                    "slope": 1e9,
+                }
+            )
+
+    assert exact_speaker_complete(rows, "SVD:42") is True
+    rows[-1]["scoring_status"] = "error"
+    assert exact_speaker_complete(rows, "SVD:42") is False
 
 
 def test_exact_scorer_uses_view_correct_authoritative_preprocessing() -> None:
@@ -77,6 +106,7 @@ def test_runner_requires_separate_seal_and_score_stages() -> None:
     assert "Score stage requires PANEL_SEAL_SHA256" in source
     assert "Refusing to reopen an already scored SVD LTAS panel" in source
     assert "CONFIRM_SLURM_SUBMIT" in source
+    assert "avqi_route_c_ltas_slope_svd_authority_v10_20260823_01" in source
     assert (
         "465c15e46c9c9e325c14e5672abead050bbfd9a4bba75d0ace46bf5d58884966"
         in source

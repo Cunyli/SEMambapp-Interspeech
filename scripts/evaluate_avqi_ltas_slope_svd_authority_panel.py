@@ -52,7 +52,7 @@ from scripts.evaluate_avqi_ltas_slope_lowpass_authority import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PANEL_ROWS = (
+V9_PANEL_ROWS = (
     ("1347", "360", "female"),
     ("1662", "1275", "female"),
     ("1413", "721", "female"),
@@ -78,14 +78,61 @@ PANEL_ROWS = (
     ("1426", "814", "male"),
     ("1882", "1576", "male"),
 )
-PANEL_SELECTION_RULE = (
-    "patient paired sessions only; one minimum numeric session per SVD speaker; "
-    "SHA256(speaker_id:session_id) rank; first 12 female plus first 12 male"
+V9_PANEL_SPEAKERS = frozenset(row[0] for row in V9_PANEL_ROWS)
+PRIMARY_ROWS = (
+    ("1877", "1784", "female"),
+    ("1382", "565", "female"),
+    ("1525", "933", "female"),
+    ("1891", "1591", "female"),
+    ("1302", "105", "female"),
+    ("1459", "859", "female"),
+    ("1377", "562", "female"),
+    ("1545", "1049", "female"),
+    ("1615", "1227", "female"),
+    ("1894", "1594", "female"),
+    ("1395", "668", "female"),
+    ("2007", "1863", "female"),
+    ("1941", "1647", "male"),
+    ("1865", "1555", "male"),
+    ("1594", "1197", "male"),
+    ("1969", "1670", "male"),
+    ("1449", "850", "male"),
+    ("1448", "849", "male"),
+    ("1446", "1606", "male"),
+    ("1495", "918", "male"),
+    ("1805", "2384", "male"),
+    ("1741", "1389", "male"),
+    ("2000", "1716", "male"),
+    ("1486", "892", "male"),
 )
-PANEL_SPEAKERS = 24
+RESERVE_ROWS = (
+    ("1301", "101", "female"),
+    ("1438", "826", "female"),
+    ("1516", "924", "female"),
+    ("1849", "1502", "female"),
+    ("1923", "1624", "female"),
+    ("1322", "143", "female"),
+    ("1603", "2548", "male"),
+    ("1872", "1565", "male"),
+)
+PANEL_ROWS = PRIMARY_ROWS + RESERVE_ROWS
+PANEL_SELECTION_RULE = (
+    "patient paired sessions only; exclude every v9 speaker; raw mono SV >= "
+    "1.0 s and CS >= 3.0 s; one minimum numeric eligible session per SVD "
+    "speaker; SHA256(speaker_id:session_id) rank; first 12 per sex are primary; "
+    "next up to 6 per sex are ordered same-sex reserves"
+)
+PRIMARY_SPEAKERS = 24
+RESERVE_SPEAKERS = len(RESERVE_ROWS)
+SEALED_SPEAKERS = PRIMARY_SPEAKERS + RESERVE_SPEAKERS
 PANEL_VIEWS = ("cs", "sv")
-PANEL_CASES = PANEL_SPEAKERS * len(PANEL_VIEWS)
-EXPECTED_EXACT_ROWS = PANEL_CASES * len(VARIANT_NAMES)
+PRIMARY_CASES = PRIMARY_SPEAKERS * len(PANEL_VIEWS)
+SEALED_CASES = SEALED_SPEAKERS * len(PANEL_VIEWS)
+EXPECTED_SELECTED_EXACT_ROWS = PRIMARY_CASES * len(VARIANT_NAMES)
+SV_DURATION_MIN_SECONDS = 1.0
+CS_DURATION_MIN_SECONDS = 3.0
+PRIMARY_PER_SEX = 12
+RESERVE_PER_SEX_TARGET = 6
 LEVEL_SPEARMAN_GATE = 0.70
 DELTA_SPEARMAN_GATE = 0.60
 NORMALIZED_MAE_GATE = 0.50
@@ -165,6 +212,10 @@ class PanelCase:
     diagnosis: str
     sv_path: Path
     cs_path: Path
+    selection_role: str
+    selection_rank_within_sex: int
+    sv_duration_seconds: float
+    cs_duration_seconds: float
 
     @property
     def panel_speaker_id(self) -> str:
@@ -251,7 +302,7 @@ def select_panel_cases(args: argparse.Namespace) -> list[PanelCase]:
     validate_hash(args.cs_metadata, args.cs_metadata_sha256, "SVD CS metadata")
     sv_rows = {row["session_id"]: row for row in read_csv(args.sv_metadata)}
     cs_rows = {row["session_id"]: row for row in read_csv(args.cs_metadata)}
-    by_speaker: dict[str, list[tuple[str, str]]] = {}
+    by_speaker: dict[str, list[tuple[str, str, float, float]]] = {}
     for session_id in set(sv_rows) & set(cs_rows):
         sv_row = sv_rows[session_id]
         cs_row = cs_rows[session_id]
@@ -261,6 +312,8 @@ def select_panel_cases(args: argparse.Namespace) -> list[PanelCase]:
             raise ValueError(f"SVD metadata speaker mismatch: {session_id}")
         if sv_row["gender"] != cs_row["gender"]:
             raise ValueError(f"SVD metadata sex mismatch: {session_id}")
+        if sv_row["speaker id"] in V9_PANEL_SPEAKERS:
+            continue
         sv_path = args.sv_root / sv_row["filename"]
         cs_path = args.cs_root / cs_row["filename"]
         if not sv_path.is_file() or not cs_path.is_file():
@@ -274,8 +327,15 @@ def select_panel_cases(args: argparse.Namespace) -> list[PanelCase]:
             or cs_info.channels != 1
         ):
             continue
+        sv_duration = sv_info.frames / sv_info.samplerate
+        cs_duration = cs_info.frames / cs_info.samplerate
+        if (
+            sv_duration < SV_DURATION_MIN_SECONDS
+            or cs_duration < CS_DURATION_MIN_SECONDS
+        ):
+            continue
         by_speaker.setdefault(sv_row["speaker id"], []).append(
-            (session_id, sv_row["gender"])
+            (session_id, sv_row["gender"], sv_duration, cs_duration)
         )
     one_session = [
         (speaker_id, *min(rows, key=lambda value: int(value[0])))
@@ -286,50 +346,95 @@ def select_panel_cases(args: argparse.Namespace) -> list[PanelCase]:
             f"{value[0]}:{value[1]}".encode()
         ).hexdigest()
     )
-    derived_rows = tuple(
-        [row for row in one_session if row[2] == "female"][:12]
-        + [row for row in one_session if row[2] == "male"][:12]
+    by_sex = {
+        sex: [row for row in one_session if row[2] == sex]
+        for sex in ("female", "male")
+    }
+    derived_primary = tuple(
+        (row[0], row[1], row[2])
+        for sex in ("female", "male")
+        for row in by_sex[sex][:PRIMARY_PER_SEX]
     )
-    if derived_rows != PANEL_ROWS:
-        raise ValueError("SVD metadata-only panel derivation differs from frozen rows")
+    derived_reserve = tuple(
+        (row[0], row[1], row[2])
+        for sex in ("female", "male")
+        for row in by_sex[sex][
+            PRIMARY_PER_SEX : PRIMARY_PER_SEX + RESERVE_PER_SEX_TARGET
+        ]
+    )
+    if derived_primary != PRIMARY_ROWS:
+        raise ValueError("SVD metadata-only primary derivation differs from frozen rows")
+    if derived_reserve != RESERVE_ROWS:
+        raise ValueError("SVD metadata-only reserve derivation differs from frozen rows")
+    derived_by_key = {
+        (row[0], row[1]): row for rows in by_sex.values() for row in rows
+    }
     selected: list[PanelCase] = []
     observed_speakers: set[str] = set()
-    observed_sexes: list[str] = []
-    for expected_speaker, session_id, expected_sex in PANEL_ROWS:
-        if session_id not in sv_rows or session_id not in cs_rows:
-            raise ValueError(f"SVD panel session missing from metadata: {session_id}")
-        sv_row = sv_rows[session_id]
-        cs_row = cs_rows[session_id]
-        if sv_row["speaker id"] != expected_speaker:
-            raise ValueError(f"SVD SV speaker drift for session {session_id}")
-        if cs_row["speaker id"] != expected_speaker:
-            raise ValueError(f"SVD CS speaker drift for session {session_id}")
-        if sv_row["health status"] != "1" or cs_row["health status"] != "1":
-            raise ValueError(f"SVD panel session is not patient-labelled: {session_id}")
-        if sv_row["gender"] != expected_sex or cs_row["gender"] != expected_sex:
-            raise ValueError(f"SVD sex metadata drift for session {session_id}")
-        if expected_speaker in observed_speakers:
-            raise ValueError(f"duplicate SVD speaker in panel: {expected_speaker}")
-        sv_path = args.sv_root / sv_row["filename"]
-        cs_path = args.cs_root / cs_row["filename"]
-        if not sv_path.is_file() or not cs_path.is_file():
-            raise FileNotFoundError(f"missing paired SVD audio for session {session_id}")
-        selected.append(
-            PanelCase(
-                speaker_id=expected_speaker,
-                session_id=session_id,
-                sex=expected_sex,
-                diagnosis=sv_row["diagnosis"],
-                sv_path=sv_path,
-                cs_path=cs_path,
+    role_rows = (("primary", PRIMARY_ROWS), ("reserve", RESERVE_ROWS))
+    rank_by_role_and_sex: dict[tuple[str, str], int] = {}
+    for role, frozen_rows in role_rows:
+        for expected_speaker, session_id, expected_sex in frozen_rows:
+            rank_key = (role, expected_sex)
+            rank_by_role_and_sex[rank_key] = rank_by_role_and_sex.get(rank_key, 0) + 1
+            rank = rank_by_role_and_sex[rank_key]
+            if (expected_speaker, session_id) not in derived_by_key:
+                raise ValueError(
+                    f"SVD frozen {role} row is no longer eligible: "
+                    f"{expected_speaker}:{session_id}"
+                )
+            _, _, _, sv_duration, cs_duration = derived_by_key[
+                (expected_speaker, session_id)
+            ]
+            if session_id not in sv_rows or session_id not in cs_rows:
+                raise ValueError(
+                    f"SVD panel session missing from metadata: {session_id}"
+                )
+            sv_row = sv_rows[session_id]
+            cs_row = cs_rows[session_id]
+            if sv_row["speaker id"] != expected_speaker:
+                raise ValueError(f"SVD SV speaker drift for session {session_id}")
+            if cs_row["speaker id"] != expected_speaker:
+                raise ValueError(f"SVD CS speaker drift for session {session_id}")
+            if sv_row["health status"] != "1" or cs_row["health status"] != "1":
+                raise ValueError(
+                    f"SVD panel session is not patient-labelled: {session_id}"
+                )
+            if sv_row["gender"] != expected_sex or cs_row["gender"] != expected_sex:
+                raise ValueError(f"SVD sex metadata drift for session {session_id}")
+            if expected_speaker in observed_speakers:
+                raise ValueError(f"duplicate SVD speaker in panel: {expected_speaker}")
+            sv_path = args.sv_root / sv_row["filename"]
+            cs_path = args.cs_root / cs_row["filename"]
+            if not sv_path.is_file() or not cs_path.is_file():
+                raise FileNotFoundError(
+                    f"missing paired SVD audio for session {session_id}"
+                )
+            selected.append(
+                PanelCase(
+                    speaker_id=expected_speaker,
+                    session_id=session_id,
+                    sex=expected_sex,
+                    diagnosis=sv_row["diagnosis"],
+                    sv_path=sv_path,
+                    cs_path=cs_path,
+                    selection_role=role,
+                    selection_rank_within_sex=rank,
+                    sv_duration_seconds=float(sv_duration),
+                    cs_duration_seconds=float(cs_duration),
+                )
             )
-        )
-        observed_speakers.add(expected_speaker)
-        observed_sexes.append(expected_sex)
-    if len(selected) != PANEL_SPEAKERS:
-        raise ValueError(f"expected {PANEL_SPEAKERS} SVD panel speakers")
-    if observed_sexes.count("female") != 12 or observed_sexes.count("male") != 12:
-        raise ValueError("SVD panel must contain 12 female and 12 male speakers")
+            observed_speakers.add(expected_speaker)
+    if len(selected) != SEALED_SPEAKERS:
+        raise ValueError(f"expected {SEALED_SPEAKERS} sealed SVD speakers")
+    primary = [case for case in selected if case.selection_role == "primary"]
+    reserve = [case for case in selected if case.selection_role == "reserve"]
+    if len(primary) != PRIMARY_SPEAKERS or len(reserve) != RESERVE_SPEAKERS:
+        raise ValueError("SVD primary/reserve count drifted")
+    if sum(case.sex == "female" for case in primary) != PRIMARY_PER_SEX:
+        raise ValueError("SVD primary panel must contain 12 female speakers")
+    if sum(case.sex == "male" for case in primary) != PRIMARY_PER_SEX:
+        raise ValueError("SVD primary panel must contain 12 male speakers")
     return selected
 
 
@@ -411,6 +516,11 @@ def preregistered_contract() -> dict[str, Any]:
         "normalized_mae_max": NORMALIZED_MAE_GATE,
         "calibration_slope_range": list(CALIBRATION_SLOPE_RANGE),
         "external_coverage_min": EXTERNAL_COVERAGE_GATE,
+        "complete_selected_speakers_required": PRIMARY_SPEAKERS,
+        "reserve_substitution": (
+            "same-sex frozen rank using exact scoring_status only"
+        ),
+        "exact_values_used_for_panel_selection": False,
         "component_input_gradient_norm": [
             COMPONENT_INPUT_GRADIENT_MIN,
             COMPONENT_INPUT_GRADIENT_MAX,
@@ -463,12 +573,19 @@ def seal_panel(args: argparse.Namespace) -> None:
                     "speaker_id": case.speaker_id,
                     "session_id": case.session_id,
                     "sex": case.sex,
+                    "selection_role": case.selection_role,
+                    "selection_rank_within_sex": case.selection_rank_within_sex,
                     "label": "patient",
                     "diagnosis": case.diagnosis,
                     "view": view,
                     "source_path": str(source_path.resolve()),
                     "source_audio_sha256": sha256_file(source_path),
                     "source_sample_rate": sf.info(source_path).samplerate,
+                    "source_duration_seconds": (
+                        case.cs_duration_seconds
+                        if view == "cs"
+                        else case.sv_duration_seconds
+                    ),
                     "canonical_sample_rate": SAMPLE_RATE,
                     "canonical_samples": int(waveform.size),
                     "variant_paths": variant_paths,
@@ -477,7 +594,7 @@ def seal_panel(args: argparse.Namespace) -> None:
             )
 
     seal = {
-        "schema_version": "avqi-route-c-ltas-svd-authority-panel-seal-v1",
+        "schema_version": "avqi-route-c-ltas-svd-authority-panel-seal-v2",
         "stage": "seal",
         "exact_scores_opened": False,
         "selection": {
@@ -488,12 +605,40 @@ def seal_panel(args: argparse.Namespace) -> None:
             "session_identity_key": "SVD session_id",
             "speaker_split_before_transform": True,
             "speaker_disjoint_from_label_bank": True,
-            "speaker_count": PANEL_SPEAKERS,
-            "case_count": PANEL_CASES,
+            "speaker_disjoint_from_v9_panel": True,
+            "excluded_v9_speakers": sorted(
+                f"SVD:{speaker_id}" for speaker_id in V9_PANEL_SPEAKERS
+            ),
+            "raw_duration_eligibility_seconds": {
+                "sv_min": SV_DURATION_MIN_SECONDS,
+                "cs_min": CS_DURATION_MIN_SECONDS,
+            },
+            "primary_speaker_count": PRIMARY_SPEAKERS,
+            "primary_case_count": PRIMARY_CASES,
+            "reserve_speaker_count": RESERVE_SPEAKERS,
+            "sealed_speaker_count": SEALED_SPEAKERS,
+            "sealed_case_count": SEALED_CASES,
             "views": list(PANEL_VIEWS),
-            "sex_counts": {"female": 12, "male": 12},
-            "speakers": [case.panel_speaker_id for case in cases],
-            "sessions": [case.session_id for case in cases],
+            "primary_sex_counts": {"female": 12, "male": 12},
+            "reserve_sex_counts": {"female": 6, "male": 2},
+            "reserve_target_per_sex": RESERVE_PER_SEX_TARGET,
+            "reserve_shortfall_disclosed": {"female": 0, "male": 4},
+            "primary_speakers": [
+                case.panel_speaker_id
+                for case in cases
+                if case.selection_role == "primary"
+            ],
+            "reserve_speakers": [
+                case.panel_speaker_id
+                for case in cases
+                if case.selection_role == "reserve"
+            ],
+            "all_sealed_speakers": [case.panel_speaker_id for case in cases],
+            "all_sealed_sessions": [case.session_id for case in cases],
+            "substitution_policy": (
+                "same-sex reserve rank; exact scoring_status only; exact LTAS "
+                "values never used for selection"
+            ),
         },
         "preprocessing": {
             "canonical_resample": "librosa soxr_hq to 16 kHz",
@@ -762,6 +907,60 @@ def write_score_artifacts(
     print(json.dumps(receipt, indent=2, sort_keys=True), flush=True)
 
 
+def ordered_speaker_ids(rows: list[dict[str, Any]]) -> list[str]:
+    return list(dict.fromkeys(row["panel_speaker_id"] for row in rows))
+
+
+def exact_items_for_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    items = []
+    for row in rows:
+        for variant in VARIANT_NAMES:
+            items.append(
+                {
+                    "id": (
+                        f"{row['panel_speaker_id']}:{row['session_id']}:"
+                        f"{row['view']}:{variant}"
+                    ),
+                    "path": row["variant_paths"][variant],
+                    "view": row["view"],
+                }
+            )
+    return items
+
+
+def exact_rows_for_speaker(
+    rows: list[dict[str, Any]],
+    panel_speaker_id: str,
+) -> list[dict[str, Any]]:
+    prefix = f"{panel_speaker_id}:"
+    return [row for row in rows if row["id"].startswith(prefix)]
+
+
+def exact_speaker_complete(
+    rows: list[dict[str, Any]],
+    panel_speaker_id: str,
+) -> bool:
+    speaker_rows = exact_rows_for_speaker(rows, panel_speaker_id)
+    expected = len(PANEL_VIEWS) * len(VARIANT_NAMES)
+    return len(speaker_rows) == expected and all(
+        row["scoring_status"] == "ok" for row in speaker_rows
+    )
+
+
+def exact_failure_receipts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": row["id"],
+            "view": row["view"],
+            "scoring_status": row["scoring_status"],
+            "error_type": row["error_type"],
+            "error_message": row["error_message"],
+        }
+        for row in rows
+        if row["scoring_status"] != "ok"
+    ]
+
+
 def score_panel(args: argparse.Namespace) -> None:
     if not args.output_dir.is_dir():
         raise FileNotFoundError(f"sealed panel output does not exist: {args.output_dir}")
@@ -782,7 +981,7 @@ def score_panel(args: argparse.Namespace) -> None:
             raise ValueError(f"SVD panel {key} drifted after sealing")
     if seal.get("preregistered_contract") != preregistered_contract():
         raise ValueError("SVD panel gate contract drifted after sealing")
-    if len(seal.get("rows", [])) != PANEL_CASES:
+    if len(seal.get("rows", [])) != SEALED_CASES:
         raise ValueError("SVD panel seal case count drifted")
     for row in seal["rows"]:
         for variant in VARIANT_NAMES:
@@ -804,64 +1003,210 @@ def score_panel(args: argparse.Namespace) -> None:
     if {row["panel_speaker_id"] for row in seal["rows"]} & label_bank_speakers:
         raise ValueError("sealed SVD speakers overlap the label bank")
 
-    exact_items: list[dict[str, str]] = []
-    result_rows: list[dict[str, Any]] = []
-    for sealed in seal["rows"]:
-        candidate = {}
-        for variant in VARIANT_NAMES:
-            waveform = load_canonical_audio(Path(sealed["variant_paths"][variant]))
-            candidate[variant] = predict_slope(
-                waveform,
-                estimator,
-                checkpoint,
-                exact_window=False,
-                device=device,
-            )
-            exact_items.append(
+    rows_by_speaker: dict[str, list[dict[str, Any]]] = {}
+    for row in seal["rows"]:
+        rows_by_speaker.setdefault(row["panel_speaker_id"], []).append(row)
+    if any(len(rows) != len(PANEL_VIEWS) for rows in rows_by_speaker.values()):
+        raise ValueError("sealed SVD speaker does not have exactly CS and SV rows")
+    primary_rows = [
+        row for row in seal["rows"] if row["selection_role"] == "primary"
+    ]
+    reserve_rows = [
+        row for row in seal["rows"] if row["selection_role"] == "reserve"
+    ]
+    primary_speakers = ordered_speaker_ids(primary_rows)
+    reserve_speakers = ordered_speaker_ids(reserve_rows)
+    if len(primary_speakers) != PRIMARY_SPEAKERS:
+        raise ValueError("sealed SVD primary speaker count drifted")
+    if len(reserve_speakers) != RESERVE_SPEAKERS:
+        raise ValueError("sealed SVD reserve speaker count drifted")
+    if primary_speakers != seal["selection"]["primary_speakers"]:
+        raise ValueError("sealed SVD primary order drifted")
+    if reserve_speakers != seal["selection"]["reserve_speakers"]:
+        raise ValueError("sealed SVD reserve order drifted")
+
+    speaker_sex = {
+        speaker_id: rows[0]["sex"] for speaker_id, rows in rows_by_speaker.items()
+    }
+    reserve_by_sex = {
+        sex: [speaker for speaker in reserve_speakers if speaker_sex[speaker] == sex]
+        for sex in ("female", "male")
+    }
+    attempted_exact_rows: list[dict[str, Any]] = []
+    exact_runtime_identity: dict[str, str] | None = None
+
+    def score_speakers(speaker_ids: list[str]) -> list[dict[str, Any]]:
+        nonlocal exact_runtime_identity
+        batch_rows = [
+            row for speaker_id in speaker_ids for row in rows_by_speaker[speaker_id]
+        ]
+        payload = run_exact(
+            exact_items_for_rows(batch_rows),
+            args.exact_python,
+            args.avqi_code_root,
+        )
+        expected_rows = (
+            len(speaker_ids) * len(PANEL_VIEWS) * len(VARIANT_NAMES)
+        )
+        if len(payload["rows"]) != expected_rows:
+            raise ValueError("unexpected SVD exact batch row count")
+        runtime = {
+            "parselmouth_version": payload["parselmouth_version"],
+            "praat_version": payload["praat_version"],
+        }
+        if exact_runtime_identity is None:
+            exact_runtime_identity = runtime
+        elif runtime != exact_runtime_identity:
+            raise ValueError("exact SVD runtime drifted between status-only batches")
+        existing_ids = {row["id"] for row in attempted_exact_rows}
+        if existing_ids & {row["id"] for row in payload["rows"]}:
+            raise ValueError("exact SVD speaker was scored more than once")
+        attempted_exact_rows.extend(payload["rows"])
+        return payload["rows"]
+
+    primary_exact_rows = score_speakers(primary_speakers)
+    if len(primary_exact_rows) != EXPECTED_SELECTED_EXACT_ROWS:
+        raise ValueError("unexpected SVD primary exact row count")
+    failed_primary = [
+        speaker
+        for speaker in primary_speakers
+        if not exact_speaker_complete(attempted_exact_rows, speaker)
+    ]
+    replacement_by_primary: dict[str, str] = {}
+    reserve_attempts: list[dict[str, Any]] = []
+    reserve_cursor = {"female": 0, "male": 0}
+    unresolved_primary: list[str] = []
+    for primary_speaker in failed_primary:
+        sex = speaker_sex[primary_speaker]
+        replacement = None
+        while reserve_cursor[sex] < len(reserve_by_sex[sex]):
+            reserve_speaker = reserve_by_sex[sex][reserve_cursor[sex]]
+            reserve_cursor[sex] += 1
+            batch = score_speakers([reserve_speaker])
+            complete = exact_speaker_complete(batch, reserve_speaker)
+            reserve_attempts.append(
                 {
-                    "id": (
-                        f"{sealed['panel_speaker_id']}:{sealed['session_id']}:"
-                        f"{sealed['view']}:{variant}"
-                    ),
-                    "path": sealed["variant_paths"][variant],
-                    "view": sealed["view"],
+                    "replaces_primary_speaker": primary_speaker,
+                    "reserve_speaker": reserve_speaker,
+                    "sex": sex,
+                    "selection_input": "exact scoring_status only",
+                    "complete_cs_sv_variants": complete,
+                    "failures": exact_failure_receipts(batch),
                 }
             )
-        result_rows.append(
-            {
-                **sealed,
-                "train_slope_scale": train_scale,
-                "candidate_frozen_full": candidate,
-            }
-        )
+            if complete:
+                replacement = reserve_speaker
+                break
+        if replacement is None:
+            unresolved_primary.append(primary_speaker)
+        else:
+            replacement_by_primary[primary_speaker] = replacement
 
-    exact = run_exact(exact_items, args.exact_python, args.avqi_code_root)
-    ok_rows = [row for row in exact["rows"] if row["scoring_status"] == "ok"]
-    coverage = len(ok_rows) / len(exact["rows"])
-    if len(exact["rows"]) != EXPECTED_EXACT_ROWS:
-        raise ValueError("unexpected SVD exact row count")
-    if coverage < 1.0:
+    selected_speakers = [
+        replacement_by_primary.get(speaker, speaker)
+        for speaker in primary_speakers
+        if speaker not in unresolved_primary
+    ]
+    if len(set(selected_speakers)) != len(selected_speakers):
+        raise ValueError("status-only SVD selection produced duplicate speakers")
+    selected_exact_rows = [
+        row
+        for speaker in selected_speakers
+        for row in exact_rows_for_speaker(attempted_exact_rows, speaker)
+    ]
+    selected_ok_rows = [
+        row for row in selected_exact_rows if row["scoring_status"] == "ok"
+    ]
+    selected_coverage = len(selected_ok_rows) / EXPECTED_SELECTED_EXACT_ROWS
+    attempted_ok_rows = [
+        row for row in attempted_exact_rows if row["scoring_status"] == "ok"
+    ]
+    attempted_coverage = len(attempted_ok_rows) / len(attempted_exact_rows)
+    substitution_audit = {
+        "policy": (
+            "score all primary speakers first; replace an incomplete primary "
+            "with the first exact-complete same-sex reserve in frozen rank order"
+        ),
+        "exact_values_used_for_selection": False,
+        "selection_field": "scoring_status",
+        "primary_speakers": primary_speakers,
+        "failed_primary_speakers": failed_primary,
+        "reserve_speakers_by_sex": reserve_by_sex,
+        "reserve_attempts": reserve_attempts,
+        "substitutions": [
+            {
+                "primary_speaker": primary,
+                "reserve_speaker": reserve,
+                "sex": speaker_sex[primary],
+            }
+            for primary, reserve in replacement_by_primary.items()
+        ],
+        "unresolved_primary_speakers": unresolved_primary,
+        "selected_speakers": selected_speakers,
+        "unused_reserve_speakers": [
+            speaker
+            for speaker in reserve_speakers
+            if not exact_rows_for_speaker(attempted_exact_rows, speaker)
+        ],
+    }
+    if (
+        unresolved_primary
+        or len(selected_speakers) != PRIMARY_SPEAKERS
+        or selected_coverage < 1.0
+    ):
         report = {
-            "schema_version": "avqi-route-c-ltas-svd-authority-panel-v1",
+            "schema_version": "avqi-route-c-ltas-svd-authority-panel-v2",
             "decision": "FAIL_EXTERNAL_SVD_LTAS_EXACT_COVERAGE",
             "panel_seal_sha256": args.panel_seal_sha256,
             "source_commit": args.source_commit,
             "slurm_job_id": args.slurm_job_id or None,
-            "exact_coverage": coverage,
+            "status_only_substitution": substitution_audit,
+            "selected_exact_coverage": selected_coverage,
             "exact_coverage_gate": EXTERNAL_COVERAGE_GATE,
-            "exact_failures": [
-                row for row in exact["rows"] if row["scoring_status"] != "ok"
-            ],
+            "complete_selected_speakers_required": PRIMARY_SPEAKERS,
+            "attempted_exact_rows": len(attempted_exact_rows),
+            "attempted_exact_coverage": attempted_coverage,
+            "exact_failures": exact_failure_receipts(attempted_exact_rows),
             "preregistered_contract": preregistered_contract(),
             "production_gate_changed": False,
             "generator_optimizer_steps": 0,
             "bounded_waveform_pilot_submitted": False,
             "formal_pathology_training_submitted": False,
         }
-        write_score_artifacts(args, report, result_rows)
+        write_score_artifacts(args, report, [])
         return
 
-    exact_index = {row["id"]: row for row in exact["rows"]}
+    if exact_runtime_identity is None:
+        raise RuntimeError("exact SVD runtime identity was not recorded")
+    if sum(speaker_sex[speaker] == "female" for speaker in selected_speakers) != 12:
+        raise ValueError("selected SVD panel does not retain 12 female speakers")
+    if sum(speaker_sex[speaker] == "male" for speaker in selected_speakers) != 12:
+        raise ValueError("selected SVD panel does not retain 12 male speakers")
+
+    result_rows: list[dict[str, Any]] = []
+    for speaker in selected_speakers:
+        for sealed in rows_by_speaker[speaker]:
+            candidate = {}
+            for variant in VARIANT_NAMES:
+                waveform = load_canonical_audio(
+                    Path(sealed["variant_paths"][variant])
+                )
+                candidate[variant] = predict_slope(
+                    waveform,
+                    estimator,
+                    checkpoint,
+                    exact_window=False,
+                    device=device,
+                )
+            result_rows.append(
+                {
+                    **sealed,
+                    "train_slope_scale": train_scale,
+                    "candidate_frozen_full": candidate,
+                }
+            )
+
+    exact_index = {row["id"]: row for row in selected_exact_rows}
     for row in result_rows:
         prefix = f"{row['panel_speaker_id']}:{row['session_id']}:{row['view']}"
         row["exact"] = {
@@ -908,7 +1253,7 @@ def score_panel(args: argparse.Namespace) -> None:
         else "FAIL_EXTERNAL_SVD_LTAS_AUTHORITY_PANEL_KEEP_PRODUCTION_GATE"
     )
     report = {
-        "schema_version": "avqi-route-c-ltas-svd-authority-panel-v1",
+        "schema_version": "avqi-route-c-ltas-svd-authority-panel-v2",
         "decision": decision,
         "promotion_boundary": (
             "ELIGIBLE_FOR_MINIMAL_PRODUCTION_GATE_REVISION_REVIEW_ONLY"
@@ -920,14 +1265,16 @@ def score_panel(args: argparse.Namespace) -> None:
         "slurm_job_id": args.slurm_job_id or None,
         "source_identity": current_identity,
         "selection": seal["selection"],
+        "status_only_substitution": substitution_audit,
         "preprocessing": seal["preprocessing"],
         "preregistered_contract": preregistered_contract(),
         "train_slope_scale_std_surrogate_train": train_scale,
         "exact_runtime": {
-            "parselmouth_version": exact["parselmouth_version"],
-            "praat_version": exact["praat_version"],
-            "rows": len(exact["rows"]),
-            "coverage": coverage,
+            **exact_runtime_identity,
+            "attempted_rows": len(attempted_exact_rows),
+            "attempted_coverage": attempted_coverage,
+            "selected_rows": len(selected_exact_rows),
+            "selected_coverage": selected_coverage,
             "coverage_gate": EXTERNAL_COVERAGE_GATE,
         },
         "level_alignment": level,
