@@ -1216,6 +1216,7 @@ class PraatDifferentiableAVQIComponentEstimator(
             "praat_topology_v7",
             "praat_centered_dc_guard_v8",
             "praat_spectrum_endpoint_guard_v9",
+            "praat_relative_log1p_v10",
         }:
             raise ValueError(f"unsupported CPPS mode: {cpps_mode}")
         if not math.isfinite(cpps_power_floor) or cpps_power_floor <= 0.0:
@@ -1617,6 +1618,15 @@ class PraatDifferentiableAVQIComponentEstimator(
                 ),
                 dim=-1,
             )
+        elif self.cpps_mode == "praat_relative_log1p_v10":
+            # A frame-relative log1p has a finite derivative at spectral nulls
+            # and approaches the ordinary log derivative for dominant bins.
+            # The straight-through value below remains exact Praat-aligned.
+            frame_power_scale = power.mean(dim=-1, keepdim=True).clamp_min(1e-30)
+            stable_log_power = torch.log1p(power / frame_power_scale)
+            log_power = stable_log_power + (
+                exact_log_power - stable_log_power
+            ).detach()
         else:
             log_power = exact_log_power
         real_cepstrum = torch.fft.irfft(
@@ -1781,6 +1791,8 @@ class PraatDifferentiableAVQIComponentEstimator(
         if self.cpps_mode == "praat_centered_dc_guard_v8":
             return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
         if self.cpps_mode == "praat_spectrum_endpoint_guard_v9":
+            return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
+        if self.cpps_mode == "praat_relative_log1p_v10":
             return self._cpps_praat_topology_v7_terms(prepared)["exact_cpps"]
         return self._cpps_current(prepared)
 

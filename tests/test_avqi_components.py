@@ -548,6 +548,7 @@ def test_praat_spectrum_endpoint_guards_preserve_forward_and_gradients() -> None
     for mode in (
         "praat_centered_dc_guard_v8",
         "praat_spectrum_endpoint_guard_v9",
+        "praat_relative_log1p_v10",
     ):
         candidate = PraatDifferentiableAVQIComponentEstimator(
             peak_mode="hard",
