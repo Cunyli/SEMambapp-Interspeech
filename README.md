@@ -323,6 +323,43 @@ and
 The preceding job `19912936` only exposed and motivated correction of PCM24
 instrumentation and stage timing; it is not the scientific decision run.
 
+The source-informed v17 follow-up first diagnosed the FD23 failure without
+opening any candidate exact component. Job `19913318` showed that all four v16
+alphas retained identical exact source ranges but switched the same contiguous
+85-pulse block (`0.694--1.191 s` in the metric waveform) to an alternate pulse
+track; the block crossed four internal source-range joins, while offsets outside
+it approached zero. This topology-only evidence froze one Candidate D: exact
+pulses remained detached, pitch-cycle gain directions were bounded by full-band
+zero crossings, adjacent cycle coefficients received one fixed `1:2:1/4`
+smoothing pass, and the waveform step remained `alpha=0.001`. The pulse report,
+offset CSV, mismatch-run CSV, and receipt SHA256 values are
+`a7ae6f14e0f45b0bfe70c96dedfcf194d105bbec45c5aa004dd2a217a3b9b63b`,
+`8aecb79835dbc2fcb99fcff5c5f3017316c4e581337db5dd4363356c934d21a3`,
+`e66f6de725855d78936db14a1cfd7463a42adc202aa2ae41493dc106b81c35b1`,
+and
+`02ddc14c602bb14fd1507c1b25da4afe9a42c81fc0b53e5162ccf302ec26b81d`.
+
+Candidate D repaired FD23 topology completely (`452 -> 452`, `1.0/1.0`) while
+retaining a nonzero proxy-improving gradient, but the exact-equivalent warmup
+audit in job `19913570` still measured `762.918 ms`, above the unchanged
+`500 ms` contract. Independently, PD_37 completed in `207.646 ms` but retained
+its topology failure (`202 -> 203`, `0.940594/0.935961`). Both SV controls
+passed, giving selector coverage `2/4`. The evaluator therefore failed closed
+before a selector seal and did not open candidate exact Shimmer-dB or other
+component outcomes. Decision:
+`NO_GO_SHIMMER_DB_SOURCE_INFORMED_V17_SELECTOR_4CASE` for this fixed-alpha
+zero-crossing Candidate-D family, not for all Shimmer-dB routes. The
+authoritative warmup-audit report, preselection CSV, and receipt SHA256 values
+are
+`a30a44d7f4c39f1271ce167c8860d8661d2efcbb6564a056f57e8e80fba4c996`,
+`a9efde6c213c24c924a6a4aae1809e5fcdafe26ee68e93e793f3f09ff293ccf8`,
+and
+`19db4be49ee9b4784f9d697832124f1008517ff42a19213af198e52c23cce49f`.
+No 24-case or fresh-panel expansion was authorized. The next distinct
+falsifiable family would compose the Candidate-D basis with v16's already
+frozen topology-only half-step backtracking, subject to the same aggregate
+`500 ms` timer and exact-outcome isolation.
+
 LTAS slope required no further formula development. On its frozen 24-speaker,
 48-case external authority panel, all 192 selected exact rows were valid,
 overall exact/candidate Spearman was `0.9658`, and the candidate/exact 3 kHz
