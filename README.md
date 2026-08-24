@@ -242,6 +242,57 @@ results SHA256 values are
 and
 `809fadcfb48311d910b64fd001d2d2925dbe85bc0265a6229114e9ad01185795`.
 
+Candidate-C runtime v15 subsequently removed that latency blocker without
+changing `alpha=0.001`, exact Praat topology semantics, the metric-only 34-Hz
+high-pass, the full-band emitted waveform, or any scientific gate. Job
+`19907681` reproduced the frozen path on all 12 development cases: high-pass
+and metric PCM16, source mapping, pulse arrays and hashes, forward/loss,
+waveform gradient, normalized step tensor, frozen-v13 PCM24, and the sealed-v14
+PCM24 all matched exactly. Across 36 measurements, end-to-end refresh was
+`53.79 ms` median and `205.60 ms` maximum, passing both the unchanged `500 ms`
+gate and the preregistered `450 ms` development margin. Its report and receipt
+SHA256 values are
+`c2e7399eeb14a7e4f6d2c8b44402e4d4e8d0c460a24f122d903aa6c9d46b15d9`
+and
+`ef56ff7066956967a8a22c977bbc92993689b295ee3bb9ec36d3de60ced3719a`.
+
+The resulting fresh panel was still not a component pass. Job `19907818`
+used six previously unseen, speaker-disjoint pathological speakers (`FD23`,
+`SD25`, `PD04`, `FD09`, `ÄHH32`, and `PD_37`), 12 CS/SV cases, balanced
+RIR/SNR20/SNR10 recipes, and 12 unique candidate hashes. Speaker selection was
+frozen before simulation without exact scores, previous-panel overlap was
+empty, and candidates were sealed before exact outcomes were opened. Exact
+Shimmer dB improved in `12/12` material cases, median normalized gap reduction
+was `0.08139`, all seven required slices and every non-target,
+pathology/denoising, residual/cosine/clipping, and runtime gate passed; refresh
+was `64.31 ms` median and `289.30 ms` maximum. The sole failure was exact
+output-topology stability (`10/12`). `FD23/CS/RIR` changed from `452` to `454`
+pulses with match `0.81195 -> 0.80837`; `PD_37/CS/SNR20` changed from `202` to
+`203` with match `0.94059 -> 0.93596`. PCM24 isolation reproduced both changes,
+so they are update-induced topology bifurcations rather than serialization
+artifacts. The panel report, result CSV, seal, and receipt SHA256 values are
+`9ad5f661ea34a729530418632b24a232aef9b3239e95922604fc39308eac0f4d`,
+`efee5a7f9a0d3e647a8167fe01b7e3cb114187328401c09dfb34a3f34ed5e8f6`,
+`7e2d2a55c55a1bb58b3f2bf85f2b6657ed981116e680ab003e0914fb04bfcfec`,
+and
+`2331f484d11dee76511df578d4ea53d0d2663196e8cd27d97a1f6f451e0ef388`.
+
+Two fixed-alpha, no-hyperparameter backward projections were then tested only
+as mechanism diagnostics. Cycle-constant projection passed the opened v14
+panel in job `19907984` but failed the new v15 panel in job `19907983`
+(`11/12` topology, `10/12` exact improvement). Pulse-knot linear projection
+likewise passed v14 in job `19908036` but failed v15 in job `19908037`
+(`10/12` topology, `11/12` exact improvement). In particular, the FD23 hard
+topology failure persisted across the original sample-wise, cycle-constant,
+and pulse-linear backward paths. Under the frozen fixed-step Candidate-C
+contract this is therefore a reproducible topology-level NO-GO for that
+fixed-step/projection family, not a runtime or Shimmer-dB formula failure and
+not an overall Shimmer-dB terminal decision. The next separately
+preregistered v16 candidate is a uniform topology-certified trust region:
+`0.001` remains the maximum step, while fixed half-step backtracking may use
+only topology, finite/safety, and frozen-topology proxy checks. It must not use
+candidate exact outcomes or tune on these opened speakers.
+
 LTAS slope required no further formula development. On its frozen 24-speaker,
 48-case external authority panel, all 192 selected exact rows were valid,
 overall exact/candidate Spearman was `0.9658`, and the candidate/exact 3 kHz
