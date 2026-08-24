@@ -24,6 +24,8 @@ def test_runtime_v15_outlier_scope_is_strictly_frozen() -> None:
     assert IMPLEMENTATION_CONFIGS[FASTPATH_IMPLEMENTATION] == {
         "frame_scan_mode": "numpy_exact_aligned_frames",
         "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
+        "wav_roundtrip_mode": "soundfile_in_memory_pcm16",
+        "sounding_assembly_mode": "numpy_exact_interval_slices",
     }
     assert 'request.get(\n                    "input_loader"' in EXACT_WORKER
     assert 'elif input_loader == "soundfile_float32_exact_16khz_mono"' in (

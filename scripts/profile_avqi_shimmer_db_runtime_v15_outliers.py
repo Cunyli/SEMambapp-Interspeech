@@ -40,10 +40,14 @@ IMPLEMENTATION_CONFIGS = {
     FROZEN_IMPLEMENTATION: {
         "frame_scan_mode": "praat_per_frame",
         "pulse_enumeration_mode": "praat_per_point",
+        "wav_roundtrip_mode": "praat_temp_wav",
+        "sounding_assembly_mode": "praat_extract_and_concatenate",
     },
     FASTPATH_IMPLEMENTATION: {
         "frame_scan_mode": "numpy_exact_aligned_frames",
         "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
+        "wav_roundtrip_mode": "soundfile_in_memory_pcm16",
+        "sounding_assembly_mode": "numpy_exact_interval_slices",
     },
 }
 FROZEN_OUTLIER_CASE_IDS = (
@@ -133,6 +137,8 @@ def flatten_runtime_row(
         "input_loader": response["topology_input_loader"],
         "frame_scan_mode": response["frame_scan_mode"],
         "pulse_enumeration_mode": response["pulse_enumeration_mode"],
+        "wav_roundtrip_mode": response["wav_roundtrip_mode"],
+        "sounding_assembly_mode": response["sounding_assembly_mode"],
         "base_frame_count": case["base_frame_count"],
         "base_duration_seconds": case["base_duration_seconds"],
         "metric_sample_count": response["metric_sample_count"],
@@ -220,6 +226,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True)
     runtime_rows: list[dict[str, Any]] = []
     authority_rows: list[dict[str, Any]] = []
+    fastpath_warmup_rows: list[dict[str, Any]] = []
     exact_versions: dict[str, str] | None = None
     for case in cases:
         with ExactWorker(args.exact_python, args.avqi_code_root) as worker:
@@ -249,6 +256,29 @@ def main() -> None:
                     cold,
                     cold_wall_ms,
                 )
+            )
+            fastpath_payload = {
+                **base_payload,
+                **IMPLEMENTATION_CONFIGS[FASTPATH_IMPLEMENTATION],
+            }
+            fastpath_warmup, fastpath_warmup_wall_ms = worker.request(
+                fastpath_payload
+            )
+            require_same_topology(
+                reference,
+                fastpath_warmup,
+                f"{case['case_id']}:fastpath-command-warmup",
+            )
+            fastpath_warmup_rows.append(
+                {
+                    "case_id": case["case_id"],
+                    "internal_ms": float(
+                        fastpath_warmup["timing_ms"]["total_refresh"]
+                    ),
+                    "request_wall_ms": fastpath_warmup_wall_ms,
+                    "used_for_runtime_gate": False,
+                    "role": "opened_dev_command_initialization_only",
+                }
             )
             for implementation, config in IMPLEMENTATION_CONFIGS.items():
                 payload = {**base_payload, **config}
@@ -359,12 +389,15 @@ def main() -> None:
             "one_disclosed_cold_refresh": True,
             "warm_repeats": args.warm_repeats,
             "implementation_configs": IMPLEMENTATION_CONFIGS,
+            "fastpath_command_warmup_per_worker": True,
+            "production_warmup_must_not_use_panel_or_training_waveforms": True,
             "formal_refresh_gate_ms_unchanged": PULSE_REFRESH_GATE_MS,
             "development_engineering_margin_ms": DEV_ENGINEERING_MARGIN_MS,
             "opened_outlier_case_ids": list(FROZEN_OUTLIER_CASE_IDS),
         },
         "runtime": {
             "cold_stage_summary": stage_summary(cold_rows),
+            "opened_dev_fastpath_warmup_rows": fastpath_warmup_rows,
             "by_implementation": runtime_by_implementation,
             "candidate_implementation": FASTPATH_IMPLEMENTATION,
             "candidate_formal_500ms_pass_on_development_repeats": (

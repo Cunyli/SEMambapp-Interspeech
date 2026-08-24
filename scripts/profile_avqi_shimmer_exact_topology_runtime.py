@@ -290,6 +290,8 @@ def direct_refresh(
     input_loader,
     frame_scan_mode,
     pulse_enumeration_mode,
+    wav_roundtrip_mode,
+    sounding_assembly_mode,
 ):
     total_started = time.perf_counter()
     input_started = time.perf_counter()
@@ -313,7 +315,12 @@ def direct_refresh(
         time.perf_counter() - filter_started
     )
     quantize_started = time.perf_counter()
-    highpassed = praat_wav_roundtrip(filtered)
+    if wav_roundtrip_mode == "praat_temp_wav":
+        highpassed = praat_wav_roundtrip(filtered)
+    elif wav_roundtrip_mode == "soundfile_in_memory_pcm16":
+        highpassed = pcm16_roundtrip(filtered.values[0])
+    else:
+        raise ValueError("unsupported WAV roundtrip: " + wav_roundtrip_mode)
     highpass_quantize_ms = 1000.0 * (
         time.perf_counter() - quantize_started
     )
@@ -337,6 +344,7 @@ def direct_refresh(
     selection_started = time.perf_counter()
     interval_count = int(call(textgrid, "Get number of intervals", 1))
     sounding_parts = []
+    sounding_values = []
     sounding_source_indices = []
     highpassed_pcm = pcm16(highpassed)
     for index in range(1, interval_count + 1):
@@ -345,32 +353,51 @@ def direct_refresh(
             continue
         start = float(call(textgrid, "Get start point", 1, index))
         end = float(call(textgrid, "Get end point", 1, index))
-        part = call(
-            highpassed_sound,
-            "Extract part",
-            start,
-            end,
-            "rectangular",
-            1.0,
-            "no",
-        )
-        part_values = np.asarray(part.values[0], dtype=np.float64)
         source_start = int(
             round((start - float(highpassed_sound.xmin)) * SAMPLE_RATE)
         )
-        source_end = source_start + part_values.size
-        if source_end > highpassed_pcm.size or not np.array_equal(
-            highpassed_pcm[source_start:source_end],
-            pcm16(part_values),
-        ):
-            raise ValueError("sounding interval failed exact source parity")
-        sounding_parts.append(part)
+        if sounding_assembly_mode == "praat_extract_and_concatenate":
+            part = call(
+                highpassed_sound,
+                "Extract part",
+                start,
+                end,
+                "rectangular",
+                1.0,
+                "no",
+            )
+            part_values = np.asarray(part.values[0], dtype=np.float64)
+            source_end = source_start + part_values.size
+            if source_end > highpassed_pcm.size or not np.array_equal(
+                highpassed_pcm[source_start:source_end],
+                pcm16(part_values),
+            ):
+                raise ValueError("sounding interval failed exact source parity")
+            sounding_parts.append(part)
+        elif sounding_assembly_mode == "numpy_exact_interval_slices":
+            source_end = int(
+                round((end - float(highpassed_sound.xmin)) * SAMPLE_RATE)
+            )
+            if source_end <= source_start or source_end > highpassed.size:
+                raise ValueError("invalid exact sounding interval slice")
+            part_values = highpassed[source_start:source_end]
+            sounding_values.append(part_values)
+        else:
+            raise ValueError(
+                "unsupported sounding assembly: " + sounding_assembly_mode
+            )
         sounding_source_indices.append(
             np.arange(source_start, source_end, dtype=np.int64)
         )
-    if not sounding_parts:
+    if not sounding_source_indices:
         raise ValueError("exact CS preprocessing found no sounding interval")
-    only_loud = call(sounding_parts, "Concatenate")
+    if sounding_assembly_mode == "praat_extract_and_concatenate":
+        only_loud = call(sounding_parts, "Concatenate")
+    else:
+        only_loud = parselmouth.Sound(
+            np.concatenate(sounding_values),
+            SAMPLE_RATE,
+        )
     only_loud_indices = np.concatenate(sounding_source_indices)
     if only_loud_indices.size != only_loud.n_samples:
         raise ValueError("only-loud source mapping length drift")
@@ -441,9 +468,12 @@ def direct_refresh(
     metric_values = np.concatenate(
         [np.zeros(constant_prefix, dtype=np.float64)] + kept_parts
     )
-    metric = praat_wav_roundtrip(
-        parselmouth.Sound(metric_values, SAMPLE_RATE)
-    )
+    if wav_roundtrip_mode == "praat_temp_wav":
+        metric = praat_wav_roundtrip(
+            parselmouth.Sound(metric_values, SAMPLE_RATE)
+        )
+    else:
+        metric = pcm16_roundtrip(metric_values)
     selected_indices = np.concatenate(kept_source_indices)
     ranges = compress_source_indices(selected_indices)
     reconstructed = np.concatenate(
@@ -491,6 +521,8 @@ def direct_refresh(
         "topology_input_loader": input_loader,
         "frame_scan_mode": frame_scan_mode,
         "pulse_enumeration_mode": pulse_enumeration_mode,
+        "wav_roundtrip_mode": wav_roundtrip_mode,
+        "sounding_assembly_mode": sounding_assembly_mode,
         "source_sample_count": int(highpassed.size),
         "metric_sample_count": int(metric.size),
         "metric_constant_prefix_samples": int(constant_prefix),
@@ -647,6 +679,11 @@ for line in sys.stdin:
                 request.get(
                     "pulse_enumeration_mode",
                     "praat_per_point",
+                ),
+                request.get("wav_roundtrip_mode", "praat_temp_wav"),
+                request.get(
+                    "sounding_assembly_mode",
+                    "praat_extract_and_concatenate",
                 ),
             )
         elif request["op"] == "score":
