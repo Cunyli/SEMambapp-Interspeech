@@ -94,6 +94,7 @@ def test_pcm24_effective_step_rejects_noop_and_accepts_quantized_change(
     ] is False
     result = pcm24_effective_step(base_path, changed_path)
     assert result["pcm24_changed_samples"] >= PCM24_MIN_CHANGED_SAMPLES
+    assert 1.0 <= result["pcm24_residual_rms_lsb"] <= 3.0
     assert result["pcm24_effective_step_pass"] is True
 
 

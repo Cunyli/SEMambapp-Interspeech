@@ -171,10 +171,10 @@ def pcm24_effective_step(
     base_path: Path,
     candidate_path: Path,
 ) -> dict[str, Any]:
-    base, base_rate = sf.read(base_path, dtype="int32", always_2d=False)
+    base, base_rate = sf.read(base_path, dtype="float64", always_2d=False)
     candidate, candidate_rate = sf.read(
         candidate_path,
-        dtype="int32",
+        dtype="float64",
         always_2d=False,
     )
     if (
@@ -185,9 +185,20 @@ def pcm24_effective_step(
         or base.shape != candidate.shape
     ):
         raise ValueError("PCM24 effective-step comparison shape drift")
-    difference_lsb = (
-        candidate.astype(np.int64) - base.astype(np.int64)
-    ).astype(np.float64) / 256.0
+    pcm24_scale = float(2**23)
+    minimum_code = -(2**23)
+    maximum_code = 2**23 - 1
+    base_codes = np.clip(
+        np.rint(base * pcm24_scale),
+        minimum_code,
+        maximum_code,
+    ).astype(np.int64)
+    candidate_codes = np.clip(
+        np.rint(candidate * pcm24_scale),
+        minimum_code,
+        maximum_code,
+    ).astype(np.int64)
+    difference_lsb = (candidate_codes - base_codes).astype(np.float64)
     changed = int(np.count_nonzero(difference_lsb))
     residual_rms_lsb = float(np.sqrt(np.mean(np.square(difference_lsb))))
     sha_differs = sha256_file(base_path) != sha256_file(candidate_path)
@@ -750,6 +761,28 @@ def main() -> None:
                     "total_metric_step_runtime_ms": record[
                         "total_metric_step_runtime_ms"
                     ],
+                    "runtime_gate_pass": record["runtime_gate_pass"],
+                    "base_refresh_runtime_ms": record["base_refresh_runtime_ms"],
+                    "base_refresh_internal_ms": record[
+                        "base_refresh_internal_ms"
+                    ],
+                    "base_refresh_request_wall_ms": record[
+                        "base_refresh_request_wall_ms"
+                    ],
+                    "base_refresh_client_staging_ms": record[
+                        "base_refresh_client_staging_ms"
+                    ],
+                    "gradient_runtime_ms": record["gradient_runtime_ms"],
+                    "pcm24_write_total_ms": record["pcm24_write_total_ms"],
+                    "candidate_refresh_concurrent_wall_ms": record[
+                        "candidate_refresh_concurrent_wall_ms"
+                    ],
+                    "candidate_refresh_request_wall_sum_ms": record[
+                        "candidate_refresh_request_wall_sum_ms"
+                    ],
+                    "candidate_refresh_internal_sum_ms": record[
+                        "candidate_refresh_internal_sum_ms"
+                    ],
                 }
             )
     attempts_path = args.output_dir / "trust_region_attempts.csv"
@@ -769,6 +802,31 @@ def main() -> None:
             "dev_only": True,
             "candidate_exact_outcomes_opened": False,
             "selector_failures": selector_failures,
+            "case_runtime": [
+                {
+                    "case_id": record["case_id"],
+                    "base_refresh_runtime_ms": record[
+                        "base_refresh_runtime_ms"
+                    ],
+                    "gradient_runtime_ms": record["gradient_runtime_ms"],
+                    "pcm24_write_total_ms": record["pcm24_write_total_ms"],
+                    "candidate_refresh_concurrent_wall_ms": record[
+                        "candidate_refresh_concurrent_wall_ms"
+                    ],
+                    "candidate_refresh_request_wall_sum_ms": record[
+                        "candidate_refresh_request_wall_sum_ms"
+                    ],
+                    "total_metric_step_runtime_ms": record[
+                        "total_metric_step_runtime_ms"
+                    ],
+                    "runtime_gate_pass": record["runtime_gate_pass"],
+                    "selected_alpha": record["selected_alpha"],
+                    "selected_backtrack_index": record[
+                        "selected_backtrack_index"
+                    ],
+                }
+                for record in case_records
+            ],
             "selector_contract": selector_contract(),
             "source_commit": args.source_commit,
             "slurm_job_id": args.slurm_job_id,
