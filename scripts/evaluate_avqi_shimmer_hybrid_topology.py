@@ -9,10 +9,12 @@ pulses and scores all six components after every fixed bounded waveform step.
 
 The script also evaluates the already-promoted Shimmer-percent gradient, the
 frozen v6 Shimmer-dB gradient, and Candidate C: exact Praat refreshes the
-current output topology separately for each fixed alpha/step, after which only
-the live Torch amplitude and dB path receives gradients.  A supervisor-frozen
-three-point alpha grid may freeze a mechanism parameter on this opened panel,
-but cannot promote the component.  No generator optimizer is loaded or run.
+current output topology separately for each fixed alpha/step.  For CS this
+includes exact AVQI sounding/30-ms concatenation ranges; Torch gathers the
+corresponding live metric-high-passed samples, after which only the amplitude
+and dB path receives gradients.  A supervisor-frozen three-point alpha grid
+may freeze a mechanism parameter on this opened panel, but cannot promote the
+component.  No generator optimizer is loaded or run.
 """
 
 from __future__ import annotations
@@ -99,15 +101,185 @@ import json
 import sys
 import time
 
+import numpy as np
 import parselmouth
 from parselmouth.praat import call
 
 sys.path.insert(0, sys.argv[1])
 from avqi_code import run_avqi
+from avqi_code.main import (
+    get_voiced_segments,
+    highpass_filter,
+    length_normalize_sv,
+    read_and_resample_signal,
+)
 
 
-def pulse_positions(path, view):
+SAMPLE_RATE = 16000
+MAPPING_WINDOW = 32
+
+
+def pcm16(values):
+    bounded = np.clip(
+        np.asarray(values, dtype=np.float64),
+        -1.0,
+        1.0 - 1.0 / 32768.0,
+    )
+    return np.rint(bounded * 32768.0).astype(np.int32)
+
+
+def find_monotonic_window(source, target, source_start, target_start):
+    width = min(MAPPING_WINDOW, target.size - target_start)
+    if width <= 0:
+        raise ValueError("empty exact metric mapping window")
+    candidates = (
+        np.flatnonzero(source[source_start:] == target[target_start])
+        + source_start
+    )
+    for tolerance in (0, 1):
+        for candidate in candidates:
+            if candidate + width > source.size:
+                continue
+            error = np.max(
+                np.abs(
+                    source[candidate : candidate + width]
+                    - target[target_start : target_start + width]
+                )
+            )
+            if error <= tolerance:
+                return int(candidate), tolerance
+    raise ValueError(
+        "no monotonic current-output source window for exact CS metric sample "
+        + str(target_start)
+    )
+
+
+def exact_cs_source_ranges(highpassed, metric):
+    source = pcm16(highpassed)
+    target = pcm16(metric)
+    constant_prefix = 0
+    while constant_prefix < target.size and target[constant_prefix] == 0:
+        constant_prefix += 1
+    ranges = []
+    target_index = constant_prefix
+    source_cursor = 0
+    while target_index < target.size:
+        source_index, tolerance = find_monotonic_window(
+            source,
+            target,
+            source_cursor,
+            target_index,
+        )
+        run = 0
+        while (
+            target_index + run < target.size
+            and source_index + run < source.size
+            and abs(
+                int(source[source_index + run])
+                - int(target[target_index + run])
+            )
+            <= tolerance
+        ):
+            run += 1
+        if run < min(MAPPING_WINDOW, target.size - target_index):
+            raise ValueError("exact CS source mapping produced a short run")
+        ranges.append([source_index, run])
+        target_index += run
+        source_cursor = source_index + run
+    reconstructed = np.concatenate(
+        [np.zeros(constant_prefix, dtype=np.float64)]
+        + [highpassed[start : start + length] for start, length in ranges]
+    )
+    difference = np.abs(pcm16(reconstructed) - target)
+    maximum_error = int(difference.max(initial=0))
+    differing_samples = int(np.count_nonzero(difference))
+    if reconstructed.size != metric.size or maximum_error != 0:
+        raise ValueError(
+            "exact CS source mapping failed waveform parity: "
+            + str(reconstructed.size)
+            + "/"
+            + str(metric.size)
+            + " max_pcm16_error="
+            + str(maximum_error)
+        )
+    return constant_prefix, ranges, maximum_error, differing_samples
+
+
+def point_process_positions(sound):
+    point_process = call(sound, "To PointProcess (periodic, cc)", 50, 400)
+    count = int(call(point_process, "Get number of points"))
+    return [
+        (
+            float(call(point_process, "Get time from index", index))
+            - float(sound.x1)
+        )
+        / float(sound.dx)
+        for index in range(1, count + 1)
+    ]
+
+
+def pulse_positions(path, view, exact_metric_topology):
     started = time.perf_counter()
+    if exact_metric_topology:
+        waveform = read_and_resample_signal(path, SAMPLE_RATE)
+        highpassed = highpass_filter(
+            "praat",
+            waveform,
+            sampling_rate=SAMPLE_RATE,
+        )
+        if view == "sv":
+            metric = length_normalize_sv(
+                "praat",
+                highpassed,
+                sr=SAMPLE_RATE,
+                target_length=3.0,
+            )
+            crop_start = max(highpassed.size - metric.size, 0)
+            constant_prefix = 0
+            ranges = [[crop_start, int(metric.size)]]
+            difference = np.abs(
+                pcm16(highpassed[crop_start : crop_start + metric.size])
+                - pcm16(metric)
+            )
+            maximum_error = int(difference.max(initial=0))
+            differing_samples = int(np.count_nonzero(difference))
+            if maximum_error != 0:
+                raise ValueError("exact SV metric crop failed waveform parity")
+        elif view == "cs":
+            metric = get_voiced_segments(
+                "praat",
+                highpassed,
+                sampling_rate=SAMPLE_RATE,
+            )
+            (
+                constant_prefix,
+                ranges,
+                maximum_error,
+                differing_samples,
+            ) = exact_cs_source_ranges(highpassed, metric)
+        else:
+            raise ValueError("unsupported view: " + view)
+        sound = parselmouth.Sound(metric, SAMPLE_RATE)
+        positions = point_process_positions(sound)
+        metadata = {
+            "topology_preprocessing": "exact_avqi_view_metric_waveform",
+            "source_sample_count": int(highpassed.size),
+            "metric_sample_count": int(metric.size),
+            "metric_constant_prefix_samples": int(constant_prefix),
+            "metric_source_ranges": ranges,
+            "metric_source_range_count": len(ranges),
+            "metric_mapped_sample_count": int(
+                sum(length for _, length in ranges)
+            ),
+            "metric_reconstruction_max_pcm16_error": maximum_error,
+            "metric_reconstruction_differing_samples": differing_samples,
+        }
+        return (
+            positions,
+            1000.0 * (time.perf_counter() - started),
+            metadata,
+        )
+
     sound = parselmouth.Sound(path)
     sound = call(sound, "Filter (stop Hann band)", 0, 34, 0.1)
     if view == "sv":
@@ -124,17 +296,22 @@ def pulse_positions(path, view):
             )
     elif view != "cs":
         raise ValueError("unsupported view: " + view)
-    point_process = call(sound, "To PointProcess (periodic, cc)", 50, 400)
-    count = int(call(point_process, "Get number of points"))
-    positions = [
-        (
-            float(call(point_process, "Get time from index", index))
-            - float(sound.x1)
-        )
-        / float(sound.dx)
-        for index in range(1, count + 1)
-    ]
-    return positions, 1000.0 * (time.perf_counter() - started)
+    positions = point_process_positions(sound)
+    return (
+        positions,
+        1000.0 * (time.perf_counter() - started),
+        {
+            "topology_preprocessing": "legacy_direct_full_cs_or_final_3s_sv",
+            "source_sample_count": int(sound.n_samples),
+            "metric_sample_count": int(sound.n_samples),
+            "metric_constant_prefix_samples": 0,
+            "metric_source_ranges": [],
+            "metric_source_range_count": 0,
+            "metric_mapped_sample_count": 0,
+            "metric_reconstruction_max_pcm16_error": 0,
+            "metric_reconstruction_differing_samples": 0,
+        },
+    )
 
 
 request = json.load(sys.stdin)
@@ -147,7 +324,11 @@ for item in request["items"]:
         "view": item["view"],
     }
     try:
-        positions, runtime_ms = pulse_positions(item["path"], item["view"])
+        positions, runtime_ms, topology_metadata = pulse_positions(
+            item["path"],
+            item["view"],
+            bool(item.get("exact_metric_topology", False)),
+        )
         row.update(
             {
                 "scoring_status": "ok",
@@ -156,6 +337,7 @@ for item in request["items"]:
                 "pulse_runtime_ms": runtime_ms,
                 "error_type": "",
                 "error_message": "",
+                **topology_metadata,
             }
         )
         if item["score_components"]:
@@ -180,6 +362,15 @@ for item in request["items"]:
                 "components": {},
                 "error_type": type(exc).__name__,
                 "error_message": str(exc)[:500],
+                "topology_preprocessing": "error",
+                "source_sample_count": 0,
+                "metric_sample_count": 0,
+                "metric_constant_prefix_samples": 0,
+                "metric_source_ranges": [],
+                "metric_source_range_count": 0,
+                "metric_mapped_sample_count": 0,
+                "metric_reconstruction_max_pcm16_error": -1,
+                "metric_reconstruction_differing_samples": -1,
             }
         )
     rows.append(row)
@@ -445,6 +636,8 @@ def candidate_proxy(
     input_pulses: torch.Tensor,
     output_pulses: torch.Tensor,
     view: str,
+    metric_source_indices: torch.Tensor | None,
+    metric_constant_prefix_samples: int,
 ) -> tuple[torch.Tensor, str]:
     if candidate == "praat_input_topology_absolute_db":
         proxy = predictor.raw_shimmer_from_pulse_positions(
@@ -460,7 +653,8 @@ def candidate_proxy(
         proxy = predictor.raw_shimmer_from_pulse_positions(
             waveform,
             output_pulses,
-            metric_sample_count=SV_METRIC_SAMPLES if view == "sv" else None,
+            metric_source_indices=metric_source_indices,
+            metric_constant_prefix_samples=metric_constant_prefix_samples,
         )[1]
         return proxy, "shimmer_db"
     components = predict_components(
@@ -565,6 +759,44 @@ def map_input_metric_pulses_to_output(
         input_metric_start - output_metric_start
     )
     return mapped[(mapped >= 0.0) & (mapped < output_metric_frames)]
+
+
+def metric_source_indices_from_topology(
+    topology: dict[str, Any],
+    *,
+    source_sample_count: int,
+) -> np.ndarray:
+    if topology.get("topology_preprocessing") != "exact_avqi_view_metric_waveform":
+        raise ValueError("topology does not describe an exact AVQI metric waveform")
+    if int(topology["source_sample_count"]) != source_sample_count:
+        raise ValueError("exact metric topology source length drift")
+    ranges = topology["metric_source_ranges"]
+    pieces: list[np.ndarray] = []
+    previous_end = 0
+    for start_value, length_value in ranges:
+        start = int(start_value)
+        length = int(length_value)
+        end = start + length
+        if length <= 0 or start < previous_end or end > source_sample_count:
+            raise ValueError("invalid exact metric source range")
+        pieces.append(np.arange(start, end, dtype=np.int64))
+        previous_end = end
+    if not pieces:
+        raise ValueError("exact metric topology contains no source ranges")
+    indices = np.concatenate(pieces)
+    if indices.size != int(topology["metric_mapped_sample_count"]):
+        raise ValueError("exact metric mapped sample count drift")
+    expected_metric_samples = (
+        int(topology["metric_constant_prefix_samples"]) + indices.size
+    )
+    if expected_metric_samples != int(topology["metric_sample_count"]):
+        raise ValueError("exact metric waveform length drift")
+    if (
+        int(topology["metric_reconstruction_max_pcm16_error"]) != 0
+        or int(topology["metric_reconstruction_differing_samples"]) != 0
+    ):
+        raise ValueError("exact metric source mapping failed waveform parity")
+    return indices
 
 
 def exact_component_fields(
@@ -864,6 +1096,7 @@ def main() -> None:
     waveform_root.mkdir(parents=True)
 
     topology_items = []
+    metric_output_topology_items = []
     refresh_topology_items = []
     for row in panel_rows:
         for role in ("degraded_input", "base_output"):
@@ -878,6 +1111,17 @@ def main() -> None:
                     "score_components": False,
                 }
             )
+        metric_output_topology_items.append(
+            {
+                "id": f"metric_base_output:{row['case_id']}",
+                "case_id": row["case_id"],
+                "role": "output_pulse_oracle_db",
+                "path": row["base_path"],
+                "view": row["view"],
+                "score_components": False,
+                "exact_metric_topology": True,
+            }
+        )
         for candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES:
             refresh_topology_items.append(
                 {
@@ -887,10 +1131,16 @@ def main() -> None:
                     "path": row["base_path"],
                     "view": row["view"],
                     "score_components": False,
+                    "exact_metric_topology": True,
                 }
             )
     topology_exact = run_exact(
         topology_items,
+        args.exact_python,
+        args.avqi_code_root,
+    )
+    metric_output_topology_exact = run_exact(
+        metric_output_topology_items,
         args.exact_python,
         args.avqi_code_root,
     )
@@ -908,11 +1158,19 @@ def main() -> None:
         != topology_exact["parselmouth_version"]
         or refresh_topology_exact["praat_version"]
         != topology_exact["praat_version"]
+        or metric_output_topology_exact["parselmouth_version"]
+        != topology_exact["parselmouth_version"]
+        or metric_output_topology_exact["praat_version"]
+        != topology_exact["praat_version"]
     ):
         raise ValueError("exact runtime drift during Candidate-C refresh")
     topology_by_id = {
         row["id"]: row
-        for row in topology_exact["rows"] + refresh_topology_exact["rows"]
+        for row in (
+            topology_exact["rows"]
+            + metric_output_topology_exact["rows"]
+            + refresh_topology_exact["rows"]
+        )
     }
 
     cache_rows = []
@@ -969,6 +1227,12 @@ def main() -> None:
         row["case_id"]: topology_by_id[f"base_output:{row['case_id']}"]
         for row in panel_rows
     }
+    metric_output_topology_by_case = {
+        row["case_id"]: topology_by_id[
+            f"metric_base_output:{row['case_id']}"
+        ]
+        for row in panel_rows
+    }
     refresh_topology_by_candidate_case = {
         (candidate, row["case_id"]): topology_by_id[
             f"refresh:{candidate}:{row['case_id']}"
@@ -991,9 +1255,15 @@ def main() -> None:
         base_cpu = read_waveform(Path(panel_row["base_path"]))
         cache = cache_by_case[case_id]
         output_topology = output_topology_by_case[case_id]
+        metric_output_topology = metric_output_topology_by_case[case_id]
         if cache["scoring_status"] != "ok" or cache["pulse_count"] < 3:
             continue
         if output_topology["scoring_status"] != "ok" or output_topology["pulse_count"] < 3:
+            continue
+        if (
+            metric_output_topology["scoring_status"] != "ok"
+            or metric_output_topology["pulse_count"] < 3
+        ):
             continue
         for candidate in CANDIDATE_NAMES:
             waveform = base_cpu.to(device).requires_grad_(True)
@@ -1008,6 +1278,8 @@ def main() -> None:
                 step_topology = refresh_topology_by_candidate_case[
                     (candidate, case_id)
                 ]
+            elif candidate == "output_pulse_oracle_db":
+                step_topology = metric_output_topology
             else:
                 step_topology = output_topology
             if (
@@ -1018,6 +1290,26 @@ def main() -> None:
             output_pulses = waveform.new_tensor(
                 step_topology["pulse_positions_samples"]
             )
+            exact_metric_branch = (
+                candidate == "output_pulse_oracle_db"
+                or candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES
+            )
+            if exact_metric_branch:
+                source_indices_np = metric_source_indices_from_topology(
+                    step_topology,
+                    source_sample_count=waveform.numel(),
+                )
+                metric_source_indices = torch.as_tensor(
+                    source_indices_np,
+                    device=waveform.device,
+                    dtype=torch.long,
+                )
+                metric_constant_prefix_samples = int(
+                    step_topology["metric_constant_prefix_samples"]
+                )
+            else:
+                metric_source_indices = None
+                metric_constant_prefix_samples = 0
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             torch_step_started = time.perf_counter()
@@ -1031,6 +1323,8 @@ def main() -> None:
                 input_pulses,
                 output_pulses,
                 panel_row["view"],
+                metric_source_indices,
+                metric_constant_prefix_samples,
             )
             optimized_index = AVQI_COMPONENT_NAMES.index(optimized_component)
             target_value = float(reference[f"exact_target_{optimized_component}"])
@@ -1087,6 +1381,25 @@ def main() -> None:
                 "pulse_topology_sha256": pulse_positions_sha256(
                     step_topology["pulse_positions_samples"]
                 ),
+                "topology_preprocessing": step_topology[
+                    "topology_preprocessing"
+                ],
+                "metric_sample_count": step_topology["metric_sample_count"],
+                "metric_constant_prefix_samples": step_topology[
+                    "metric_constant_prefix_samples"
+                ],
+                "metric_source_range_count": step_topology[
+                    "metric_source_range_count"
+                ],
+                "metric_mapped_sample_count": step_topology[
+                    "metric_mapped_sample_count"
+                ],
+                "metric_reconstruction_max_pcm16_error": step_topology[
+                    "metric_reconstruction_max_pcm16_error"
+                ],
+                "metric_reconstruction_differing_samples": step_topology[
+                    "metric_reconstruction_differing_samples"
+                ],
                 "pulse_refresh_runtime_ms": pulse_refresh_runtime_ms,
                 "torch_step_runtime_ms": torch_step_runtime_ms,
                 "total_metric_step_overhead_ms": (
@@ -1098,6 +1411,9 @@ def main() -> None:
                 "cache_pulse_count": cache["pulse_count"],
                 "mapped_cache_pulse_count": int(mapped_input_positions.size),
                 "base_output_pulse_count": output_topology["pulse_count"],
+                "base_output_exact_metric_pulse_count": metric_output_topology[
+                    "pulse_count"
+                ],
                 "degraded_frame_count": panel_row["degraded_frame_count"],
                 "base_frame_count": panel_row["base_frame_count"],
                 "trailing_truncation_samples": panel_row[
@@ -1126,6 +1442,7 @@ def main() -> None:
                     "path": str(output_path.resolve()),
                     "view": panel_row["view"],
                     "score_components": True,
+                    "exact_metric_topology": exact_metric_branch,
                 }
             )
 
@@ -1171,6 +1488,8 @@ def main() -> None:
             topology_reference = refresh_topology_by_candidate_case[
                 (candidate, case_id)
             ]
+        elif candidate == "output_pulse_oracle_db":
+            topology_reference = metric_output_topology_by_case[case_id]
         else:
             topology_reference = output_topology_by_case[case_id]
         reference_positions = np.asarray(
@@ -1246,6 +1565,19 @@ def main() -> None:
                 "candidate_reference_pulse_count_ratio": (
                     candidate_reference_count_ratio
                 ),
+                "candidate_metric_sample_count": exact[
+                    "metric_sample_count"
+                ],
+                "candidate_metric_to_reference_sample_count_ratio": (
+                    int(exact["metric_sample_count"])
+                    / max(int(topology_reference["metric_sample_count"]), 1)
+                ),
+                "candidate_metric_reconstruction_max_pcm16_error": exact[
+                    "metric_reconstruction_max_pcm16_error"
+                ],
+                "candidate_metric_reconstruction_differing_samples": exact[
+                    "metric_reconstruction_differing_samples"
+                ],
                 "forward_normalized_abs_error_shimmer_db": (
                     forward_normalized_error
                 ),
@@ -1362,7 +1694,7 @@ def main() -> None:
         oracle_alias_equivalence.values()
     )
     report = {
-        "schema_version": "avqi-route-c-shimmer-hybrid-opened-diagnostic-v2",
+        "schema_version": "avqi-route-c-shimmer-hybrid-opened-diagnostic-v3",
         "decision": (
             "PASS_ABSOLUTE_CACHE_MECHANISM_ONLY_FRESH_REQUIRED"
             if hybrid_pass
@@ -1394,6 +1726,37 @@ def main() -> None:
             "route_type": "hybrid_praat_assisted_straight_through_metric_branch",
             "pure_torch_estimator": False,
             "topology_detached": True,
+            "exact_avqi_view_preprocessing": True,
+            "cs_topology_waveform": (
+                "metric high-pass then exact sounding/30-ms concatenation"
+            ),
+            "torch_backward_waveform": (
+                "live metric-high-passed samples gathered by detached exact ranges"
+            ),
+            "metric_mapping_parity": {
+                "all_refresh_rows_zero_pcm16_error": all(
+                    row["metric_reconstruction_max_pcm16_error"] == 0
+                    and row["metric_reconstruction_differing_samples"] == 0
+                    for row in refresh_topology_exact["rows"]
+                ),
+                "cs_constant_prefix_samples": sorted(
+                    {
+                        row["metric_constant_prefix_samples"]
+                        for row in refresh_topology_exact["rows"]
+                        if row["view"] == "cs"
+                    }
+                ),
+                "cs_source_range_count_min": min(
+                    row["metric_source_range_count"]
+                    for row in refresh_topology_exact["rows"]
+                    if row["view"] == "cs"
+                ),
+                "cs_source_range_count_max": max(
+                    row["metric_source_range_count"]
+                    for row in refresh_topology_exact["rows"]
+                    if row["view"] == "cs"
+                ),
+            },
             "pulse_extractor_called_per_candidate_step": True,
             "pulse_refresh_calls": len(refresh_topology_items),
             "pulse_refresh_batch_wall_ms": refresh_batch_wall_ms,
@@ -1475,6 +1838,7 @@ def main() -> None:
             "The twelve cases and their exact references were opened by the prior Shimmer-percent pilot.",
             "The supervisor-authorized frozen three-point grid can freeze a Candidate-C mechanism alpha here but cannot promote the component.",
             "Candidate C is Praat-assisted and cannot be reported as a pure-PyTorch estimator.",
+            "The prior v10 CS topology used the full high-passed recording; v11 corrects it to the exact AVQI concatenated metric waveform without changing alpha or gates.",
             "Basic waveform safety is measured here; full pathology and denoising gates remain mandatory on a fresh panel.",
         ],
     }
@@ -1493,7 +1857,7 @@ def main() -> None:
     }
     write_json(report_path, report)
     receipt = {
-        "schema_version": "avqi-route-c-shimmer-hybrid-opened-receipt-v2",
+        "schema_version": "avqi-route-c-shimmer-hybrid-opened-receipt-v3",
         "decision": report["decision"],
         "coupled_baseline_decision": report["coupled_baseline_decision"],
         "candidate_c_decision": report["candidate_c_decision"],

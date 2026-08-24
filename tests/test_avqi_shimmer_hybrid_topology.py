@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
+
+from model.avqi_components import PraatDifferentiableAVQIComponentEstimator
 
 from scripts.evaluate_avqi_shimmer_hybrid_topology import (
     CACHE_RECORD_MAX_BYTES,
@@ -16,6 +19,7 @@ from scripts.evaluate_avqi_shimmer_hybrid_topology import (
     cache_record_valid,
     finalize_cache_record,
     map_input_metric_pulses_to_output,
+    metric_source_indices_from_topology,
     nearest_match_rate,
 )
 
@@ -99,3 +103,57 @@ def test_metric_pulse_mapping_handles_only_bounded_trailing_truncation() -> None
             output_frame_count=48_000,
             view="sv",
         )
+
+
+def test_exact_metric_source_ranges_expand_with_fail_closed_parity() -> None:
+    topology = {
+        "topology_preprocessing": "exact_avqi_view_metric_waveform",
+        "source_sample_count": 12,
+        "metric_sample_count": 8,
+        "metric_constant_prefix_samples": 2,
+        "metric_source_ranges": [[1, 3], [7, 3]],
+        "metric_mapped_sample_count": 6,
+        "metric_reconstruction_max_pcm16_error": 0,
+        "metric_reconstruction_differing_samples": 0,
+    }
+    np.testing.assert_array_equal(
+        metric_source_indices_from_topology(
+            topology,
+            source_sample_count=12,
+        ),
+        np.asarray([1, 2, 3, 7, 8, 9]),
+    )
+
+    drifted = dict(topology)
+    drifted["metric_reconstruction_differing_samples"] = 1
+    with pytest.raises(ValueError, match="waveform parity"):
+        metric_source_indices_from_topology(
+            drifted,
+            source_sample_count=12,
+        )
+
+
+def test_fixed_pulse_shimmer_backpropagates_through_exact_metric_gather() -> None:
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        shimmer_mode="praat_pulse_path_v6",
+    )
+    time = torch.arange(3200, dtype=torch.float32) / 16_000.0
+    envelope = 1.0 + 0.25 * torch.sin(2.0 * torch.pi * 7.0 * time)
+    waveform = (
+        0.1 * envelope * torch.sin(2.0 * torch.pi * 120.0 * time)
+    ).requires_grad_(True)
+    source_indices = torch.cat(
+        (torch.arange(200, 1500), torch.arange(1800, 3000))
+    )
+    pulses = torch.arange(120.0, 2400.0, 16_000.0 / 120.0)
+    shimmer = estimator.raw_shimmer_from_pulse_positions(
+        waveform,
+        pulses,
+        metric_source_indices=source_indices,
+        metric_constant_prefix_samples=16,
+    )
+    gradient = torch.autograd.grad(shimmer.sum(), waveform)[0]
+    assert torch.isfinite(shimmer).all()
+    assert torch.isfinite(gradient).all()
+    assert float(gradient.norm()) > 0.0

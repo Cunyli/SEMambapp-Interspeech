@@ -2544,6 +2544,8 @@ class PraatDifferentiableAVQIComponentEstimator(
         waveform: torch.Tensor,
         pulse_positions: torch.Tensor,
         metric_sample_count: int | None = None,
+        metric_source_indices: torch.Tensor | None = None,
+        metric_constant_prefix_samples: int = 0,
     ) -> torch.Tensor:
         """Return Shimmer %/dB with a frozen externally supplied pulse topology.
 
@@ -2552,6 +2554,9 @@ class PraatDifferentiableAVQIComponentEstimator(
         remains differentiable with respect to ``waveform``.  For an AVQI SV
         branch, pass ``metric_sample_count=3 * sample_rate`` so filtering occurs
         before the final-three-second crop, matching AVQI v03.01 ordering.
+        For an AVQI CS branch, ``metric_source_indices`` can describe the
+        detached exact-Praat sounding/30-ms concatenation while live amplitudes
+        are gathered from the differentiable metric-high-passed waveform.
         """
         if waveform.ndim != 1:
             raise ValueError(
@@ -2561,8 +2566,37 @@ class PraatDifferentiableAVQIComponentEstimator(
             raise ValueError("pulse positions must be one-dimensional")
         if metric_sample_count is not None and metric_sample_count <= 0:
             raise ValueError("metric sample count must be positive")
+        if metric_constant_prefix_samples < 0:
+            raise ValueError("metric constant prefix must be nonnegative")
+        if metric_source_indices is None and metric_constant_prefix_samples:
+            raise ValueError("metric constant prefix requires source indices")
+        if metric_source_indices is not None and metric_sample_count is not None:
+            raise ValueError(
+                "metric source indices and metric sample count are mutually exclusive"
+            )
         prepared = self._prepare(waveform)
-        if (
+        if metric_source_indices is not None:
+            if metric_source_indices.ndim != 1:
+                raise ValueError("metric source indices must be one-dimensional")
+            source_indices = metric_source_indices.to(
+                device=prepared.device,
+                dtype=torch.long,
+            ).detach()
+            if source_indices.numel() == 0:
+                raise ValueError("metric source indices must not be empty")
+            if bool((source_indices < 0).any()) or bool(
+                (source_indices >= prepared.numel()).any()
+            ):
+                raise ValueError("metric source indices exceed waveform bounds")
+            prepared = prepared.index_select(0, source_indices)
+            if metric_constant_prefix_samples:
+                prepared = torch.cat(
+                    (
+                        prepared.new_zeros(metric_constant_prefix_samples),
+                        prepared,
+                    )
+                )
+        elif (
             metric_sample_count is not None
             and prepared.numel() > metric_sample_count
         ):
