@@ -594,6 +594,7 @@ def projection_report_equivalence(
     if set(reference) != set(optimized):
         return {"keys_equal": False, "all_equivalent": False}
     comparisons: dict[str, bool] = {}
+    numeric_diagnostics: dict[str, dict[str, float]] = {}
     epsilon = torch.finfo(torch.float32).eps
     for key, reference_value in reference.items():
         optimized_value = optimized[key]
@@ -606,6 +607,12 @@ def projection_report_equivalence(
                 * epsilon
                 * max(abs(reference_value), abs(optimized_value), 1.0)
             )
+            numeric_diagnostics[key] = {
+                "reference": reference_value,
+                "optimized": optimized_value,
+                "absolute_difference": abs(reference_value - optimized_value),
+                "absolute_tolerance": tolerance,
+            }
             comparisons[key] = math.isclose(
                 reference_value,
                 optimized_value,
@@ -617,6 +624,7 @@ def projection_report_equivalence(
     return {
         "keys_equal": True,
         "field_equivalence": comparisons,
+        "numeric_diagnostics": numeric_diagnostics,
         "all_equivalent": all(comparisons.values()),
     }
 

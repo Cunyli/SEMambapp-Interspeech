@@ -21,6 +21,7 @@ from scripts.evaluate_avqi_shimmer_db_topology_family_selector_v18 import (
     candidate_d_projection_vectorized,
     normalized_gradient_steps_shared,
     plan_equivalence,
+    projection_report_equivalence,
     select_candidate_d,
     selector_contract,
     synthetic_v18_warmup,
@@ -140,6 +141,19 @@ def test_selector_contract_is_d_then_c_and_excludes_outcomes() -> None:
     assert contract["formal_total_metric_step_runtime_ms"] == 500.0
     assert "candidate_exact_shimmer_db" in contract["forbidden_information"]
     assert "case_id" in contract["forbidden_information"]
+
+
+def test_projection_report_equivalence_records_numeric_audit_details() -> None:
+    audit = projection_report_equivalence(
+        {"median": 0.25, "valid": True},
+        {"median": 0.2500001, "valid": True},
+    )
+    details = audit["numeric_diagnostics"]["median"]
+    assert details["reference"] == 0.25
+    assert details["optimized"] == 0.2500001
+    assert details["absolute_difference"] == pytest.approx(1e-7)
+    assert details["absolute_tolerance"] > details["absolute_difference"]
+    assert audit["all_equivalent"] is True
 
 
 def test_candidate_d_routing_fails_closed_on_schema_or_certificate() -> None:
