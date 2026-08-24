@@ -34,6 +34,7 @@ RESULT_MARKER = "AVQI_SHIMMER_TOPOLOGY_RESULT="
 IMPLEMENTATION = "exact_vectorized_frames_reused_tmpfs_numpy_sounding_v15"
 PRAAT_HIGHPASS_MODE = "praat_6_1_38_stop_hann_0_34_0p1"
 NUMPY_HIGHPASS_MODE = "numpy_official_praat_6_1_38_stop_hann_0_34_0p1"
+NUMPY_FFT_WARMUP_LENGTHS = tuple(1 << exponent for exponent in range(14, 20))
 
 
 def parse_args() -> argparse.Namespace:
@@ -215,6 +216,7 @@ class ExactTopologyEngine:
         self.runtime_temp_backend = (
             "tmpfs_dev_shm" if runtime_root is not None else "system_temp"
         )
+        self.numpy_stop_hann_response_cache: dict[int, np.ndarray] = {}
 
     def close(self) -> None:
         self.runtime_wav_directory.cleanup()
@@ -274,7 +276,7 @@ class ExactTopologyEngine:
     def praat_metric_highpass(
         self,
         waveform: np.ndarray,
-    ) -> tuple[np.ndarray, dict[str, float]]:
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         total_started = time.perf_counter()
         input_started = time.perf_counter()
         input_pcm16 = pcm16_roundtrip(waveform)
@@ -301,7 +303,7 @@ class ExactTopologyEngine:
     def numpy_official_metric_highpass(
         self,
         waveform: np.ndarray,
-    ) -> tuple[np.ndarray, dict[str, float]]:
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         total_started = time.perf_counter()
         input_started = time.perf_counter()
         input_pcm16 = pcm16_roundtrip(waveform)
@@ -309,30 +311,7 @@ class ExactTopologyEngine:
             time.perf_counter() - input_started
         )
         filter_started = time.perf_counter()
-        number_of_fourier_samples = 2
-        while number_of_fourier_samples < input_pcm16.size:
-            number_of_fourier_samples *= 2
-        spectrum = np.fft.rfft(
-            input_pcm16,
-            n=number_of_fourier_samples,
-        )
-        frequencies = (
-            np.arange(spectrum.size, dtype=np.float64)
-            * SAMPLE_RATE
-            / number_of_fourier_samples
-        )
-        f3 = 34.0 - 0.1
-        f4 = 34.0 + 0.1
-        response = np.ones(spectrum.size, dtype=np.float64)
-        response[frequencies <= f3] = 0.0
-        transition = (frequencies > f3) & (frequencies <= f4)
-        response[transition] = 0.5 - 0.5 * np.cos(
-            np.pi / (2.0 * 0.1) * (frequencies[transition] - f3)
-        )
-        filtered_values = np.fft.irfft(
-            spectrum * response,
-            n=number_of_fourier_samples,
-        )[: input_pcm16.size]
+        filtered_values = self.numpy_official_stop_hann(input_pcm16)
         filter_ms = 1000.0 * (time.perf_counter() - filter_started)
         construct_started = time.perf_counter()
         filtered = parselmouth.Sound(filtered_values, SAMPLE_RATE)
@@ -348,11 +327,73 @@ class ExactTopologyEngine:
             highpass_mode=NUMPY_HIGHPASS_MODE,
         )
 
+    def numpy_stop_hann_response(
+        self,
+        number_of_fourier_samples: int,
+    ) -> np.ndarray:
+        cached = self.numpy_stop_hann_response_cache.get(
+            number_of_fourier_samples
+        )
+        if cached is not None:
+            return cached
+        frequencies = (
+            np.arange(
+                number_of_fourier_samples // 2 + 1,
+                dtype=np.float64,
+            )
+            * SAMPLE_RATE
+            / number_of_fourier_samples
+        )
+        f3 = 34.0 - 0.1
+        f4 = 34.0 + 0.1
+        response = np.ones(frequencies.size, dtype=np.float64)
+        response[frequencies <= f3] = 0.0
+        transition = (frequencies > f3) & (frequencies <= f4)
+        response[transition] = 0.5 - 0.5 * np.cos(
+            np.pi / (2.0 * 0.1) * (frequencies[transition] - f3)
+        )
+        response.setflags(write=False)
+        self.numpy_stop_hann_response_cache[number_of_fourier_samples] = (
+            response
+        )
+        return response
+
+    def numpy_official_stop_hann(self, input_pcm16: np.ndarray) -> np.ndarray:
+        number_of_fourier_samples = 2
+        while number_of_fourier_samples < input_pcm16.size:
+            number_of_fourier_samples *= 2
+        spectrum = np.fft.rfft(input_pcm16, n=number_of_fourier_samples)
+        response = self.numpy_stop_hann_response(number_of_fourier_samples)
+        return np.fft.irfft(
+            spectrum * response,
+            n=number_of_fourier_samples,
+        )[: input_pcm16.size]
+
+    def warm_numpy_fft_lengths(self) -> list[dict[str, Any]]:
+        rows = []
+        for sample_count in NUMPY_FFT_WARMUP_LENGTHS:
+            values = np.zeros(sample_count, dtype=np.float64)
+            values[0] = 1.0 / 32768.0
+            started = time.perf_counter()
+            filtered = self.numpy_official_stop_hann(values)
+            rows.append(
+                {
+                    "sample_count": sample_count,
+                    "fft_sample_count": sample_count,
+                    "wall_ms": 1000.0 * (time.perf_counter() - started),
+                    "filtered_pcm16_sha256": pcm16_sha256(filtered),
+                    "response_cached_read_only": not self.numpy_stop_hann_response_cache[
+                        sample_count
+                    ].flags.writeable,
+                }
+            )
+        return rows
+
     def metric_highpass(
         self,
         waveform: np.ndarray,
         highpass_mode: str,
-    ) -> tuple[np.ndarray, dict[str, float]]:
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         if highpass_mode == PRAAT_HIGHPASS_MODE:
             return self.praat_metric_highpass(waveform)
         if highpass_mode == NUMPY_HIGHPASS_MODE:
@@ -655,6 +696,7 @@ class ExactTopologyEngine:
             + 0.02 * np.sin(2.0 * np.pi * 240.0 * time_axis)
         )
         started = time.perf_counter()
+        numpy_fft_warmup_rows = self.warm_numpy_fft_lengths()
         rows = []
         for view in ("cs", "sv"):
             float32_waveform = waveform.astype("<f4")
@@ -680,6 +722,9 @@ class ExactTopologyEngine:
         return {
             "synthetic_only": True,
             "panel_or_training_waveform_used": False,
+            "numpy_fft_synthetic_warmup": numpy_fft_warmup_rows,
+            "numpy_fft_warmup_lengths": list(NUMPY_FFT_WARMUP_LENGTHS),
+            "numpy_stop_hann_response_cache_waveform_dependent": False,
             "rows": rows,
             "wall_ms": 1000.0 * (time.perf_counter() - started),
         }

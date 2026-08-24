@@ -116,3 +116,7 @@ def test_worker_has_hash_bound_current_output_tmpfs_loader() -> None:
     assert "f3 = 34.0 - 0.1" in source
     assert "f4 = 34.0 + 0.1" in source
     assert "[: input_pcm16.size]" in source
+    assert "NUMPY_FFT_WARMUP_LENGTHS" in source
+    assert "numpy_stop_hann_response_cache" in source
+    assert "response.setflags(write=False)" in source
+    assert '"panel_or_training_waveform_used": False' in source

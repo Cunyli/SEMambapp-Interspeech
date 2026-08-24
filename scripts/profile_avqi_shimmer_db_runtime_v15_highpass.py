@@ -393,7 +393,9 @@ def main() -> None:
         "emitted_waveform_full_band": True,
         "waveform_dependent_topology_cache": False,
         "current_output_topology_refreshed_each_call": True,
-        "cold_definition": "first_numpy_call_after_synthetic_praat_warmup",
+        "first_real_call_definition": (
+            "first_real_call_after_synthetic_multilength_numpy_fft_warmup"
+        ),
         "warm_repeats_per_case": args.warm_repeats,
         "first_candidate_calls_exact_equivalent": first_exact,
         "runtime": runtime,
