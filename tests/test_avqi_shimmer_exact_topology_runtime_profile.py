@@ -21,11 +21,11 @@ def test_runtime_profile_contract_is_frozen() -> None:
     assert len(EXPECTED_CS_CASE_IDS) == 6
     assert all("__cs__" in case_id for case_id in EXPECTED_CS_CASE_IDS)
     for stage in (
-        "highpass_ms",
-        "textgrid_range_ms",
-        "metric_gather_ms",
-        "pointprocess_construct_ms",
-        "pulse_enumeration_ms",
+        '"highpass":',
+        '"textgrid_range":',
+        '"metric_gather":',
+        '"pointprocess_construct":',
+        '"pulse_enumeration":',
     ):
         assert stage in EXACT_WORKER
 
