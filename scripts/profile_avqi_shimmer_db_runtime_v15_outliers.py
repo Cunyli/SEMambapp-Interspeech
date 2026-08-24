@@ -34,6 +34,18 @@ PULSE_REFRESH_GATE_MS = 500.0
 DEV_ENGINEERING_MARGIN_MS = 450.0
 DEFAULT_WARM_REPEATS = 7
 INPUT_LOADER = "soundfile_float32_exact_16khz_mono"
+FROZEN_IMPLEMENTATION = "frozen_praat_per_frame_and_point"
+FASTPATH_IMPLEMENTATION = "exact_bulk_frame_and_pointprocess_matrix"
+IMPLEMENTATION_CONFIGS = {
+    FROZEN_IMPLEMENTATION: {
+        "frame_scan_mode": "praat_per_frame",
+        "pulse_enumeration_mode": "praat_per_point",
+    },
+    FASTPATH_IMPLEMENTATION: {
+        "frame_scan_mode": "numpy_exact_aligned_frames",
+        "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
+    },
+}
 FROZEN_OUTLIER_CASE_IDS = (
     "sealed_final__SD05__cs__rir_only",
     "sealed_final__ÄHH16__cs__rir_only",
@@ -97,6 +109,7 @@ def load_outlier_rows(path: Path) -> list[dict[str, Any]]:
 
 def flatten_runtime_row(
     case: dict[str, Any],
+    implementation: str,
     phase: str,
     repeat_index: int,
     worker_startup_ms: float,
@@ -110,6 +123,7 @@ def flatten_runtime_row(
         "view": case["view"],
         "condition": case["condition"],
         "sample_group": case["sample_group"],
+        "implementation": implementation,
         "phase": phase,
         "repeat_index": repeat_index,
         "worker_startup_ms": worker_startup_ms,
@@ -117,6 +131,8 @@ def flatten_runtime_row(
         "wall_minus_internal_ms": request_wall_ms
         - float(timings["total_refresh"]),
         "input_loader": response["topology_input_loader"],
+        "frame_scan_mode": response["frame_scan_mode"],
+        "pulse_enumeration_mode": response["pulse_enumeration_mode"],
         "base_frame_count": case["base_frame_count"],
         "base_duration_seconds": case["base_duration_seconds"],
         "metric_sample_count": response["metric_sample_count"],
@@ -138,8 +154,15 @@ def stage_summary(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     }
 
 
-def case_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    selected = [row for row in rows if row["phase"] == "warm"]
+def case_summary(
+    rows: list[dict[str, Any]],
+    implementation: str,
+) -> dict[str, Any]:
+    selected = [
+        row
+        for row in rows
+        if row["phase"] == "warm" and row["implementation"] == implementation
+    ]
     if not selected:
         raise ValueError("case summary requires warm rows")
     stage_medians = {
@@ -153,6 +176,7 @@ def case_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "case_id": selected[0]["case_id"],
         "speaker_id": selected[0]["speaker_id"],
+        "implementation": implementation,
         "base_frame_count": int(selected[0]["base_frame_count"]),
         "base_duration_seconds": float(selected[0]["base_duration_seconds"]),
         "metric_sample_count": int(selected[0]["metric_sample_count"]),
@@ -203,17 +227,22 @@ def main() -> None:
                 exact_versions = dict(worker.startup)
             elif exact_versions != worker.startup:
                 raise ValueError("exact worker version drift")
-            payload = {
+            base_payload = {
                 "op": "refresh",
                 "path": case["base_path"],
                 "verify_authority": False,
                 "input_loader": INPUT_LOADER,
             }
-            cold, cold_wall_ms = worker.request(payload)
+            frozen_payload = {
+                **base_payload,
+                **IMPLEMENTATION_CONFIGS[FROZEN_IMPLEMENTATION],
+            }
+            cold, cold_wall_ms = worker.request(frozen_payload)
             reference = cold
             runtime_rows.append(
                 flatten_runtime_row(
                     case,
+                    FROZEN_IMPLEMENTATION,
                     "cold",
                     0,
                     worker.startup_ms,
@@ -221,25 +250,32 @@ def main() -> None:
                     cold_wall_ms,
                 )
             )
-            for repeat_index in range(1, args.warm_repeats + 1):
-                warm, warm_wall_ms = worker.request(payload)
-                require_same_topology(
-                    reference,
-                    warm,
-                    f"{case['case_id']}:warm-{repeat_index}",
-                )
-                runtime_rows.append(
-                    flatten_runtime_row(
-                        case,
-                        "warm",
-                        repeat_index,
-                        worker.startup_ms,
+            for implementation, config in IMPLEMENTATION_CONFIGS.items():
+                payload = {**base_payload, **config}
+                for repeat_index in range(1, args.warm_repeats + 1):
+                    warm, warm_wall_ms = worker.request(payload)
+                    require_same_topology(
+                        reference,
                         warm,
-                        warm_wall_ms,
+                        f"{case['case_id']}:{implementation}:{repeat_index}",
                     )
-                )
+                    runtime_rows.append(
+                        flatten_runtime_row(
+                            case,
+                            implementation,
+                            "warm",
+                            repeat_index,
+                            worker.startup_ms,
+                            warm,
+                            warm_wall_ms,
+                        )
+                    )
             authority, authority_wall_ms = worker.request(
-                {**payload, "verify_authority": True}
+                {
+                    **base_payload,
+                    **IMPLEMENTATION_CONFIGS[FASTPATH_IMPLEMENTATION],
+                    "verify_authority": True,
+                }
             )
             require_same_topology(
                 reference,
@@ -258,17 +294,48 @@ def main() -> None:
                 }
             )
 
-    warm_rows = [row for row in runtime_rows if row["phase"] == "warm"]
+    warm_rows_by_implementation = {
+        implementation: [
+            row
+            for row in runtime_rows
+            if row["phase"] == "warm"
+            and row["implementation"] == implementation
+        ]
+        for implementation in IMPLEMENTATION_CONFIGS
+    }
     cold_rows = [row for row in runtime_rows if row["phase"] == "cold"]
-    per_case = [
-        case_summary(
-            [row for row in runtime_rows if row["case_id"] == case["case_id"]]
+    per_case_by_implementation = {
+        implementation: [
+            case_summary(
+                [
+                    row
+                    for row in runtime_rows
+                    if row["case_id"] == case["case_id"]
+                ],
+                implementation,
+            )
+            for case in cases
+        ]
+        for implementation in IMPLEMENTATION_CONFIGS
+    }
+    runtime_by_implementation = {}
+    for implementation, selected_rows in warm_rows_by_implementation.items():
+        warm_maximum_ms = max(
+            float(row["total_refresh_ms"]) for row in selected_rows
         )
-        for case in cases
-    ]
-    warm_maximum_ms = max(float(row["total_refresh_ms"]) for row in warm_rows)
+        runtime_by_implementation[implementation] = {
+            "config": IMPLEMENTATION_CONFIGS[implementation],
+            "warm_stage_summary": stage_summary(selected_rows),
+            "per_case": per_case_by_implementation[implementation],
+            "warm_maximum_total_refresh_ms": warm_maximum_ms,
+            "formal_500ms_pass_on_development_repeats": warm_maximum_ms
+            <= PULSE_REFRESH_GATE_MS,
+            "development_450ms_margin_pass": warm_maximum_ms
+            <= DEV_ENGINEERING_MARGIN_MS,
+        }
+    candidate_runtime = runtime_by_implementation[FASTPATH_IMPLEMENTATION]
     report = {
-        "schema_version": "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-v1",
+        "schema_version": "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-v2",
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
         "scope": "opened_panel_runtime_only_not_promotion",
@@ -291,19 +358,36 @@ def main() -> None:
             "one_dedicated_persistent_worker_per_case": True,
             "one_disclosed_cold_refresh": True,
             "warm_repeats": args.warm_repeats,
+            "implementation_configs": IMPLEMENTATION_CONFIGS,
             "formal_refresh_gate_ms_unchanged": PULSE_REFRESH_GATE_MS,
             "development_engineering_margin_ms": DEV_ENGINEERING_MARGIN_MS,
             "opened_outlier_case_ids": list(FROZEN_OUTLIER_CASE_IDS),
         },
         "runtime": {
             "cold_stage_summary": stage_summary(cold_rows),
-            "warm_stage_summary": stage_summary(warm_rows),
-            "per_case": per_case,
-            "warm_maximum_total_refresh_ms": warm_maximum_ms,
-            "formal_500ms_pass_on_development_repeats": warm_maximum_ms
-            <= PULSE_REFRESH_GATE_MS,
-            "development_450ms_margin_pass": warm_maximum_ms
-            <= DEV_ENGINEERING_MARGIN_MS,
+            "by_implementation": runtime_by_implementation,
+            "candidate_implementation": FASTPATH_IMPLEMENTATION,
+            "candidate_formal_500ms_pass_on_development_repeats": (
+                candidate_runtime[
+                    "formal_500ms_pass_on_development_repeats"
+                ]
+            ),
+            "candidate_development_450ms_margin_pass": candidate_runtime[
+                "development_450ms_margin_pass"
+            ],
+        },
+        "fastpath_topology_equivalence": {
+            "all_repeated_calls_equal_frozen": True,
+            "identity_fields": [
+                "highpass_pcm16_sha256",
+                "metric_pcm16_sha256",
+                "source_ranges_sha256",
+                "pulse_positions_sha256",
+                "metric_sample_count",
+                "metric_constant_prefix_samples",
+                "metric_mapped_sample_count",
+                "pulse_count",
+            ],
         },
         "authority_parity": {
             "all_pass": all(row["pass"] for row in authority_rows),
@@ -321,7 +405,7 @@ def main() -> None:
     write_json(report_path, report)
     receipt = {
         "schema_version": (
-            "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-receipt-v1"
+            "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-receipt-v2"
         ),
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
@@ -329,11 +413,12 @@ def main() -> None:
         "runtime_profile_sha256": sha256_file(runtime_path),
         "panel_contract_sha256": panel_hash,
         "authority_parity_pass": report["authority_parity"]["all_pass"],
+        "fastpath_topology_equivalence_pass": True,
         "formal_500ms_pass_on_development_repeats": report["runtime"][
-            "formal_500ms_pass_on_development_repeats"
+            "candidate_formal_500ms_pass_on_development_repeats"
         ],
         "development_450ms_margin_pass": report["runtime"][
-            "development_450ms_margin_pass"
+            "candidate_development_450ms_margin_pass"
         ],
         "promotion_authorized": False,
         "generator_optimizer_steps": 0,

@@ -149,8 +149,8 @@ def pulses_sha256(positions):
     return bytes_sha256(values.tobytes())
 
 
-def exact_zero_crossing_rate(part):
-    values = np.asarray(part.values[0], dtype=np.float64)
+def exact_zero_crossing_rate_values(values, x1, dx):
+    values = np.asarray(values, dtype=np.float64)
     left = values[:-1]
     right = values[1:]
     indices = np.flatnonzero(
@@ -167,8 +167,8 @@ def exact_zero_crossing_rate(part):
         where=denominator != 0.0,
     )
     crossings = (
-        float(part.x1)
-        + (indices.astype(np.float64) + fraction) * float(part.dx)
+        float(x1)
+        + (indices.astype(np.float64) + fraction) * float(dx)
     )
     first = int(np.argmin(np.abs(crossings - 0.0025)))
     last_candidates = np.flatnonzero(crossings[first:] >= 0.0275)
@@ -177,6 +177,14 @@ def exact_zero_crossing_rate(part):
     last = first + int(last_candidates[0])
     distance = crossings[last] - crossings[first]
     return (last - first) / distance
+
+
+def exact_zero_crossing_rate(part):
+    return exact_zero_crossing_rate_values(
+        part.values[0],
+        part.x1,
+        part.dx,
+    )
 
 
 def compress_source_indices(indices):
@@ -263,6 +271,12 @@ def enumerate_point_process(point_process, sound):
     ]
 
 
+def enumerate_point_process_matrix(point_process, sound):
+    matrix = call(point_process, "To Matrix")
+    times = np.asarray(matrix.values, dtype=np.float64).reshape(-1)
+    return ((times - float(sound.x1)) / float(sound.dx)).tolist()
+
+
 def read_soundfile_exact(path):
     waveform, sample_rate = sf.read(path, dtype="float32")
     if sample_rate != SAMPLE_RATE or waveform.ndim != 1 or waveform.size == 0:
@@ -270,7 +284,13 @@ def read_soundfile_exact(path):
     return waveform.astype(np.float64)
 
 
-def direct_refresh(path, verify_authority, input_loader):
+def direct_refresh(
+    path,
+    verify_authority,
+    input_loader,
+    frame_scan_mode,
+    pulse_enumeration_mode,
+):
     total_started = time.perf_counter()
     input_started = time.perf_counter()
     if input_loader == "authoritative_read_and_resample":
@@ -356,6 +376,7 @@ def direct_refresh(path, verify_authority, input_loader):
         raise ValueError("only-loud source mapping length drift")
 
     global_power = float(call(only_loud, "Get power in air"))
+    only_loud_values = np.asarray(only_loud.values[0], dtype=np.float64)
     left = float(only_loud.xmin)
     width = 0.03
     right = left + width
@@ -363,23 +384,43 @@ def direct_refresh(path, verify_authority, input_loader):
     kept_parts = []
     kept_source_indices = []
     while right < extreme_right:
-        part = call(
-            only_loud,
-            "Extract part",
-            left,
-            right,
-            "rectangular",
-            1.0,
-            "no",
+        local_start = int(
+            round((left - float(only_loud.xmin)) * SAMPLE_RATE)
         )
-        partial_power = float(call(part, "Get power in air"))
+        if frame_scan_mode == "praat_per_frame":
+            part = call(
+                only_loud,
+                "Extract part",
+                left,
+                right,
+                "rectangular",
+                1.0,
+                "no",
+            )
+            part_values = np.asarray(part.values[0], dtype=np.float64)
+            partial_power = float(call(part, "Get power in air"))
+            zero_crossing_rate = None
+        elif frame_scan_mode == "numpy_exact_aligned_frames":
+            frame_sample_count = int(round(width * SAMPLE_RATE))
+            part_values = only_loud_values[
+                local_start : local_start + frame_sample_count
+            ]
+            if part_values.size != frame_sample_count:
+                raise ValueError("NumPy exact frame scan exceeded only-loud data")
+            partial_power = float(np.mean(np.square(part_values)) / 400.0)
+            zero_crossing_rate = None
+        else:
+            raise ValueError("unsupported exact frame scan: " + frame_scan_mode)
         if partial_power > global_power * 0.30:
-            zero_crossing_rate = exact_zero_crossing_rate(part)
-            if np.isfinite(zero_crossing_rate) and zero_crossing_rate < 3000.0:
-                part_values = np.asarray(part.values[0], dtype=np.float64)
-                local_start = int(
-                    round((left - float(only_loud.xmin)) * SAMPLE_RATE)
+            if frame_scan_mode == "praat_per_frame":
+                zero_crossing_rate = exact_zero_crossing_rate(part)
+            else:
+                zero_crossing_rate = exact_zero_crossing_rate_values(
+                    part_values,
+                    0.5 / SAMPLE_RATE,
+                    1.0 / SAMPLE_RATE,
                 )
+            if np.isfinite(zero_crossing_rate) and zero_crossing_rate < 3000.0:
                 local_end = local_start + part_values.size
                 if local_end > only_loud_indices.size:
                     raise ValueError("exact frame mapping exceeds only-loud data")
@@ -428,7 +469,17 @@ def direct_refresh(path, verify_authority, input_loader):
         time.perf_counter() - construct_started
     )
     enumeration_started = time.perf_counter()
-    pulse_positions = enumerate_point_process(point_process, metric_sound)
+    if pulse_enumeration_mode == "praat_per_point":
+        pulse_positions = enumerate_point_process(point_process, metric_sound)
+    elif pulse_enumeration_mode == "praat_pointprocess_to_matrix":
+        pulse_positions = enumerate_point_process_matrix(
+            point_process,
+            metric_sound,
+        )
+    else:
+        raise ValueError(
+            "unsupported pulse enumeration: " + pulse_enumeration_mode
+        )
     pulse_enumeration_ms = 1000.0 * (
         time.perf_counter() - enumeration_started
     )
@@ -438,6 +489,8 @@ def direct_refresh(path, verify_authority, input_loader):
         "status": "ok",
         "path": path,
         "topology_input_loader": input_loader,
+        "frame_scan_mode": frame_scan_mode,
+        "pulse_enumeration_mode": pulse_enumeration_mode,
         "source_sample_count": int(highpassed.size),
         "metric_sample_count": int(metric.size),
         "metric_constant_prefix_samples": int(constant_prefix),
@@ -589,6 +642,11 @@ for line in sys.stdin:
                 request.get(
                     "input_loader",
                     "authoritative_read_and_resample",
+                ),
+                request.get("frame_scan_mode", "praat_per_frame"),
+                request.get(
+                    "pulse_enumeration_mode",
+                    "praat_per_point",
                 ),
             )
         elif request["op"] == "score":
