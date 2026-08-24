@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run a fresh speaker-disjoint Route C Shimmer waveform pilot.
+"""Run a fresh speaker-disjoint Route C component waveform pilot.
 
 The pilot is deliberately narrower than AVQI-T2 training. It creates twelve
-new TAU pathological CS/SV cases from hash-locked test noise/RIR recipes,
-runs the frozen S3_500 enhancer in inference mode, and applies one bounded
-waveform step from the frozen Route C v6 Shimmer-percent gradient.
+pathological CS/SV cases from a hash-locked source panel and test noise/RIR
+recipes, runs the frozen S3_500 enhancer in inference mode, and applies one
+bounded waveform step from a frozen Route C component gradient.
 
 A global step size is selected only on three calibration speakers. The final
 three-speaker panel is written and hash-sealed before its exact Praat values
@@ -66,6 +66,8 @@ from prepare_avqi_component_expanded_data import (
 SAMPLE_RATE = 16_000
 SHIMMER_PILOT_PROFILE = "shimmer_pulse_path_v6"
 HNR_PILOT_PROFILE = "hnr_pitch_path_v7"
+LTAS_SLOPE_PILOT_PROFILE = "ltas_slope_authority_v1"
+SLOPE_COMPONENT = "slope"
 OPTIMIZED_COMPONENT = "shimmer_percent"
 COMPONENT_INDEX = AVQI_COMPONENT_NAMES.index(OPTIMIZED_COMPONENT)
 SHIMMER_INDEX = COMPONENT_INDEX
@@ -97,6 +99,8 @@ REQUIRED_FINAL_SLICES = (
     "severity=pathological_mild",
     "severity=pathological_severe",
 )
+PANEL_SOURCE = "tau_manifest"
+ACTIVE_SAMPLE_GROUPS = ("pathological_mild", "pathological_severe")
 PREVIOUS_WAVEFORM_PILOT_SPEAKERS = frozenset(
     {
         "PD08",
@@ -149,6 +153,35 @@ HNR_PANEL_ROWS = (
     ("final", "ÄHH28", "pathological_severe", "sv", "snr10", 951),
 )
 
+# These SVD speakers were hash-sealed as v10 authority-panel reserves and were
+# never exact-scored.  Speaker split precedes simulation and alpha selection.
+# SVD:1301 remains unopened as a spare and is not used by this pilot.
+LTAS_SLOPE_UNUSED_RESERVE_SPEAKERS = frozenset(
+    {
+        "SVD:1301",
+        "SVD:1322",
+        "SVD:1438",
+        "SVD:1516",
+        "SVD:1849",
+        "SVD:1872",
+        "SVD:1923",
+    }
+)
+LTAS_SLOPE_PANEL_ROWS = (
+    ("calibration", "SVD:1849", "pathological_external", "cs", "rir_only", 960),
+    ("calibration", "SVD:1849", "pathological_external", "sv", "snr20", 961),
+    ("calibration", "SVD:1516", "pathological_external", "cs", "snr10", 962),
+    ("calibration", "SVD:1516", "pathological_external", "sv", "rir_only", 963),
+    ("calibration", "SVD:1438", "pathological_external", "cs", "snr20", 964),
+    ("calibration", "SVD:1438", "pathological_external", "sv", "snr10", 965),
+    ("final", "SVD:1872", "pathological_external", "cs", "rir_only", 966),
+    ("final", "SVD:1872", "pathological_external", "sv", "snr20", 967),
+    ("final", "SVD:1923", "pathological_external", "cs", "snr10", 968),
+    ("final", "SVD:1923", "pathological_external", "sv", "rir_only", 969),
+    ("final", "SVD:1322", "pathological_external", "cs", "snr20", 970),
+    ("final", "SVD:1322", "pathological_external", "sv", "snr10", 971),
+)
+
 PRIOR_FINAL_PANEL_SPEAKERS = frozenset(
     {
         "PD08",
@@ -188,6 +221,14 @@ PILOT_PROFILE_CONFIGS = {
         "calibration_no_go_decision": (
             "NO_GO_SHIMMER_CALIBRATION_FINAL_UNOPENED"
         ),
+        "panel_source": "tau_manifest",
+        "sample_groups": ("pathological_mild", "pathological_severe"),
+        "required_final_slices": (
+            "view=cs",
+            "view=sv",
+            "severity=pathological_mild",
+            "severity=pathological_severe",
+        ),
     },
     HNR_PILOT_PROFILE: {
         "component": "hnr",
@@ -205,6 +246,42 @@ PILOT_PROFILE_CONFIGS = {
         "pass_decision": "PASS_HNR_FRESH_SPEAKER_PANEL",
         "fail_decision": "FAIL_HNR_FRESH_SPEAKER_PANEL",
         "calibration_no_go_decision": "NO_GO_HNR_CALIBRATION_FINAL_UNOPENED",
+        "panel_source": "tau_manifest",
+        "sample_groups": ("pathological_mild", "pathological_severe"),
+        "required_final_slices": (
+            "view=cs",
+            "view=sv",
+            "severity=pathological_mild",
+            "severity=pathological_severe",
+        ),
+    },
+    LTAS_SLOPE_PILOT_PROFILE: {
+        "component": "slope",
+        "companion_component": None,
+        "architecture": "direct_praat_hard_shimmer_pulse_path_v6",
+        "estimator_kwargs": {
+            "peak_mode": "hard",
+            "shimmer_mode": "praat_pulse_path_v6",
+        },
+        "display_name": "LTAS slope",
+        "version_label": "ltas_slope_v1",
+        "panel_rows": LTAS_SLOPE_PANEL_ROWS,
+        "panel_schema_version": "avqi-route-c-ltas-slope-fresh-panel-v1",
+        "final_seal_schema_version": "avqi-route-c-ltas-slope-final-seal-v1",
+        "pass_decision": "PASS_LTAS_SLOPE_FRESH_SPEAKER_PANEL",
+        "fail_decision": "FAIL_LTAS_SLOPE_FRESH_SPEAKER_PANEL",
+        "calibration_no_go_decision": (
+            "NO_GO_LTAS_SLOPE_CALIBRATION_FINAL_UNOPENED"
+        ),
+        "panel_source": "svd_unused_reserve",
+        "sample_groups": ("pathological_external",),
+        "required_final_slices": (
+            "view=cs",
+            "view=sv",
+            "condition=rir_only",
+            "condition=snr20",
+            "condition=snr10",
+        ),
     },
 }
 
@@ -220,6 +297,7 @@ def configure_pilot(profile: str) -> None:
     global DISPLAY_NAME, VERSION_LABEL, PANEL_ROWS
     global PANEL_SCHEMA_VERSION, FINAL_SEAL_SCHEMA_VERSION
     global PASS_DECISION, FAIL_DECISION, CALIBRATION_NO_GO_DECISION
+    global PANEL_SOURCE, ACTIVE_SAMPLE_GROUPS, REQUIRED_FINAL_SLICES
     ACTIVE_PILOT_PROFILE = profile
     OPTIMIZED_COMPONENT = str(config["component"])
     COMPONENT_INDEX = AVQI_COMPONENT_NAMES.index(OPTIMIZED_COMPONENT)
@@ -236,6 +314,9 @@ def configure_pilot(profile: str) -> None:
     PASS_DECISION = str(config["pass_decision"])
     FAIL_DECISION = str(config["fail_decision"])
     CALIBRATION_NO_GO_DECISION = str(config["calibration_no_go_decision"])
+    PANEL_SOURCE = str(config["panel_source"])
+    ACTIVE_SAMPLE_GROUPS = tuple(config["sample_groups"])
+    REQUIRED_FINAL_SLICES = tuple(config["required_final_slices"])
 
 EXACT_SCORER = r"""
 import json
@@ -313,29 +394,33 @@ def parse_args() -> argparse.Namespace:
         choices=tuple(PILOT_PROFILE_CONFIGS),
         default=SHIMMER_PILOT_PROFILE,
     )
-    parser.add_argument("--authorization-consensus", type=Path, required=True)
-    parser.add_argument("--authorization-consensus-sha256", required=True)
+    parser.add_argument("--authorization-consensus", type=Path)
+    parser.add_argument("--authorization-consensus-sha256")
     parser.add_argument(
         "--authorization-consensus-receipt",
         type=Path,
-        required=True,
     )
     parser.add_argument(
         "--authorization-consensus-receipt-sha256",
-        required=True,
     )
-    parser.add_argument("--screen-report", type=Path, required=True)
-    parser.add_argument("--screen-report-sha256", required=True)
-    parser.add_argument("--screen-completion-receipt", type=Path, required=True)
-    parser.add_argument("--screen-completion-receipt-sha256", required=True)
+    parser.add_argument("--screen-report", type=Path)
+    parser.add_argument("--screen-report-sha256")
+    parser.add_argument("--screen-completion-receipt", type=Path)
+    parser.add_argument("--screen-completion-receipt-sha256")
+    parser.add_argument("--ltas-promotion-report", type=Path)
+    parser.add_argument("--ltas-promotion-report-sha256")
+    parser.add_argument("--ltas-promotion-receipt", type=Path)
+    parser.add_argument("--ltas-promotion-receipt-sha256")
+    parser.add_argument("--svd-panel-seal", type=Path)
+    parser.add_argument("--svd-panel-seal-sha256")
     parser.add_argument("--predictor-checkpoint", type=Path, required=True)
     parser.add_argument("--predictor-checkpoint-sha256", required=True)
     parser.add_argument("--generator-config", type=Path, required=True)
     parser.add_argument("--generator-config-sha256", required=True)
     parser.add_argument("--generator-checkpoint", type=Path, required=True)
     parser.add_argument("--generator-checkpoint-sha256", required=True)
-    parser.add_argument("--tau-manifest", type=Path, required=True)
-    parser.add_argument("--tau-manifest-sha256", required=True)
+    parser.add_argument("--tau-manifest", type=Path)
+    parser.add_argument("--tau-manifest-sha256")
     parser.add_argument("--fixed-recipes", type=Path, required=True)
     parser.add_argument("--fixed-recipes-sha256", required=True)
     parser.add_argument("--simulation-root", type=Path, required=True)
@@ -369,11 +454,12 @@ def validate_panel_specs(specs: tuple[PanelSpec, ...]) -> dict[str, Any]:
     if split_speakers["calibration"] & split_speakers["final"]:
         raise ValueError("calibration and final speakers overlap")
     all_speakers = set.union(*split_speakers.values())
-    prior_speakers = (
-        PREVIOUS_WAVEFORM_PILOT_SPEAKERS
-        if ACTIVE_PILOT_PROFILE == SHIMMER_PILOT_PROFILE
-        else ALL_PRIOR_PANEL_SPEAKERS
-    )
+    if ACTIVE_PILOT_PROFILE == SHIMMER_PILOT_PROFILE:
+        prior_speakers = PREVIOUS_WAVEFORM_PILOT_SPEAKERS
+    elif ACTIVE_PILOT_PROFILE == HNR_PILOT_PROFILE:
+        prior_speakers = ALL_PRIOR_PANEL_SPEAKERS
+    else:
+        prior_speakers = frozenset()
     previous_overlap = all_speakers & prior_speakers
     if ACTIVE_PILOT_PROFILE == SHIMMER_PILOT_PROFILE and previous_overlap:
         raise ValueError("fresh panel overlaps a previous waveform pilot speaker")
@@ -382,6 +468,11 @@ def validate_panel_specs(specs: tuple[PanelSpec, ...]) -> dict[str, Any]:
         raise ValueError(
             "HNR final panel overlaps a previously opened final-panel speaker"
         )
+    if ACTIVE_PILOT_PROFILE == LTAS_SLOPE_PILOT_PROFILE:
+        if not all_speakers <= LTAS_SLOPE_UNUSED_RESERVE_SPEAKERS:
+            raise ValueError("LTAS panel contains a non-reserve SVD speaker")
+        if len(LTAS_SLOPE_UNUSED_RESERVE_SPEAKERS - all_speakers) != 1:
+            raise ValueError("LTAS panel must leave exactly one unopened reserve")
     for split in split_speakers:
         selected = [spec for spec in specs if spec.split == split]
         if {spec.view for spec in selected} != {"cs", "sv"}:
@@ -400,11 +491,8 @@ def validate_panel_specs(specs: tuple[PanelSpec, ...]) -> dict[str, Any]:
             raise ValueError(
                 f"condition balance drift in {split}: {condition_counts}"
             )
-        if {spec.sample_group for spec in selected} != {
-            "pathological_mild",
-            "pathological_severe",
-        }:
-            raise ValueError(f"severity coverage drift in {split}")
+        if {spec.sample_group for spec in selected} != set(ACTIVE_SAMPLE_GROUPS):
+            raise ValueError(f"sample-group coverage drift in {split}")
     recipe_indices = [spec.recipe_index for spec in specs]
     if len(recipe_indices) != len(set(recipe_indices)):
         raise ValueError("fixed recipe reuse detected within the fresh panel")
@@ -417,6 +505,13 @@ def validate_panel_specs(specs: tuple[PanelSpec, ...]) -> dict[str, Any]:
         "previous_waveform_pilot_overlap": sorted(previous_overlap),
         "previous_final_panel_overlap": sorted(prior_final_overlap),
         "recipe_indices": recipe_indices,
+        "panel_source": PANEL_SOURCE,
+        "sample_groups": list(ACTIVE_SAMPLE_GROUPS),
+        "unused_authority_reserves_after_selection": sorted(
+            LTAS_SLOPE_UNUSED_RESERVE_SPEAKERS - all_speakers
+        )
+        if ACTIVE_PILOT_PROFILE == LTAS_SLOPE_PILOT_PROFILE
+        else [],
     }
 
 
@@ -491,7 +586,156 @@ def git_file_sha256(commit: str, relative_path: str) -> str:
     return sha256_bytes(result.stdout)
 
 
+def require_argument(value: Any, label: str) -> Any:
+    if value is None or value == "":
+        raise ValueError(f"{label} is required for {ACTIVE_PILOT_PROFILE}")
+    return value
+
+
+def validate_ltas_authorization(args: argparse.Namespace) -> dict[str, Any]:
+    promotion_path = require_argument(
+        args.ltas_promotion_report,
+        "LTAS promotion report",
+    )
+    promotion_hash = require_argument(
+        args.ltas_promotion_report_sha256,
+        "LTAS promotion report SHA-256",
+    )
+    receipt_path = require_argument(
+        args.ltas_promotion_receipt,
+        "LTAS promotion receipt",
+    )
+    receipt_hash = require_argument(
+        args.ltas_promotion_receipt_sha256,
+        "LTAS promotion receipt SHA-256",
+    )
+    seal_path = require_argument(args.svd_panel_seal, "SVD panel seal")
+    seal_hash = require_argument(
+        args.svd_panel_seal_sha256,
+        "SVD panel seal SHA-256",
+    )
+    validate_file_hash(promotion_path, promotion_hash, "LTAS promotion report")
+    validate_file_hash(receipt_path, receipt_hash, "LTAS promotion receipt")
+    validate_file_hash(seal_path, seal_hash, "SVD authority panel seal")
+    predictor_hash = validate_file_hash(
+        args.predictor_checkpoint,
+        args.predictor_checkpoint_sha256,
+        "LTAS predictor checkpoint",
+    )
+    generator_config_hash = validate_file_hash(
+        args.generator_config,
+        args.generator_config_sha256,
+        "S3_500 generator config",
+    )
+    generator_checkpoint_hash = validate_file_hash(
+        args.generator_checkpoint,
+        args.generator_checkpoint_sha256,
+        "S3_500 generator checkpoint",
+    )
+    promotion = load_json(promotion_path)
+    receipt = load_json(receipt_path)
+    seal = load_json(seal_path)
+    if promotion.get("decision") != "GO_BOUNDED_LTAS_SLOPE_WAVEFORM_PILOT":
+        raise ValueError("LTAS promotion does not authorize a bounded pilot")
+    if promotion.get("bounded_waveform_pilot_authorized") is not True:
+        raise ValueError("LTAS promotion authorization flag differs")
+    if promotion.get("bounded_waveform_pilot_submitted") is not False:
+        raise ValueError("LTAS promotion already reports a submitted pilot")
+    if promotion.get("generator_optimizer_steps") != 0:
+        raise ValueError("LTAS promotion contains generator updates")
+    if promotion.get("production_generator_training_authorized") is not False:
+        raise ValueError("LTAS promotion authorizes generator training")
+    if promotion.get("final_audio_highpass_applied") is not False:
+        raise ValueError("LTAS promotion altered the emitted waveform")
+    if not promotion.get("gates") or not all(promotion["gates"].values()):
+        raise ValueError("LTAS promotion contains a failed scorer gate")
+    if promotion.get("frozen_gate_contract", {}).get("schema_version") != (
+        "avqi-ltas-slope-exact-relative-gate-v1"
+    ):
+        raise ValueError("LTAS exact-relative gate contract differs")
+    if receipt.get("decision") != promotion["decision"]:
+        raise ValueError("LTAS promotion receipt decision differs")
+    if receipt.get("artifact_sha256", {}).get(promotion_path.name) != (
+        promotion_hash
+    ):
+        raise ValueError("LTAS promotion receipt does not bind its report")
+    if receipt.get("bounded_waveform_pilot_authorized") is not True:
+        raise ValueError("LTAS promotion receipt does not authorize the pilot")
+    if receipt.get("generator_optimizer_steps") != 0:
+        raise ValueError("LTAS promotion receipt contains generator updates")
+    source_hashes = promotion.get("source_input_sha256", {})
+    if source_hashes.get("predictor_checkpoint") != predictor_hash:
+        raise ValueError("LTAS promotion checkpoint differs")
+    if source_hashes.get("svd_panel_seal") != seal_hash:
+        raise ValueError("LTAS promotion SVD seal differs")
+    authorized_speakers = set(
+        promotion.get("speaker_audit", {}).get(
+            "unopened_svd_reserve_speakers",
+            [],
+        )
+    )
+    selected_speakers = {spec.speaker_id for spec in panel_specs()}
+    if authorized_speakers != set(LTAS_SLOPE_UNUSED_RESERVE_SPEAKERS):
+        raise ValueError("LTAS unopened SVD reserve set differs")
+    if not selected_speakers <= authorized_speakers:
+        raise ValueError("LTAS panel uses a scored or unsealed SVD speaker")
+    if seal.get("schema_version") != (
+        "avqi-route-c-ltas-svd-authority-panel-seal-v2"
+    ):
+        raise ValueError("unexpected SVD authority seal schema")
+    if seal.get("exact_scores_opened") is not False:
+        raise ValueError("SVD authority seal did not precede exact scoring")
+    promotion_commit = str(promotion["source_commit"])
+    promotion_model_hash = git_file_sha256(
+        promotion_commit,
+        "model/avqi_components.py",
+    )
+    live_model_hash = sha256_file(REPO_ROOT / "model/avqi_components.py")
+    if live_model_hash != promotion_model_hash:
+        raise ValueError("LTAS estimator source changed after promotion")
+    return {
+        "decision": promotion["decision"],
+        "authorized_components": [SLOPE_COMPONENT],
+        "isolated_component": OPTIMIZED_COMPONENT,
+        "promotion_report_sha256": promotion_hash,
+        "promotion_receipt_sha256": receipt_hash,
+        "svd_panel_seal_sha256": seal_hash,
+        "predictor_checkpoint_sha256": predictor_hash,
+        "generator_config_sha256": generator_config_hash,
+        "generator_checkpoint_sha256": generator_checkpoint_hash,
+        "promotion_source_commit": promotion_commit,
+        "promotion_model_source_sha256": promotion_model_hash,
+        "pilot_model_source_sha256": live_model_hash,
+        "pilot_profile": ACTIVE_PILOT_PROFILE,
+        "selected_architecture": EXPECTED_ARCHITECTURE,
+        "authorized_unopened_speakers": sorted(authorized_speakers),
+        "gate_contract": promotion["frozen_gate_contract"],
+    }
+
+
 def validate_authorization(args: argparse.Namespace) -> dict[str, Any]:
+    if ACTIVE_PILOT_PROFILE == LTAS_SLOPE_PILOT_PROFILE:
+        return validate_ltas_authorization(args)
+    for value, label in (
+        (args.authorization_consensus, "Route C consensus"),
+        (args.authorization_consensus_sha256, "Route C consensus SHA-256"),
+        (
+            args.authorization_consensus_receipt,
+            "Route C consensus receipt",
+        ),
+        (
+            args.authorization_consensus_receipt_sha256,
+            "Route C consensus receipt SHA-256",
+        ),
+        (args.screen_report, "Route C screen report"),
+        (args.screen_report_sha256, "Route C screen report SHA-256"),
+        (args.screen_completion_receipt, "Route C screen receipt"),
+        (
+            args.screen_completion_receipt_sha256,
+            "Route C screen receipt SHA-256",
+        ),
+    ):
+        require_argument(value, label)
     consensus_hash = validate_file_hash(
         args.authorization_consensus,
         args.authorization_consensus_sha256,
@@ -723,6 +967,93 @@ def read_tau_manifest(path: Path) -> dict[str, dict[str, str]]:
     return selected
 
 
+def read_svd_panel_seal(
+    path: Path,
+    expected_hash: str,
+    authorized_speakers: list[str],
+) -> dict[str, dict[str, str]]:
+    validate_file_hash(path, expected_hash, "SVD authority panel seal")
+    seal = load_json(path)
+    wanted = {spec.speaker_id for spec in panel_specs()}
+    if not wanted <= set(authorized_speakers):
+        raise ValueError("LTAS source panel exceeds authorized unopened speakers")
+    rows_by_speaker: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in seal.get("rows", []):
+        speaker_id = str(row.get("panel_speaker_id"))
+        view = str(row.get("view"))
+        if speaker_id not in wanted or view not in {"cs", "sv"}:
+            continue
+        if row.get("selection_role") != "reserve" or row.get("label") != "patient":
+            raise ValueError(f"LTAS source is not a patient reserve: {speaker_id}")
+        if view in rows_by_speaker.setdefault(speaker_id, {}):
+            raise ValueError(f"duplicate SVD reserve view: {speaker_id} {view}")
+        rows_by_speaker[speaker_id][view] = row
+    if set(rows_by_speaker) != wanted:
+        raise ValueError(
+            f"SVD seal misses LTAS speakers: {sorted(wanted - set(rows_by_speaker))}"
+        )
+    selected: dict[str, dict[str, str]] = {}
+    for speaker_id, views in rows_by_speaker.items():
+        if set(views) != {"cs", "sv"}:
+            raise ValueError(f"SVD reserve lacks paired CS/SV: {speaker_id}")
+        selected_row: dict[str, str] = {
+            "speaker_id": speaker_id,
+            "label": "patient",
+            "sample_group": "pathological_external",
+            "dataset": "SVD",
+            "session_id": str(views["cs"]["session_id"]),
+        }
+        if views["sv"]["session_id"] != views["cs"]["session_id"]:
+            raise ValueError(f"SVD reserve session mismatch: {speaker_id}")
+        for view in ("cs", "sv"):
+            waveform_path = Path(views[view]["variant_paths"]["clean"])
+            waveform_hash = str(views[view]["variant_sha256"]["clean"])
+            validate_file_hash(
+                waveform_path,
+                waveform_hash,
+                f"sealed {speaker_id} {view} clean waveform",
+            )
+            selected_row[f"{view}_audio_path"] = str(waveform_path.resolve())
+            selected_row[f"{view}_audio_sha256"] = waveform_hash
+        selected[speaker_id] = selected_row
+    return selected
+
+
+def read_panel_sources(
+    args: argparse.Namespace,
+    authorization: dict[str, Any],
+) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+    if PANEL_SOURCE == "tau_manifest":
+        manifest_path = require_argument(args.tau_manifest, "TAU manifest")
+        manifest_hash = require_argument(
+            args.tau_manifest_sha256,
+            "TAU manifest SHA-256",
+        )
+        observed_hash = validate_file_hash(
+            manifest_path,
+            manifest_hash,
+            "TAU AVQI sampling manifest",
+        )
+        return read_tau_manifest(manifest_path), {"tau_manifest": observed_hash}
+    if PANEL_SOURCE != "svd_unused_reserve":
+        raise ValueError(f"unknown fresh-panel source: {PANEL_SOURCE}")
+    seal_path = require_argument(args.svd_panel_seal, "SVD panel seal")
+    seal_hash = require_argument(
+        args.svd_panel_seal_sha256,
+        "SVD panel seal SHA-256",
+    )
+    sources = read_svd_panel_seal(
+        seal_path,
+        seal_hash,
+        authorization["authorized_unopened_speakers"],
+    )
+    return sources, {
+        "svd_panel_seal": seal_hash,
+        "ltas_promotion_report": authorization["promotion_report_sha256"],
+        "ltas_promotion_receipt": authorization["promotion_receipt_sha256"],
+    }
+
+
 def read_fixed_recipes(path: Path) -> list[dict[str, Any]]:
     rows = []
     with path.open(encoding="utf-8") as handle:
@@ -885,6 +1216,9 @@ def slice_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "severity=pathological_severe": (
             lambda row: row["sample_group"] == "pathological_severe"
+        ),
+        "sample_group=pathological_external": (
+            lambda row: row["sample_group"] == "pathological_external"
         ),
         "condition=rir_only": lambda row: row["condition"] == "rir_only",
         "condition=snr20": lambda row: row["condition"] == "snr20",
@@ -1168,12 +1502,12 @@ def main() -> None:
         raise FileNotFoundError(args.avqi_code_root)
 
     authorization = validate_authorization(args)
+    panel_sources, panel_source_hashes = read_panel_sources(
+        args,
+        authorization,
+    )
     source_hashes = {
-        "tau_manifest": validate_file_hash(
-            args.tau_manifest,
-            args.tau_manifest_sha256,
-            "TAU AVQI sampling manifest",
-        ),
+        **panel_source_hashes,
         "fixed_test_recipes": validate_file_hash(
             args.fixed_recipes,
             args.fixed_recipes_sha256,
@@ -1200,7 +1534,6 @@ def main() -> None:
 
     specs = panel_specs()
     panel_validation = validate_panel_specs(specs)
-    tau_rows = read_tau_manifest(args.tau_manifest)
     recipes = read_fixed_recipes(args.fixed_recipes)
     simulation_config = yaml.safe_load(
         args.simulation_config.read_text(encoding="utf-8")
@@ -1238,8 +1571,8 @@ def main() -> None:
     prepared: list[PreparedCase] = []
     try:
         for spec in specs:
-            manifest_row = tau_rows[spec.speaker_id]
-            source_path = Path(manifest_row[f"{spec.view}_audio_path"])
+            source_row = panel_sources[spec.speaker_id]
+            source_path = Path(source_row[f"{spec.view}_audio_path"])
             clean = read_clean(source_path)
             recipe = recipes[spec.recipe_index]
             if recipe.get("split") != "test" or recipe.get("target_sample_rate") != SAMPLE_RATE:
@@ -1332,6 +1665,7 @@ def main() -> None:
                 "speaker_id": spec.speaker_id,
                 "sample_group": spec.sample_group,
                 "label": "patient",
+                "source_dataset": "SVD" if PANEL_SOURCE == "svd_unused_reserve" else "TAU",
                 "view": spec.view,
                 "condition": spec.condition,
                 "recipe_index": spec.recipe_index,
@@ -1369,10 +1703,11 @@ def main() -> None:
         ),
         "avqi_scalar_coefficient_used_for_direction": False,
         "speaker_split_before_simulation": True,
+        "panel_source": PANEL_SOURCE,
         "panel_validation": panel_validation,
         "conditions": ["rir_only", "snr20", "snr10"],
         "views": ["cs", "sv"],
-        "sample_groups": ["pathological_mild", "pathological_severe"],
+        "sample_groups": list(ACTIVE_SAMPLE_GROUPS),
         "generator": {
             "candidate": "S3_500",
             "mode": "frozen_inference_only",
