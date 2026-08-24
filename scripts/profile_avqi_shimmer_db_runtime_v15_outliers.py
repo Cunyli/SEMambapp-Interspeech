@@ -36,7 +36,9 @@ DEV_ENGINEERING_MARGIN_MS = 450.0
 DEFAULT_WARM_REPEATS = 7
 INPUT_LOADER = "soundfile_float32_exact_16khz_mono"
 FROZEN_IMPLEMENTATION = "frozen_praat_per_frame_and_point"
-FASTPATH_IMPLEMENTATION = "exact_bulk_frame_and_pointprocess_matrix"
+FASTPATH_IMPLEMENTATION = (
+    "exact_vectorized_frames_reused_tmpfs_numpy_sounding"
+)
 IMPLEMENTATION_CONFIGS = {
     FROZEN_IMPLEMENTATION: {
         "frame_scan_mode": "praat_per_frame",
@@ -45,10 +47,10 @@ IMPLEMENTATION_CONFIGS = {
         "sounding_assembly_mode": "praat_extract_and_concatenate",
     },
     FASTPATH_IMPLEMENTATION: {
-        "frame_scan_mode": "numpy_exact_aligned_frames",
+        "frame_scan_mode": "numpy_vectorized_exact_aligned_frames",
         "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
-        "wav_roundtrip_mode": "praat_temp_wav",
-        "sounding_assembly_mode": "praat_extract_and_concatenate",
+        "wav_roundtrip_mode": "praat_reused_tmpfs_wav",
+        "sounding_assembly_mode": "numpy_exact_interval_slices",
     },
 }
 EXTRA_PROBE_CONFIGS = {
@@ -449,7 +451,7 @@ def main() -> None:
         }
     candidate_runtime = runtime_by_implementation[FASTPATH_IMPLEMENTATION]
     report = {
-        "schema_version": "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-v3",
+        "schema_version": "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-v4",
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
         "scope": "opened_panel_runtime_only_not_promotion",
@@ -534,7 +536,7 @@ def main() -> None:
     write_json(report_path, report)
     receipt = {
         "schema_version": (
-            "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-receipt-v3"
+            "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-receipt-v4"
         ),
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,

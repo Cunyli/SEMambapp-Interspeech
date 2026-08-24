@@ -23,10 +23,10 @@ def test_runtime_v15_outlier_scope_is_strictly_frozen() -> None:
     assert DEV_ENGINEERING_MARGIN_MS == 450.0
     assert INPUT_LOADER == "soundfile_float32_exact_16khz_mono"
     assert IMPLEMENTATION_CONFIGS[FASTPATH_IMPLEMENTATION] == {
-        "frame_scan_mode": "numpy_exact_aligned_frames",
+        "frame_scan_mode": "numpy_vectorized_exact_aligned_frames",
         "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
-        "wav_roundtrip_mode": "praat_temp_wav",
-        "sounding_assembly_mode": "praat_extract_and_concatenate",
+        "wav_roundtrip_mode": "praat_reused_tmpfs_wav",
+        "sounding_assembly_mode": "numpy_exact_interval_slices",
     }
     assert set(EXTRA_PROBE_CONFIGS) == {
         "probe_in_memory_pcm16_roundtrip",
