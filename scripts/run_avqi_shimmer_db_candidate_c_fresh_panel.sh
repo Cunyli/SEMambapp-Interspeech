@@ -9,7 +9,16 @@ ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 PILOT_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_shimmer_db_candidate_c_fresh_panel.py"
 
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_candidate_c_fresh_panel_v14_20260824_01}"
+PANEL_VERSION="${PANEL_VERSION:-v14}"
+if [[ "$PANEL_VERSION" != "v14" && "$PANEL_VERSION" != "runtime-v15" ]]; then
+  echo "Unsupported Candidate-C panel version: $PANEL_VERSION" >&2
+  exit 2
+fi
+DEFAULT_RUN_ROOT="$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_candidate_c_fresh_panel_v14_20260824_01"
+if [[ "$PANEL_VERSION" == "runtime-v15" ]]; then
+  DEFAULT_RUN_ROOT="$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_runtime_v15_fresh_panel_20260824_01"
+fi
+RUN_ROOT="${RUN_ROOT:-$DEFAULT_RUN_ROOT}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 PARTITION="${PARTITION:-gpu-v100-32g}"
@@ -34,6 +43,11 @@ SIMULATION_CONFIG="${SIMULATION_CONFIG:-$SIMULATION_ROOT/configs/phone_room_2205
 AVQI_CODE_ROOT="${AVQI_CODE_ROOT:-/scratch/work/lil14/avqi}"
 EXACT_PYTHON="${EXACT_PYTHON:-/scratch/work/lil14/.conda_envs/avqi/bin/python}"
 
+RUNTIME_V15_ROOT="${RUNTIME_V15_ROOT:-$ROOT_DIR/runs/avqi_route_c_shimmer_db_runtime_v15_equivalence_20260824_07_sinc70_safe_bound/outputs}"
+RUNTIME_V15_REPORT="${RUNTIME_V15_REPORT:-$RUNTIME_V15_ROOT/diagnostic_report.json}"
+RUNTIME_V15_RECEIPT="${RUNTIME_V15_RECEIPT:-$RUNTIME_V15_ROOT/completion_receipt.json}"
+RUNTIME_V15_WORKER="${RUNTIME_V15_WORKER:-$SOURCE_ROOT/scripts/avqi_shimmer_exact_topology_worker.py}"
+
 MECHANISM_REPORT_SHA256="${MECHANISM_REPORT_SHA256:-547e1a3dd106f5a24e218440644ef1e88a9497e6fd3d4f873eb889b7e1c86bb6}"
 MECHANISM_RECEIPT_SHA256="${MECHANISM_RECEIPT_SHA256:-9caa69fa3cc967af6a8851c802cbf2c8d1baf52f8e50f131b81e65028b6c2d48}"
 PREDICTOR_CHECKPOINT_SHA256="${PREDICTOR_CHECKPOINT_SHA256:-40b819946abdcb8a4b643fe4238d1bb4d31168a3eb2a6d6c786a61752da629bc}"
@@ -44,6 +58,9 @@ FIXED_RECIPES_SHA256="${FIXED_RECIPES_SHA256:-9f9654dd4e078cb111ee2fae0b039893b6
 SIMULATION_CONFIG_SHA256="${SIMULATION_CONFIG_SHA256:-0e665b5f3d97ad617cd1dde22a84b1ec5a8089e31b7657c7cb9989363115e276}"
 SIMULATION_SOURCE_SHA256="${SIMULATION_SOURCE_SHA256:-7f74a5727122bf3f8a6dbee297d9f3dd10165cba3bf2312bf2bd8704abc273bb}"
 AVQI_CODE_TREE_SHA256="${AVQI_CODE_TREE_SHA256:-46987b3c447cb579aab4d34e87655938e4aa64e1b28c0e2348c4ea3e48f107f2}"
+RUNTIME_V15_REPORT_SHA256="${RUNTIME_V15_REPORT_SHA256:-c2e7399eeb14a7e4f6d2c8b44402e4d4e8d0c460a24f122d903aa6c9d46b15d9}"
+RUNTIME_V15_RECEIPT_SHA256="${RUNTIME_V15_RECEIPT_SHA256:-ef56ff7066956967a8a22c977bbc92993689b295ee3bb9ec36d3de60ced3719a}"
+RUNTIME_V15_WORKER_SHA256="${RUNTIME_V15_WORKER_SHA256:-c78cdb277274a9f46153c80ca5ad8c47536e3c1009cf1b3c2b613aee744d276f}"
 SEED="${SEED:-20260824}"
 
 if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
@@ -61,6 +78,14 @@ for path in "$PILOT_SCRIPT" "$MECHANISM_REPORT" "$MECHANISM_RECEIPT" \
     exit 2
   fi
 done
+if [[ "$PANEL_VERSION" == "runtime-v15" ]]; then
+  for path in "$RUNTIME_V15_REPORT" "$RUNTIME_V15_RECEIPT" "$RUNTIME_V15_WORKER"; do
+    if [[ ! -f "$path" ]]; then
+      echo "Missing runtime-v15 fresh-panel input: $path" >&2
+      exit 2
+    fi
+  done
+fi
 if [[ ! -d "$AVQI_CODE_ROOT" ]]; then
   echo "Missing exact AVQI code tree: $AVQI_CODE_ROOT" >&2
   exit 2
@@ -87,6 +112,27 @@ verify_sha256 "$TAU_MANIFEST" "$TAU_MANIFEST_SHA256" "TAU manifest"
 verify_sha256 "$FIXED_RECIPES" "$FIXED_RECIPES_SHA256" "fixed test recipes"
 verify_sha256 "$SIMULATION_CONFIG" "$SIMULATION_CONFIG_SHA256" "simulation config"
 verify_sha256 "$SIMULATION_ROOT/simulate_degradation.py" "$SIMULATION_SOURCE_SHA256" "simulation source"
+if [[ "$PANEL_VERSION" == "runtime-v15" ]]; then
+  verify_sha256 "$RUNTIME_V15_REPORT" "$RUNTIME_V15_REPORT_SHA256" "runtime-v15 report"
+  verify_sha256 "$RUNTIME_V15_RECEIPT" "$RUNTIME_V15_RECEIPT_SHA256" "runtime-v15 receipt"
+  verify_sha256 "$RUNTIME_V15_WORKER" "$RUNTIME_V15_WORKER_SHA256" "runtime-v15 worker"
+  if [[ "$(jq -er '.decision' "$RUNTIME_V15_REPORT")" != "PASS_SHIMMER_DB_RUNTIME_V15_EXACT_EQUIVALENCE_FREEZE_FOR_NEW_PANEL" ]]; then
+    echo "runtime-v15 report did not authorize a sealed panel" >&2
+    exit 2
+  fi
+  if [[ "$(jq -er '.new_sealed_panel_authorized' "$RUNTIME_V15_REPORT")" != "true" ]]; then
+    echo "runtime-v15 sealed-panel authorization is absent" >&2
+    exit 2
+  fi
+  if [[ "$(jq -er '.runtime.formal_500ms_pass' "$RUNTIME_V15_REPORT")" != "true" ]]; then
+    echo "runtime-v15 formal 500 ms gate failed" >&2
+    exit 2
+  fi
+  if [[ "$(jq -er '.generator_optimizer_steps' "$RUNTIME_V15_RECEIPT")" != "0" ]]; then
+    echo "runtime-v15 receipt contains generator updates" >&2
+    exit 2
+  fi
+fi
 
 if [[ "$(jq -er '.candidate_c_decision' "$MECHANISM_REPORT")" != "PASS_CURRENT_OUTPUT_EXACT_TOPOLOGY_REFRESH_FREEZE_FOR_FRESH_PANEL" ]]; then
   echo "Candidate C did not authorize a fresh panel" >&2
@@ -110,6 +156,7 @@ if [[ "$(jq -er '.generator_optimizer_steps' "$MECHANISM_RECEIPT")" != "0" ]]; t
 fi
 
 export ROOT_DIR SOURCE_ROOT PILOT_SCRIPT RUN_ROOT LOG_DIR OUTPUT_DIR
+export PANEL_VERSION
 export PARTITION GPU_TYPE CPUS_PER_TASK MEMORY TIME_LIMIT
 export SOFTWARE_STACK_MODULE COMPILER_MODULE SOURCE_COMMIT
 export MECHANISM_REPORT MECHANISM_REPORT_SHA256 MECHANISM_RECEIPT
@@ -120,6 +167,9 @@ export TAU_MANIFEST_SHA256 DATA_POOL FIXED_RECIPES FIXED_RECIPES_SHA256
 export SIMULATION_ROOT SIMULATION_CONFIG SIMULATION_CONFIG_SHA256
 export SIMULATION_SOURCE_SHA256 AVQI_CODE_ROOT AVQI_CODE_TREE_SHA256
 export EXACT_PYTHON SEED
+export RUNTIME_V15_ROOT RUNTIME_V15_REPORT RUNTIME_V15_RECEIPT
+export RUNTIME_V15_WORKER RUNTIME_V15_REPORT_SHA256
+export RUNTIME_V15_RECEIPT_SHA256 RUNTIME_V15_WORKER_SHA256
 
 mkdir -p "$LOG_DIR"
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
@@ -131,9 +181,13 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     echo "Refusing to overwrite Candidate-C fresh-panel output: $OUTPUT_DIR" >&2
     exit 2
   fi
+  JOB_NAME="avqi-shim-db-fp-v14"
+  if [[ "$PANEL_VERSION" == "runtime-v15" ]]; then
+    JOB_NAME="avqi-shim-db-fp-v15"
+  fi
   sbatch \
     --parsable \
-    --job-name=avqi-shim-db-fp-v14 \
+    --job-name="$JOB_NAME" \
     --partition="$PARTITION" \
     --nodes=1 \
     --ntasks=1 \
@@ -171,6 +225,18 @@ LIVE_LOG="$LOG_DIR/shimmer_db_candidate_c_fresh_${SLURM_JOB_ID}.log"
 echo "event=start job=$SLURM_JOB_ID commit=$SOURCE_COMMIT time=$(date -Is)" | tee -a "$LIVE_LOG"
 python -c 'import os, torch; print("torch", torch.__version__); print("cuda", torch.cuda.is_available()); print("device", torch.cuda.get_device_name(0)); print("CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES"))' | tee -a "$LIVE_LOG"
 
+PILOT_EXTRA_ARGS=(--panel-version "$PANEL_VERSION")
+if [[ "$PANEL_VERSION" == "runtime-v15" ]]; then
+  PILOT_EXTRA_ARGS+=(
+    --runtime-report "$RUNTIME_V15_REPORT"
+    --runtime-report-sha256 "$RUNTIME_V15_REPORT_SHA256"
+    --runtime-receipt "$RUNTIME_V15_RECEIPT"
+    --runtime-receipt-sha256 "$RUNTIME_V15_RECEIPT_SHA256"
+    --runtime-worker-script "$RUNTIME_V15_WORKER"
+    --runtime-worker-script-sha256 "$RUNTIME_V15_WORKER_SHA256"
+  )
+fi
+
 python "$PILOT_SCRIPT" \
   --mechanism-report "$MECHANISM_REPORT" \
   --mechanism-report-sha256 "$MECHANISM_REPORT_SHA256" \
@@ -198,6 +264,7 @@ python "$PILOT_SCRIPT" \
   --slurm-job-id "$SLURM_JOB_ID" \
   --device cuda \
   --seed "$SEED" \
+  "${PILOT_EXTRA_ARGS[@]}" \
   2>&1 | tee -a "$LIVE_LOG"
 
 echo "event=complete job=$SLURM_JOB_ID time=$(date -Is)" | tee -a "$LIVE_LOG"

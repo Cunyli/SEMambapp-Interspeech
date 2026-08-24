@@ -67,6 +67,35 @@ def test_panel_rejects_previously_opened_waveform_speaker() -> None:
         namespace["validate_panel_specs"](tuple(specs))
 
 
+def test_runtime_v15_panel_is_unseen_balanced_and_recipe_locked() -> None:
+    namespace = load_namespace()
+    specs = namespace["runtime_v15_panel_specs"]()
+    report = namespace["validate_panel_specs"](
+        specs,
+        previous_speakers=namespace[
+            "RUNTIME_V15_PREVIOUS_WAVEFORM_PILOT_SPEAKERS"
+        ],
+        expected_recipe_indices=range(924, 936),
+    )
+
+    assert report["case_count"] == 12
+    assert report["speaker_count"] == 6
+    assert report["previous_waveform_speaker_overlap"] == []
+    assert report["recipe_indices"] == list(range(924, 936))
+    assert {spec.speaker_id for spec in specs} == {
+        "FD23",
+        "SD25",
+        "PD04",
+        "FD09",
+        "ÄHH32",
+        "PD_37",
+    }
+    assert not (
+        {spec.speaker_id for spec in specs}
+        & namespace["RUNTIME_V15_PREVIOUS_WAVEFORM_PILOT_SPEAKERS"]
+    )
+
+
 def test_speaker_rank_binds_salt_group_and_id() -> None:
     namespace = load_namespace()
     rank = namespace["speaker_selection_rank"]
@@ -169,6 +198,36 @@ def test_runner_binds_v13_and_never_trains_generator() -> None:
         line for line in source.splitlines() if line.lstrip().startswith("python ")
     ]
     assert all("train" not in line.lower() for line in python_lines)
+
+
+def test_runtime_v15_runner_binds_equivalence_receipts_and_gate() -> None:
+    source = (
+        REPO_ROOT
+        / "scripts"
+        / "run_avqi_shimmer_db_candidate_c_fresh_panel.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "c2e7399eeb14a7e4f6d2c8b44402e4d4e8d0c460a24f122d903aa6c9d46b15d9" in source
+    assert "ef56ff7066956967a8a22c977bbc92993689b295ee3bb9ec36d3de60ced3719a" in source
+    assert "c78cdb277274a9f46153c80ca5ad8c47536e3c1009cf1b3c2b613aee744d276f" in source
+    assert "PASS_SHIMMER_DB_RUNTIME_V15_EXACT_EQUIVALENCE_FREEZE_FOR_NEW_PANEL" in source
+    assert ".runtime.formal_500ms_pass" in source
+    assert '--panel-version "$PANEL_VERSION"' in source
+
+
+def test_runtime_v15_refresh_uses_persistent_worker_and_end_to_end_gate() -> None:
+    source = (
+        REPO_ROOT
+        / "scripts"
+        / "evaluate_avqi_shimmer_db_candidate_c_fresh_panel.py"
+    ).read_text(encoding="utf-8")
+
+    assert "with ExactShimmerTopologyWorker(" in source
+    assert "worker.refresh_current_waveforms(" in source
+    assert "highpass_mode=NUMPY_HIGHPASS_MODE" in source
+    assert 'topology["end_to_end_refresh_ms"]' in source
+    assert '"waveform_dependent_topology_cache": False' in source
+    assert '"current_output_refresh_per_waveform_step": True' in source
 
 
 def test_summarizer_extends_frozen_mechanism_with_fresh_guardrails() -> None:

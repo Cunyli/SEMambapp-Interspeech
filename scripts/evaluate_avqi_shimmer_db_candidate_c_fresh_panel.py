@@ -39,6 +39,12 @@ for import_root in (REPO_ROOT, SCRIPTS_DIR):
     sys.path.insert(0, str(import_root))
 
 from model.avqi_components import AVQI_COMPONENT_NAMES
+from avqi_shimmer_exact_topology_runtime import (
+    EXPECTED_IMPLEMENTATION as RUNTIME_V15_IMPLEMENTATION,
+    NUMPY_HIGHPASS_MODE,
+    ExactShimmerTopologyWorker,
+    topology_sha256,
+)
 from evaluate_direct_avqi_waveform_optimization import (
     aggregate_denoising,
     aggregate_pathology_guardrails,
@@ -140,6 +146,34 @@ PANEL_ROWS = (
     ("SD20", "pathological_severe", "sv", "snr10", 923),
 )
 
+RUNTIME_V15_PANEL_SELECTION_SALT = (
+    "shimmer-db-runtime-v15-fresh-panel-sealed-20260824"
+)
+RUNTIME_V15_PREVIOUS_WAVEFORM_PILOT_SPEAKERS = frozenset(
+    set(PREVIOUS_WAVEFORM_PILOT_SPEAKERS)
+    | {"SD05", "SD32", "ÄHH13", "ÄHH16", "SD17", "SD20"}
+)
+RUNTIME_V15_EXPECTED_ELIGIBLE_COUNTS = {
+    "pathological_mild": 31,
+    "pathological_severe": 30,
+}
+# Frozen from the TAU manifest by the v15 salt before any exact score from
+# these speakers was opened.  Recipes 924--935 were also unused by v14.
+RUNTIME_V15_PANEL_ROWS = (
+    ("FD23", "pathological_mild", "cs", "rir_only", 924),
+    ("FD23", "pathological_mild", "sv", "snr20", 925),
+    ("SD25", "pathological_mild", "cs", "snr10", 926),
+    ("SD25", "pathological_mild", "sv", "rir_only", 927),
+    ("PD04", "pathological_mild", "cs", "snr20", 928),
+    ("PD04", "pathological_mild", "sv", "snr10", 929),
+    ("FD09", "pathological_severe", "cs", "rir_only", 930),
+    ("FD09", "pathological_severe", "sv", "snr20", 931),
+    ("ÄHH32", "pathological_severe", "cs", "snr10", 932),
+    ("ÄHH32", "pathological_severe", "sv", "rir_only", 933),
+    ("PD_37", "pathological_severe", "cs", "snr20", 934),
+    ("PD_37", "pathological_severe", "sv", "snr10", 935),
+)
+
 
 @dataclass(frozen=True)
 class PanelSpec:
@@ -194,6 +228,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--slurm-job-id", required=True)
+    parser.add_argument(
+        "--panel-version",
+        choices=("v14", "runtime-v15"),
+        default="v14",
+    )
+    parser.add_argument("--runtime-report", type=Path)
+    parser.add_argument("--runtime-report-sha256")
+    parser.add_argument("--runtime-receipt", type=Path)
+    parser.add_argument("--runtime-receipt-sha256")
+    parser.add_argument(
+        "--runtime-worker-script",
+        type=Path,
+        default=REPO_ROOT / "scripts" / "avqi_shimmer_exact_topology_worker.py",
+    )
+    parser.add_argument("--runtime-worker-script-sha256")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=20260824)
     return parser.parse_args()
@@ -201,6 +250,10 @@ def parse_args() -> argparse.Namespace:
 
 def panel_specs() -> tuple[PanelSpec, ...]:
     return tuple(PanelSpec(*row) for row in PANEL_ROWS)
+
+
+def runtime_v15_panel_specs() -> tuple[PanelSpec, ...]:
+    return tuple(PanelSpec(*row) for row in RUNTIME_V15_PANEL_ROWS)
 
 
 def speaker_selection_rank(
@@ -214,13 +267,17 @@ def speaker_selection_rank(
     return hashlib.sha256(payload).hexdigest()
 
 
-def validate_panel_specs(specs: tuple[PanelSpec, ...]) -> dict[str, Any]:
+def validate_panel_specs(
+    specs: tuple[PanelSpec, ...],
+    previous_speakers: frozenset[str] = PREVIOUS_WAVEFORM_PILOT_SPEAKERS,
+    expected_recipe_indices: range = range(912, 924),
+) -> dict[str, Any]:
     if len(specs) != 12 or len({spec.case_id for spec in specs}) != 12:
         raise ValueError("Candidate-C fresh panel requires twelve unique cases")
     speakers = {spec.speaker_id for spec in specs}
     if len(speakers) != 6:
         raise ValueError("Candidate-C fresh panel requires six speakers")
-    if speakers & PREVIOUS_WAVEFORM_PILOT_SPEAKERS:
+    if speakers & previous_speakers:
         raise ValueError("fresh panel overlaps a previous waveform speaker")
     if Counter(spec.speaker_id for spec in specs) != Counter(
         {speaker_id: 2 for speaker_id in speakers}
@@ -246,8 +303,8 @@ def validate_panel_specs(specs: tuple[PanelSpec, ...]) -> dict[str, Any]:
         if len({spec.sample_group for spec in selected}) != 1:
             raise ValueError(f"speaker severity drift: {speaker_id}")
     recipe_indices = [spec.recipe_index for spec in specs]
-    if recipe_indices != list(range(912, 924)):
-        raise ValueError("fresh panel must use frozen recipes 912-923")
+    if recipe_indices != list(expected_recipe_indices):
+        raise ValueError("fresh panel recipe contract drift")
     return {
         "case_count": len(specs),
         "speaker_count": len(speakers),
@@ -410,9 +467,143 @@ def validate_authorization(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def validate_runtime_v15_authorization(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    required = {
+        "runtime report": args.runtime_report,
+        "runtime report SHA256": args.runtime_report_sha256,
+        "runtime receipt": args.runtime_receipt,
+        "runtime receipt SHA256": args.runtime_receipt_sha256,
+        "runtime worker SHA256": args.runtime_worker_script_sha256,
+    }
+    missing = [label for label, value in required.items() if value is None]
+    if missing:
+        raise ValueError(
+            "runtime-v15 panel is missing frozen inputs: " + ", ".join(missing)
+        )
+    report_hash = validate_file_hash(
+        args.runtime_report,
+        args.runtime_report_sha256,
+        "runtime-v15 equivalence report",
+    )
+    receipt_hash = validate_file_hash(
+        args.runtime_receipt,
+        args.runtime_receipt_sha256,
+        "runtime-v15 equivalence receipt",
+    )
+    worker_hash = validate_file_hash(
+        args.runtime_worker_script,
+        args.runtime_worker_script_sha256,
+        "runtime-v15 topology worker",
+    )
+    report = load_json(args.runtime_report)
+    receipt = load_json(args.runtime_receipt)
+    if report.get("schema_version") != (
+        "avqi-route-c-shimmer-db-runtime-v15-equivalence-v1"
+    ):
+        raise ValueError("unexpected runtime-v15 equivalence schema")
+    if report.get("decision") != (
+        "PASS_SHIMMER_DB_RUNTIME_V15_EXACT_EQUIVALENCE_FREEZE_FOR_NEW_PANEL"
+    ):
+        raise ValueError("runtime-v15 did not authorize a new sealed panel")
+    if report.get("new_sealed_panel_authorized") is not True:
+        raise ValueError("runtime-v15 sealed-panel authorization is absent")
+    if report.get("scientific_gates_changed") is not False:
+        raise ValueError("runtime-v15 changed scientific gates")
+    if float(report.get("fixed_alpha", math.nan)) != FIXED_ALPHA:
+        raise ValueError("runtime-v15 alpha drift")
+    if report.get("optimized_highpass_mode") != NUMPY_HIGHPASS_MODE:
+        raise ValueError("runtime-v15 high-pass implementation drift")
+    if report.get("implementation") != RUNTIME_V15_IMPLEMENTATION:
+        raise ValueError("runtime-v15 worker implementation drift")
+    if report.get("metric_highpass_only") is not True or report.get(
+        "emitted_waveform_full_band"
+    ) is not True:
+        raise ValueError("runtime-v15 waveform contract drift")
+    if report.get("waveform_dependent_topology_cache") is not False:
+        raise ValueError("runtime-v15 contains stale waveform topology cache")
+    if report.get("current_output_topology_refresh_per_waveform_step") is not True:
+        raise ValueError("runtime-v15 refresh contract drift")
+    equivalence = report.get("equivalence", {})
+    if not equivalence or not all(equivalence.values()):
+        raise ValueError("runtime-v15 exact equivalence is incomplete")
+    runtime = report.get("runtime", {})
+    maximum = float(
+        runtime.get("end_to_end_refresh_ms", {}).get("maximum", math.inf)
+    )
+    if (
+        runtime.get("formal_500ms_pass") is not True
+        or runtime.get("development_450ms_margin_pass") is not True
+        or maximum > CACHE_RUNTIME_MAX_MS
+    ):
+        raise ValueError("runtime-v15 latency gate failed")
+    source_hashes = report.get("source_sha256", {})
+    if source_hashes.get("worker_script") != worker_hash:
+        raise ValueError("runtime-v15 report/worker hash drift")
+    if receipt.get("artifact_sha256", {}).get(
+        "diagnostic_report.json"
+    ) != report_hash:
+        raise ValueError("runtime-v15 receipt does not bind its report")
+    if receipt.get("schema_version") != (
+        "avqi-route-c-shimmer-db-runtime-v15-receipt-v1"
+    ):
+        raise ValueError("unexpected runtime-v15 receipt schema")
+    if receipt.get("decision") != report["decision"]:
+        raise ValueError("runtime-v15 report/receipt decision drift")
+    if receipt.get("new_sealed_panel_authorized") is not True:
+        raise ValueError("runtime-v15 receipt lost panel authorization")
+    if receipt.get("generator_optimizer_steps") != 0:
+        raise ValueError("runtime-v15 receipt contains generator updates")
+    if float(receipt.get("fixed_alpha", math.nan)) != FIXED_ALPHA:
+        raise ValueError("runtime-v15 receipt alpha drift")
+    if float(receipt.get("formal_refresh_gate_ms", math.nan)) != (
+        CACHE_RUNTIME_MAX_MS
+    ):
+        raise ValueError("runtime-v15 receipt refresh gate drift")
+    if receipt.get("authoritative_training_decision") != (
+        "NO_GO_AVQI_T2_TRAINING"
+    ):
+        raise ValueError("runtime-v15 receipt training boundary drift")
+    runtime_commit = str(report["source_commit"])
+    if receipt.get("source_commit") != runtime_commit:
+        raise ValueError("runtime-v15 report/receipt source drift")
+    for relative_path in (
+        "model/avqi_components.py",
+        "scripts/avqi_shimmer_exact_topology_worker.py",
+        "scripts/avqi_shimmer_exact_topology_runtime.py",
+    ):
+        frozen_hash = git_file_sha256(runtime_commit, relative_path)
+        live_hash = sha256_file(REPO_ROOT / relative_path)
+        if live_hash != frozen_hash:
+            raise ValueError(
+                f"runtime-v15 implementation changed after freeze: {relative_path}"
+            )
+    return {
+        "decision": report["decision"],
+        "report_sha256": report_hash,
+        "receipt_sha256": receipt_hash,
+        "source_commit": runtime_commit,
+        "slurm_job_id": str(report["slurm_job_id"]),
+        "implementation": RUNTIME_V15_IMPLEMENTATION,
+        "optimized_highpass_mode": NUMPY_HIGHPASS_MODE,
+        "worker_script_sha256": worker_hash,
+        "dev_end_to_end_refresh_max_ms": maximum,
+        "formal_refresh_gate_ms": CACHE_RUNTIME_MAX_MS,
+        "development_margin_ms": 450.0,
+        "all_dev_equivalence_checks_pass": True,
+        "scientific_gates_changed": False,
+        "generator_optimizer_steps": 0,
+        "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
+    }
+
+
 def read_tau_manifest(
     path: Path,
     specs: tuple[PanelSpec, ...],
+    selection_salt: str = PANEL_SELECTION_SALT,
+    expected_eligible_counts: dict[str, int] = EXPECTED_ELIGIBLE_COUNTS,
+    previous_speakers: frozenset[str] = PREVIOUS_WAVEFORM_PILOT_SPEAKERS,
 ) -> tuple[dict[str, dict[str, str]], dict[str, Any]]:
     with path.open(encoding="utf-8-sig", newline="") as handle:
         rows = [dict(row) for row in csv.DictReader(handle)]
@@ -429,13 +620,13 @@ def read_tau_manifest(
             f"{sorted(selected_ids - set(by_speaker))}"
         )
     ranking: dict[str, list[dict[str, str]]] = {}
-    for group, expected_count in EXPECTED_ELIGIBLE_COUNTS.items():
+    for group, expected_count in expected_eligible_counts.items():
         eligible = [
             row["speaker_id"]
             for row in rows
             if row.get("sample_group") == group
             and row.get("label") == "patient"
-            and row["speaker_id"] not in PREVIOUS_WAVEFORM_PILOT_SPEAKERS
+            and row["speaker_id"] not in previous_speakers
         ]
         if len(eligible) != expected_count:
             raise ValueError(
@@ -446,7 +637,7 @@ def read_tau_manifest(
             eligible,
             key=lambda speaker_id: (
                 speaker_selection_rank(
-                    PANEL_SELECTION_SALT,
+                    selection_salt,
                     group,
                     speaker_id,
                 ),
@@ -471,7 +662,7 @@ def read_tau_manifest(
             {
                 "speaker_id": speaker_id,
                 "rank_sha256": speaker_selection_rank(
-                    PANEL_SELECTION_SALT,
+                    selection_salt,
                     group,
                     speaker_id,
                 ),
@@ -493,11 +684,11 @@ def read_tau_manifest(
                 raise FileNotFoundError(source)
     return selected, {
         "method": "sha256 rank by frozen salt, severity group, and speaker ID",
-        "salt": PANEL_SELECTION_SALT,
+        "salt": selection_salt,
         "excluded_previous_waveform_speakers": sorted(
-            PREVIOUS_WAVEFORM_PILOT_SPEAKERS
+            previous_speakers
         ),
-        "eligible_counts": dict(EXPECTED_ELIGIBLE_COUNTS),
+        "eligible_counts": dict(expected_eligible_counts),
         "ranked_first_ten": ranking,
         "selected": {
             group: [row["speaker_id"] for row in values[:3]]
@@ -641,6 +832,9 @@ def candidate_step(
                 topology["metric_constant_prefix_samples"]
             ),
         )[1]
+    pulse_refresh_runtime_ms = float(
+        topology.get("end_to_end_refresh_ms", topology["pulse_runtime_ms"])
+    )
     return {
         "path": output_path,
         "proxy_before": float(proxy_before.detach()),
@@ -651,13 +845,33 @@ def candidate_step(
         "gradient_rms": float(gradient.square().mean().sqrt()),
         "gradient_finite": bool(torch.isfinite(gradient).all()),
         "torch_step_runtime_ms": torch_runtime_ms,
-        "pulse_refresh_runtime_ms": float(topology["pulse_runtime_ms"]),
+        "pulse_refresh_runtime_ms": pulse_refresh_runtime_ms,
+        "pulse_refresh_internal_runtime_ms": float(
+            topology["pulse_runtime_ms"]
+        ),
+        "pulse_refresh_request_wall_ms": float(
+            topology.get("request_wall_ms", topology["pulse_runtime_ms"])
+        ),
+        "pulse_refresh_client_staging_ms": float(
+            topology.get("client_tmpfs_staging_ms", 0.0)
+        ),
+        "pulse_refresh_highpass_mode": topology.get(
+            "metric_highpass",
+            "praat_6_1_38_stop_hann_0_34_0p1",
+        ),
+        "pulse_refresh_highpass_peak_check_mode": topology.get(
+            "timing_ms", {}
+        ).get("highpass_peak_check_mode"),
+        "pulse_refresh_highpass_sinc70_skipped": topology.get(
+            "timing_ms", {}
+        ).get("highpass_sinc70_skipped"),
         "total_metric_step_overhead_ms": (
-            float(topology["pulse_runtime_ms"]) + torch_runtime_ms
+            pulse_refresh_runtime_ms + torch_runtime_ms
         ),
         "pulse_topology_sha256": pulse_positions_sha256(
             topology["pulse_positions_samples"]
         ),
+        "composite_topology_sha256": topology_sha256(topology),
         "pulse_count": int(topology["pulse_count"]),
         "metric_sample_count": int(topology["metric_sample_count"]),
         "metric_constant_prefix_samples": int(
@@ -773,6 +987,7 @@ def write_completion(
     summary_path.write_text(markdown_summary(report), encoding="utf-8")
     receipt = {
         "schema_version": "avqi-route-c-shimmer-db-candidate-c-fresh-receipt-v1",
+        "panel_version": report.get("panel_version", "v14"),
         "decision": report["decision"],
         "component_status": report["component_status"],
         "route_type": report["route_type"],
@@ -786,6 +1001,7 @@ def write_completion(
         "final_exact_panel_opened": True,
         "source_commit": report["source_commit"],
         "slurm_job_id": report["slurm_job_id"],
+        "runtime_v15_authorization": report.get("runtime_v15_authorization"),
         "artifact_sha256": {
             report_path.name: sha256_file(report_path),
             summary_path.name: sha256_file(summary_path),
@@ -819,6 +1035,9 @@ def main() -> None:
         raise FileNotFoundError(args.avqi_code_root)
 
     authorization = validate_authorization(args)
+    runtime_authorization: dict[str, Any] | None = None
+    if args.panel_version == "runtime-v15":
+        runtime_authorization = validate_runtime_v15_authorization(args)
     source_hashes = {
         "tau_manifest": validate_file_hash(
             args.tau_manifest,
@@ -849,9 +1068,29 @@ def main() -> None:
         )
     source_hashes["avqi_code_tree"] = observed_avqi_tree_hash
 
-    specs = panel_specs()
-    panel_validation = validate_panel_specs(specs)
-    tau_rows, selection_contract = read_tau_manifest(args.tau_manifest, specs)
+    if args.panel_version == "runtime-v15":
+        panel_selection_salt = RUNTIME_V15_PANEL_SELECTION_SALT
+        specs = runtime_v15_panel_specs()
+        panel_validation = validate_panel_specs(
+            specs,
+            previous_speakers=RUNTIME_V15_PREVIOUS_WAVEFORM_PILOT_SPEAKERS,
+            expected_recipe_indices=range(924, 936),
+        )
+        tau_rows, selection_contract = read_tau_manifest(
+            args.tau_manifest,
+            specs,
+            selection_salt=panel_selection_salt,
+            expected_eligible_counts=RUNTIME_V15_EXPECTED_ELIGIBLE_COUNTS,
+            previous_speakers=RUNTIME_V15_PREVIOUS_WAVEFORM_PILOT_SPEAKERS,
+        )
+    else:
+        panel_selection_salt = PANEL_SELECTION_SALT
+        specs = panel_specs()
+        panel_validation = validate_panel_specs(specs)
+        tau_rows, selection_contract = read_tau_manifest(
+            args.tau_manifest,
+            specs,
+        )
     recipes = read_fixed_recipes(args.fixed_recipes)
     simulation_config = yaml.safe_load(
         args.simulation_config.read_text(encoding="utf-8")
@@ -891,8 +1130,8 @@ def main() -> None:
                 )
             simulation_seed = stable_seed(
                 args.seed,
-                "avqi_shimmer_db_candidate_c_fresh_panel_v1",
-                PANEL_SELECTION_SALT,
+                f"avqi_shimmer_db_candidate_c_fresh_panel_{args.panel_version}",
+                panel_selection_salt,
                 spec.speaker_id,
                 spec.view,
                 recipe["uid"],
@@ -1007,7 +1246,12 @@ def main() -> None:
             }
         )
     panel_contract = {
-        "schema_version": "avqi-route-c-shimmer-db-candidate-c-fresh-panel-v1",
+        "schema_version": (
+            "avqi-route-c-shimmer-db-candidate-c-fresh-panel-runtime-v15-v1"
+            if args.panel_version == "runtime-v15"
+            else "avqi-route-c-shimmer-db-candidate-c-fresh-panel-v1"
+        ),
+        "panel_version": args.panel_version,
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
         "seed": args.seed,
@@ -1053,6 +1297,7 @@ def main() -> None:
             "denoising_nonregression": True,
         },
         "authorization": authorization,
+        "runtime_v15_authorization": runtime_authorization,
         "source_sha256": source_hashes,
         "rows": panel_rows,
     }
@@ -1105,11 +1350,60 @@ def main() -> None:
 
     topology_items = build_base_topology_items(prepared)
     topology_wall_started = time.perf_counter()
-    base_topology_exact = run_exact(
-        topology_items,
-        args.exact_python,
-        args.avqi_code_root,
-    )
+    runtime_worker_startup: dict[str, Any] | None = None
+    runtime_worker_startup_ms: float | None = None
+    runtime_synthetic_warmup: dict[str, Any] | None = None
+    runtime_synthetic_warmup_ms: float | None = None
+    if args.panel_version == "runtime-v15":
+        optimized_rows: list[dict[str, Any]] = []
+        with ExactShimmerTopologyWorker(
+            args.exact_python,
+            args.runtime_worker_script,
+            args.avqi_code_root,
+            args.avqi_code_tree_sha256,
+        ) as worker:
+            runtime_worker_startup = dict(worker.startup)
+            runtime_worker_startup_ms = worker.startup_ms
+            runtime_synthetic_warmup, runtime_synthetic_warmup_ms = (
+                worker.warmup()
+            )
+            for index, (case, item) in enumerate(
+                zip(prepared, topology_items, strict=True),
+                start=1,
+            ):
+                waveform = read_waveform(case.base_path).numpy()
+                refreshed, request_wall_ms, staging_rows = (
+                    worker.refresh_current_waveforms(
+                        [item],
+                        [waveform],
+                        highpass_mode=NUMPY_HIGHPASS_MODE,
+                    )
+                )
+                topology = dict(refreshed[0])
+                staging_ms = float(staging_rows[0]["staging_ms"])
+                topology["client_tmpfs_staging_ms"] = staging_ms
+                topology["request_wall_ms"] = request_wall_ms
+                topology["end_to_end_refresh_ms"] = (
+                    staging_ms + request_wall_ms
+                )
+                optimized_rows.append(topology)
+                print(
+                    f"runtime_v15_topology_refresh={index}/{len(prepared)}",
+                    flush=True,
+                )
+        base_topology_exact = {
+            "parselmouth_version": runtime_worker_startup[
+                "parselmouth_version"
+            ],
+            "praat_version": runtime_worker_startup["praat_version"],
+            "rows": optimized_rows,
+        }
+    else:
+        base_topology_exact = run_exact(
+            topology_items,
+            args.exact_python,
+            args.avqi_code_root,
+        )
     topology_batch_wall_ms = 1000.0 * (
         time.perf_counter() - topology_wall_started
     )
@@ -1149,7 +1443,12 @@ def main() -> None:
         print(f"candidate_step={index}/{len(prepared)}", flush=True)
 
     candidate_seal = {
-        "schema_version": "avqi-route-c-shimmer-db-candidate-c-seal-v1",
+        "schema_version": (
+            "avqi-route-c-shimmer-db-candidate-c-runtime-v15-seal-v1"
+            if args.panel_version == "runtime-v15"
+            else "avqi-route-c-shimmer-db-candidate-c-seal-v1"
+        ),
+        "panel_version": args.panel_version,
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
         "candidate": CANDIDATE_NAME,
@@ -1179,12 +1478,33 @@ def main() -> None:
                 "base_topology_sha256": candidate_records[
                     case.spec.case_id
                 ]["pulse_topology_sha256"],
+                "base_composite_topology_sha256": candidate_records[
+                    case.spec.case_id
+                ]["composite_topology_sha256"],
                 "unique_topology_refresh_key": (
                     f"metric_base_output:{case.spec.case_id}"
                 ),
                 "pulse_refresh_runtime_ms": candidate_records[
                     case.spec.case_id
                 ]["pulse_refresh_runtime_ms"],
+                "pulse_refresh_internal_runtime_ms": candidate_records[
+                    case.spec.case_id
+                ]["pulse_refresh_internal_runtime_ms"],
+                "pulse_refresh_request_wall_ms": candidate_records[
+                    case.spec.case_id
+                ]["pulse_refresh_request_wall_ms"],
+                "pulse_refresh_client_staging_ms": candidate_records[
+                    case.spec.case_id
+                ]["pulse_refresh_client_staging_ms"],
+                "pulse_refresh_highpass_mode": candidate_records[
+                    case.spec.case_id
+                ]["pulse_refresh_highpass_mode"],
+                "pulse_refresh_highpass_peak_check_mode": candidate_records[
+                    case.spec.case_id
+                ]["pulse_refresh_highpass_peak_check_mode"],
+                "pulse_refresh_highpass_sinc70_skipped": candidate_records[
+                    case.spec.case_id
+                ]["pulse_refresh_highpass_sinc70_skipped"],
             }
             for case in prepared
         ],
@@ -1245,11 +1565,19 @@ def main() -> None:
             np.array_equal(target_components, presealed_target)
         )
         pre_step_topology = topology_by_case[case_id]
-        base_topology_rebound = (
+        pulse_only_base_topology_rebound = (
             pulse_positions_sha256(base_row["pulse_positions_samples"])
             == pulse_positions_sha256(
                 pre_step_topology["pulse_positions_samples"]
             )
+        )
+        base_composite_topology_rebound = (
+            topology_sha256(base_row) == topology_sha256(pre_step_topology)
+        )
+        base_topology_rebound = (
+            base_composite_topology_rebound
+            if args.panel_version == "runtime-v15"
+            else pulse_only_base_topology_rebound
         )
         candidate_record = candidate_records[case_id]
         target_waveform = read_waveform(case.target_path)
@@ -1278,6 +1606,24 @@ def main() -> None:
             "pulse_refresh_runtime_ms": candidate_record[
                 "pulse_refresh_runtime_ms"
             ],
+            "pulse_refresh_internal_runtime_ms": candidate_record[
+                "pulse_refresh_internal_runtime_ms"
+            ],
+            "pulse_refresh_request_wall_ms": candidate_record[
+                "pulse_refresh_request_wall_ms"
+            ],
+            "pulse_refresh_client_staging_ms": candidate_record[
+                "pulse_refresh_client_staging_ms"
+            ],
+            "pulse_refresh_highpass_mode": candidate_record[
+                "pulse_refresh_highpass_mode"
+            ],
+            "pulse_refresh_highpass_peak_check_mode": candidate_record[
+                "pulse_refresh_highpass_peak_check_mode"
+            ],
+            "pulse_refresh_highpass_sinc70_skipped": candidate_record[
+                "pulse_refresh_highpass_sinc70_skipped"
+            ],
             "torch_step_runtime_ms": candidate_record[
                 "torch_step_runtime_ms"
             ],
@@ -1287,6 +1633,9 @@ def main() -> None:
             "unique_topology_refresh_key": f"metric_base_output:{case_id}",
             "pulse_topology_sha256": candidate_record[
                 "pulse_topology_sha256"
+            ],
+            "composite_topology_sha256": candidate_record[
+                "composite_topology_sha256"
             ],
             "base_output_exact_metric_pulse_count": candidate_record[
                 "pulse_count"
@@ -1321,6 +1670,12 @@ def main() -> None:
             ),
             "target_label_rebound": target_label_rebound,
             "base_topology_rebound": base_topology_rebound,
+            "base_pulse_only_topology_rebound": (
+                pulse_only_base_topology_rebound
+            ),
+            "base_composite_topology_rebound": (
+                base_composite_topology_rebound
+            ),
             "clean_target_topology_drives_output": False,
         }
         component_fields(
@@ -1361,8 +1716,29 @@ def main() -> None:
         if passed
         else "NO_GO_SHIMMER_DB_CANDIDATE_C_FRESH_PANEL"
     )
+    refresh_end_to_end_ms = [
+        float(record["pulse_refresh_runtime_ms"])
+        for record in candidate_records.values()
+    ]
+    refresh_internal_ms = [
+        float(record["pulse_refresh_internal_runtime_ms"])
+        for record in candidate_records.values()
+    ]
+    refresh_request_wall_ms = [
+        float(record["pulse_refresh_request_wall_ms"])
+        for record in candidate_records.values()
+    ]
+    highpass_peak_modes = Counter(
+        str(record["pulse_refresh_highpass_peak_check_mode"])
+        for record in candidate_records.values()
+    )
     report = {
-        "schema_version": "avqi-route-c-shimmer-db-candidate-c-fresh-v1",
+        "schema_version": (
+            "avqi-route-c-shimmer-db-candidate-c-fresh-runtime-v15-v1"
+            if args.panel_version == "runtime-v15"
+            else "avqi-route-c-shimmer-db-candidate-c-fresh-v1"
+        ),
+        "panel_version": args.panel_version,
         "decision": component_status,
         "component_status": component_status,
         "route_type": "hybrid_praat_assisted_straight_through_metric_branch",
@@ -1395,23 +1771,52 @@ def main() -> None:
             "unique_refresh_calls": len(topology_items),
             "alpha_candidate_count": 1,
             "topology_reused_across_alpha_candidates": False,
+            "waveform_dependent_topology_cache": False,
+            "current_output_refresh_per_waveform_step": True,
+            "optimized_highpass_mode": (
+                NUMPY_HIGHPASS_MODE
+                if args.panel_version == "runtime-v15"
+                else "praat_6_1_38_stop_hann_0_34_0p1"
+            ),
+            "worker_implementation": (
+                RUNTIME_V15_IMPLEMENTATION
+                if args.panel_version == "runtime-v15"
+                else None
+            ),
+            "worker_startup": runtime_worker_startup,
+            "worker_startup_ms": runtime_worker_startup_ms,
+            "synthetic_warmup": runtime_synthetic_warmup,
+            "synthetic_warmup_ms": runtime_synthetic_warmup_ms,
             "batch_wall_ms": topology_batch_wall_ms,
             "amortized_wall_ms_per_unique_waveform": (
                 topology_batch_wall_ms / len(topology_items)
             ),
             "internal_runtime_ms": {
-                "median": median(
-                    row["pulse_runtime_ms"]
-                    for row in base_topology_exact["rows"]
-                ),
-                "maximum": max(
-                    row["pulse_runtime_ms"]
-                    for row in base_topology_exact["rows"]
-                ),
+                "median": median(refresh_internal_ms),
+                "maximum": max(refresh_internal_ms),
                 "frozen_gate_maximum": CACHE_RUNTIME_MAX_MS,
             },
+            "request_wall_ms": {
+                "median": median(refresh_request_wall_ms),
+                "maximum": max(refresh_request_wall_ms),
+            },
+            "end_to_end_refresh_ms": {
+                "includes_client_tmpfs_staging": (
+                    args.panel_version == "runtime-v15"
+                ),
+                "median": median(refresh_end_to_end_ms),
+                "maximum": max(refresh_end_to_end_ms),
+                "frozen_gate_maximum": CACHE_RUNTIME_MAX_MS,
+                "gate_pass": max(refresh_end_to_end_ms) <= CACHE_RUNTIME_MAX_MS,
+            },
+            "highpass_peak_check_modes": dict(highpass_peak_modes),
+            "highpass_sinc70_skipped_count": sum(
+                record["pulse_refresh_highpass_sinc70_skipped"] is True
+                for record in candidate_records.values()
+            ),
         },
         "authorization": authorization,
+        "runtime_v15_authorization": runtime_authorization,
         "summary": summary,
         "artifacts": {
             "panel_contract": "panel_contract.json",
