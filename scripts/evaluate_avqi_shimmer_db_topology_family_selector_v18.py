@@ -695,6 +695,14 @@ def selector_contract() -> dict[str, Any]:
             "gradient_and_step_absolute_tolerance": (
                 "8 * dtype_epsilon * max_abs_reference"
             ),
+            "runtime_projection_backend": (
+                "CUDA; independent legacy/optimized tensors must pass the "
+                "frozen numerical tolerance"
+            ),
+            "diagnostic_report_backend": (
+                "single-thread CPU; legacy/optimized projection tensors and "
+                "report fields must be exact-equivalent"
+            ),
             "diagnostic_scalar_absolute_tolerance": (
                 "8 * float32_epsilon * max(abs(reference), abs(optimized), 1)"
             ),
@@ -1278,6 +1286,28 @@ def run_equivalence_case(
         legacy_projection_report,
         optimized_projection_report,
     )
+    cpu_waveform = context["waveform"].detach().cpu()
+    cpu_raw_gradient = context["raw_gradient"].detach().cpu()
+    legacy_cpu_projection, legacy_cpu_report = legacy_candidate_d_projection(
+        cpu_waveform,
+        cpu_raw_gradient,
+        legacy_plan,
+    )
+    optimized_cpu_projection, optimized_cpu_report = (
+        candidate_d_projection_vectorized(
+            cpu_waveform,
+            cpu_raw_gradient,
+            optimized_plan,
+        )
+    )
+    deterministic_projection_audit = tensor_equivalence(
+        legacy_cpu_projection,
+        optimized_cpu_projection,
+    )
+    deterministic_report_audit = projection_report_equivalence(
+        legacy_cpu_report,
+        optimized_cpu_report,
+    )
 
     candidate_tensors: list[torch.Tensor] = []
     paths: list[Path] = []
@@ -1391,7 +1421,22 @@ def run_equivalence_case(
         "projection_tensor_absolute_tolerance": projection_audit[
             "absolute_tolerance"
         ],
-        "projection_report_equivalence": projection_report_audit,
+        "independent_gpu_projection_report_diagnostics": (
+            projection_report_audit
+        ),
+        "deterministic_cpu_projection_bit_equal": (
+            deterministic_projection_audit["bit_equal"]
+        ),
+        "deterministic_cpu_projection_numerically_equivalent": (
+            deterministic_projection_audit["numerically_equivalent"]
+        ),
+        "deterministic_cpu_projection_maximum_abs_difference": (
+            deterministic_projection_audit["maximum_abs_difference"]
+        ),
+        "deterministic_cpu_projection_absolute_tolerance": (
+            deterministic_projection_audit["absolute_tolerance"]
+        ),
+        "projection_report_equivalence": deterministic_report_audit,
         "candidate_d_pcm_equivalence_projection_input": (
             "shared_optimized_projection_after_independent_legacy_projection_numeric_audit"
         ),
@@ -1406,7 +1451,8 @@ def run_equivalence_case(
         "equivalence_pass": (
             plan_audit["all_equal"]
             and projection_audit["numerically_equivalent"]
-            and projection_report_audit["all_equivalent"]
+            and deterministic_projection_audit["bit_equal"]
+            and deterministic_report_audit["all_equivalent"]
             and all(row["equivalence_pass"] for row in rows)
         ),
     }

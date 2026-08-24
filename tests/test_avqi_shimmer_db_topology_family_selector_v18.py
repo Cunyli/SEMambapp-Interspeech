@@ -139,6 +139,12 @@ def test_selector_contract_is_d_then_c_and_excludes_outcomes() -> None:
     assert contract["candidate_d_always_attempted"] is True
     assert contract["candidate_c_complete_ladder_on_fallback"] is True
     assert contract["formal_total_metric_step_runtime_ms"] == 500.0
+    assert contract["equivalence_numeric_contract"][
+        "runtime_projection_backend"
+    ].startswith("CUDA")
+    assert contract["equivalence_numeric_contract"][
+        "diagnostic_report_backend"
+    ].startswith("single-thread CPU")
     assert "candidate_exact_shimmer_db" in contract["forbidden_information"]
     assert "case_id" in contract["forbidden_information"]
 
