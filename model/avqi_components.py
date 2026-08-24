@@ -31,6 +31,14 @@ AVQI_COMPONENT_NAMES = (
 # weight instead of counting the same concept twice.
 AVQI_COMPONENT_LOSS_WEIGHTS = (1.0, 1.0, 0.5, 0.5, 0.5, 0.5)
 
+AVQI_V0301_INTERCEPT = 4.152
+AVQI_V0301_SCALE = 2.8902
+AVQI_V0301_COEFFICIENTS = (-0.177, -0.006, -0.037, 0.941, 0.01, 0.093)
+AVQI_V0301_EXPANDED_COEFFICIENTS = tuple(
+    coefficient * AVQI_V0301_SCALE
+    for coefficient in AVQI_V0301_COEFFICIENTS
+)
+
 TFGRID_COMPONENT_GROUPS = (
     ("periodicity", (0, 1)),
     ("amplitude_modulation", (2, 3)),
@@ -45,10 +53,10 @@ def avqi_v0301(components: torch.Tensor) -> torch.Tensor:
             f"expected {len(AVQI_COMPONENT_NAMES)} AVQI components, "
             f"got shape {tuple(components.shape)}"
         )
-    coefficients = components.new_tensor(
-        (-0.177, -0.006, -0.037, 0.941, 0.01, 0.093)
-    )
-    return (4.152 + (components * coefficients).sum(dim=-1)) * 2.8902
+    coefficients = components.new_tensor(AVQI_V0301_COEFFICIENTS)
+    return (
+        AVQI_V0301_INTERCEPT + (components * coefficients).sum(dim=-1)
+    ) * AVQI_V0301_SCALE
 
 
 def pool_shared_feature_map(feature_map: torch.Tensor) -> torch.Tensor:
