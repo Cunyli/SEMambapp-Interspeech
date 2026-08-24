@@ -52,7 +52,11 @@ def test_route_c_registry_freezes_six_slots_and_four_active_components() -> None
     )
     status = {slot.name: slot.scientific_status for slot in ROUTE_C_COMPONENT_REGISTRY}
     assert status["shimmer_db"] == "unresolved"
-    assert status["slope"] == "authority_qualified_candidate_only"
+    assert status["slope"] == "fresh_speaker_panel_pass"
+    slope_slot = next(
+        slot for slot in ROUTE_C_COMPONENT_REGISTRY if slot.name == "slope"
+    )
+    assert not slope_slot.active_in_four_component_scorer
 
 
 def test_four_active_estimator_preserves_each_source_formula() -> None:

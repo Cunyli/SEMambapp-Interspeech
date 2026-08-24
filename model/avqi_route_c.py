@@ -107,7 +107,7 @@ ROUTE_C_COMPONENT_REGISTRY = (
         AVQI_V0301_EXPANDED_COEFFICIENTS[4],
         "global_ltas_authority_candidate",
         "candidate_available",
-        "authority_qualified_candidate_only",
+        "fresh_speaker_panel_pass",
         False,
     ),
     RouteCComponentSlot(
