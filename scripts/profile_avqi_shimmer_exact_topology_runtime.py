@@ -263,10 +263,22 @@ def enumerate_point_process(point_process, sound):
     ]
 
 
-def direct_refresh(path, verify_authority):
+def read_soundfile_exact(path):
+    waveform, sample_rate = sf.read(path, dtype="float32")
+    if sample_rate != SAMPLE_RATE or waveform.ndim != 1 or waveform.size == 0:
+        raise ValueError("exact topology input must be mono 16 kHz")
+    return waveform.astype(np.float64)
+
+
+def direct_refresh(path, verify_authority, input_loader):
     total_started = time.perf_counter()
     input_started = time.perf_counter()
-    waveform = read_and_resample_signal(path, SAMPLE_RATE)
+    if input_loader == "authoritative_read_and_resample":
+        waveform = read_and_resample_signal(path, SAMPLE_RATE)
+    elif input_loader == "soundfile_float32_exact_16khz_mono":
+        waveform = read_soundfile_exact(path)
+    else:
+        raise ValueError("unsupported exact input loader: " + input_loader)
     input_read_ms = 1000.0 * (time.perf_counter() - input_started)
 
     highpass_started = time.perf_counter()
@@ -425,6 +437,7 @@ def direct_refresh(path, verify_authority):
     result = {
         "status": "ok",
         "path": path,
+        "topology_input_loader": input_loader,
         "source_sample_count": int(highpassed.size),
         "metric_sample_count": int(metric.size),
         "metric_constant_prefix_samples": int(constant_prefix),
@@ -573,6 +586,10 @@ for line in sys.stdin:
             response = direct_refresh(
                 request["path"],
                 bool(request.get("verify_authority", False)),
+                request.get(
+                    "input_loader",
+                    "authoritative_read_and_resample",
+                ),
             )
         elif request["op"] == "score":
             response = {
