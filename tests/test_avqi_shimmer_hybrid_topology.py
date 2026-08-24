@@ -11,6 +11,7 @@ from scripts.evaluate_avqi_shimmer_hybrid_topology import (
     CANDIDATE_NAMES,
     CURRENT_OUTPUT_REFRESH_ALPHAS,
     CURRENT_OUTPUT_REFRESH_CANDIDATES,
+    EXACT_SCORER,
     FIXED_ALPHA,
     GENERATOR_HOP_SIZE,
     REQUIRED_EFFECT_SLICES,
@@ -21,6 +22,7 @@ from scripts.evaluate_avqi_shimmer_hybrid_topology import (
     map_input_metric_pulses_to_output,
     metric_source_indices_from_topology,
     nearest_match_rate,
+    shared_refresh_topology_aliases,
 )
 
 
@@ -46,6 +48,24 @@ def test_hybrid_candidate_contract_is_fixed() -> None:
         "condition=snr10",
     }.issubset(REQUIRED_EFFECT_SLICES)
     assert CACHE_RECORD_MAX_BYTES == 65_536
+
+
+def test_candidate_c_exact_topology_is_direct_and_shared_per_waveform() -> None:
+    assert "def read_exact_16khz_waveform" in EXACT_SCORER
+    assert 'sf.read(path, dtype="float32")' in EXACT_SCORER
+    assert "def exact_metric_highpass" in EXACT_SCORER
+    assert "def exact_cs_metric_waveform" in EXACT_SCORER
+    assert "def exact_sv_metric_waveform" in EXACT_SCORER
+    assert "read_and_resample_signal" not in EXACT_SCORER
+    assert "get_voiced_segments" not in EXACT_SCORER
+
+    topology = {"pulse_positions_samples": [1.0, 2.0, 3.0]}
+    aliases = shared_refresh_topology_aliases(
+        [{"case_id": "case"}],
+        {"case": topology},
+    )
+    assert len(aliases) == len(CURRENT_OUTPUT_REFRESH_CANDIDATES)
+    assert all(value is topology for value in aliases.values())
 
 
 def test_nearest_match_rate_uses_sorted_detached_positions() -> None:

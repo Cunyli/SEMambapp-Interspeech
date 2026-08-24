@@ -9,12 +9,13 @@ pulses and scores all six components after every fixed bounded waveform step.
 
 The script also evaluates the already-promoted Shimmer-percent gradient, the
 frozen v6 Shimmer-dB gradient, and Candidate C: exact Praat refreshes the
-current output topology separately for each fixed alpha/step.  For CS this
-includes exact AVQI sounding/30-ms concatenation ranges; Torch gathers the
-corresponding live metric-high-passed samples, after which only the amplitude
-and dB path receives gradients.  A supervisor-frozen three-point alpha grid
-may freeze a mechanism parameter on this opened panel, but cannot promote the
-component.  No generator optimizer is loaded or run.
+current output topology once per waveform/step and reuses that immutable
+topology across the fixed alpha mechanism grid.  For CS this includes exact
+AVQI sounding/30-ms concatenation ranges; Torch gathers the corresponding live
+metric-high-passed samples, after which only the amplitude and dB path receives
+gradients.  A supervisor-frozen three-point alpha grid may freeze a mechanism
+parameter on this opened panel, but cannot promote the component.  No generator
+optimizer is loaded or run.
 """
 
 from __future__ import annotations
@@ -65,6 +66,14 @@ TOPOLOGY_COUNT_RATIO_DRIFT_MAX = 0.05
 CACHE_COVERAGE_MIN = 0.99
 CACHE_RUNTIME_MAX_MS = 500.0
 CACHE_RECORD_MAX_BYTES = 65_536
+RUNTIME_PROFILE_JOB_ID = "19906297"
+RUNTIME_PROFILE_SOURCE_COMMIT = "718a530041c5f0195dbedc29b4d52c75880186df"
+RUNTIME_PROFILE_REPORT_SHA256 = (
+    "87a2f03b1e92c89ab317fbf27a82863a2b4d92ada5941939a810643766579d00"
+)
+RUNTIME_PROFILE_REUSE_SHA256 = (
+    "27dccd990084b625f7ee459cd2d02447aea48aaaf23c01f0605dd9cd1aa3a578"
+)
 REQUIRED_EFFECT_SLICES = (
     "view=cs",
     "view=sv",
@@ -97,26 +106,23 @@ COMPONENT_PREFIXES = {
 
 
 EXACT_SCORER = r"""
+import io
 import json
+import os
 import sys
+import tempfile
 import time
 
 import numpy as np
 import parselmouth
+import soundfile as sf
 from parselmouth.praat import call
 
 sys.path.insert(0, sys.argv[1])
 from avqi_code import run_avqi
-from avqi_code.main import (
-    get_voiced_segments,
-    highpass_filter,
-    length_normalize_sv,
-    read_and_resample_signal,
-)
 
 
 SAMPLE_RATE = 16000
-MAPPING_WINDOW = 32
 
 
 def pcm16(values):
@@ -128,81 +134,226 @@ def pcm16(values):
     return np.rint(bounded * 32768.0).astype(np.int32)
 
 
-def find_monotonic_window(source, target, source_start, target_start):
-    width = min(MAPPING_WINDOW, target.size - target_start)
-    if width <= 0:
-        raise ValueError("empty exact metric mapping window")
-    candidates = (
-        np.flatnonzero(source[source_start:] == target[target_start])
-        + source_start
+def pcm16_roundtrip(values):
+    buffer = io.BytesIO()
+    sf.write(
+        buffer,
+        np.asarray(values, dtype=np.float64),
+        SAMPLE_RATE,
+        format="WAV",
+        subtype="PCM_16",
     )
-    for tolerance in (0, 1):
-        for candidate in candidates:
-            if candidate + width > source.size:
-                continue
-            error = np.max(
+    buffer.seek(0)
+    result, sample_rate = sf.read(buffer, dtype="float64")
+    if sample_rate != SAMPLE_RATE:
+        raise ValueError("PCM16 roundtrip changed sample rate")
+    return result
+
+
+def praat_wav_roundtrip(sound):
+    handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    path = handle.name
+    handle.close()
+    try:
+        call(sound, "Save as WAV file", path)
+        result, sample_rate = sf.read(path, dtype="float64")
+    finally:
+        os.unlink(path)
+    if sample_rate != SAMPLE_RATE:
+        raise ValueError("Praat WAV roundtrip changed sample rate")
+    return result
+
+
+def read_exact_16khz_waveform(path):
+    waveform, sample_rate = sf.read(path, dtype="float32")
+    if sample_rate != SAMPLE_RATE or waveform.ndim != 1 or waveform.size == 0:
+        raise ValueError("exact topology input must be mono 16 kHz")
+    return waveform.astype(np.float64)
+
+
+def exact_metric_highpass(waveform):
+    input_pcm16 = pcm16_roundtrip(waveform)
+    sound = parselmouth.Sound(input_pcm16, SAMPLE_RATE)
+    filtered = call(sound, "Filter (stop Hann band)", 0, 34, 0.1)
+    peak = float(call(filtered, "Get absolute extremum", 0, 0, "Sinc70"))
+    if peak > 0.999:
+        call(filtered, "Scale peak", 0.99)
+    return praat_wav_roundtrip(filtered)
+
+
+def exact_zero_crossing_rate(part):
+    values = np.asarray(part.values[0], dtype=np.float64)
+    left = values[:-1]
+    right = values[1:]
+    indices = np.flatnonzero(
+        ((left <= 0.0) & (right > 0.0))
+        | ((left >= 0.0) & (right < 0.0))
+    )
+    if indices.size < 2:
+        return float("nan")
+    denominator = left[indices] - right[indices]
+    fraction = np.divide(
+        left[indices],
+        denominator,
+        out=np.zeros_like(denominator),
+        where=denominator != 0.0,
+    )
+    crossings = (
+        float(part.x1)
+        + (indices.astype(np.float64) + fraction) * float(part.dx)
+    )
+    first = int(np.argmin(np.abs(crossings - 0.0025)))
+    last_candidates = np.flatnonzero(crossings[first:] >= 0.0275)
+    if last_candidates.size == 0:
+        return float("nan")
+    last = first + int(last_candidates[0])
+    distance = crossings[last] - crossings[first]
+    return (last - first) / distance
+
+
+def compress_source_indices(indices):
+    if indices.size == 0:
+        return []
+    split_points = np.flatnonzero(np.diff(indices) != 1) + 1
+    groups = np.split(indices, split_points)
+    return [[int(group[0]), int(group.size)] for group in groups]
+
+
+def exact_cs_metric_waveform(highpassed):
+    highpassed_pcm = pcm16(highpassed)
+    highpassed_sound = parselmouth.Sound(highpassed, SAMPLE_RATE)
+
+    textgrid = call(
+        highpassed_sound,
+        "To TextGrid (silences)",
+        50,
+        0.003,
+        -25,
+        0.1,
+        0.1,
+        "silence",
+        "sounding",
+    )
+    interval_count = int(call(textgrid, "Get number of intervals", 1))
+    sounding_parts = []
+    sounding_source_indices = []
+    for index in range(1, interval_count + 1):
+        label = call(textgrid, "Get label of interval", 1, index)
+        if "silence" in label:
+            continue
+        start = float(call(textgrid, "Get start point", 1, index))
+        end = float(call(textgrid, "Get end point", 1, index))
+        part = call(
+            highpassed_sound,
+            "Extract part",
+            start,
+            end,
+            "rectangular",
+            1.0,
+            "no",
+        )
+        part_values = np.asarray(part.values[0], dtype=np.float64)
+        source_start = int(round(start * SAMPLE_RATE))
+        source_end = source_start + part_values.size
+        if (
+            source_end > highpassed_pcm.size
+            or np.max(
                 np.abs(
-                    source[candidate : candidate + width]
-                    - target[target_start : target_start + width]
+                    highpassed_pcm[source_start:source_end]
+                    - pcm16(part_values)
                 )
             )
-            if error <= tolerance:
-                return int(candidate), tolerance
-    raise ValueError(
-        "no monotonic current-output source window for exact CS metric sample "
-        + str(target_start)
-    )
-
-
-def exact_cs_source_ranges(highpassed, metric):
-    source = pcm16(highpassed)
-    target = pcm16(metric)
-    constant_prefix = 0
-    while constant_prefix < target.size and target[constant_prefix] == 0:
-        constant_prefix += 1
-    ranges = []
-    target_index = constant_prefix
-    source_cursor = 0
-    while target_index < target.size:
-        source_index, tolerance = find_monotonic_window(
-            source,
-            target,
-            source_cursor,
-            target_index,
-        )
-        run = 0
-        while (
-            target_index + run < target.size
-            and source_index + run < source.size
-            and abs(
-                int(source[source_index + run])
-                - int(target[target_index + run])
-            )
-            <= tolerance
+            != 0
         ):
-            run += 1
-        if run < min(MAPPING_WINDOW, target.size - target_index):
-            raise ValueError("exact CS source mapping produced a short run")
-        ranges.append([source_index, run])
-        target_index += run
-        source_cursor = source_index + run
+            raise ValueError("sounding interval failed exact source parity")
+        sounding_parts.append(part)
+        sounding_source_indices.append(
+            np.arange(source_start, source_end, dtype=np.int64)
+        )
+    if not sounding_parts:
+        raise ValueError("exact CS preprocessing found no sounding interval")
+    only_loud = call(sounding_parts, "Concatenate")
+    only_loud_indices = np.concatenate(sounding_source_indices)
+    if only_loud_indices.size != only_loud.n_samples:
+        raise ValueError("only-loud source mapping length drift")
+
+    global_power = float(call(only_loud, "Get power in air"))
+    left = float(only_loud.xmin)
+    width = 0.03
+    right = left + width
+    extreme_right = float(only_loud.xmax) - width
+    kept_parts = []
+    kept_source_indices = []
+    while right < extreme_right:
+        part = call(
+            only_loud,
+            "Extract part",
+            left,
+            right,
+            "rectangular",
+            1.0,
+            "no",
+        )
+        partial_power = float(call(part, "Get power in air"))
+        if partial_power > global_power * 0.30:
+            zero_crossing_rate = exact_zero_crossing_rate(part)
+            if np.isfinite(zero_crossing_rate) and zero_crossing_rate < 3000.0:
+                part_values = np.asarray(part.values[0], dtype=np.float64)
+                local_start = int(
+                    round((left - float(only_loud.xmin)) * SAMPLE_RATE)
+                )
+                local_end = local_start + part_values.size
+                if local_end > only_loud_indices.size:
+                    raise ValueError("exact CS frame mapping exceeds only-loud data")
+                kept_parts.append(part_values)
+                kept_source_indices.append(
+                    only_loud_indices[local_start:local_end]
+                )
+        left += width
+        right = left + width
+    if not kept_parts:
+        raise ValueError("exact CS preprocessing retained no 30-ms frame")
+
+    constant_prefix = round(0.001 * SAMPLE_RATE)
+    metric_values = np.concatenate(
+        [np.zeros(constant_prefix, dtype=np.float64)] + kept_parts
+    )
+    metric = praat_wav_roundtrip(
+        parselmouth.Sound(metric_values, SAMPLE_RATE)
+    )
+    selected_indices = np.concatenate(kept_source_indices)
+    ranges = compress_source_indices(selected_indices)
     reconstructed = np.concatenate(
         [np.zeros(constant_prefix, dtype=np.float64)]
         + [highpassed[start : start + length] for start, length in ranges]
     )
-    difference = np.abs(pcm16(reconstructed) - target)
+    difference = np.abs(pcm16(reconstructed) - pcm16(metric))
     maximum_error = int(difference.max(initial=0))
     differing_samples = int(np.count_nonzero(difference))
     if reconstructed.size != metric.size or maximum_error != 0:
-        raise ValueError(
-            "exact CS source mapping failed waveform parity: "
-            + str(reconstructed.size)
-            + "/"
-            + str(metric.size)
-            + " max_pcm16_error="
-            + str(maximum_error)
-        )
-    return constant_prefix, ranges, maximum_error, differing_samples
+        raise ValueError("exact CS metric source mapping failed waveform parity")
+    return (
+        metric,
+        constant_prefix,
+        ranges,
+        maximum_error,
+        differing_samples,
+    )
+
+
+def exact_sv_metric_waveform(highpassed):
+    metric_sample_count = min(highpassed.size, 3 * SAMPLE_RATE)
+    crop_start = highpassed.size - metric_sample_count
+    metric = highpassed[crop_start:].copy()
+    constant_prefix = 0
+    ranges = [[int(crop_start), int(metric.size)]]
+    reconstructed = highpassed[crop_start : crop_start + metric.size]
+    difference = np.abs(pcm16(reconstructed) - pcm16(metric))
+    maximum_error = int(difference.max(initial=0))
+    differing_samples = int(np.count_nonzero(difference))
+    if maximum_error != 0:
+        raise ValueError("exact SV metric crop failed waveform parity")
+    return metric, constant_prefix, ranges, maximum_error, differing_samples
 
 
 def point_process_positions(sound):
@@ -221,42 +372,24 @@ def point_process_positions(sound):
 def pulse_positions(path, view, exact_metric_topology):
     started = time.perf_counter()
     if exact_metric_topology:
-        waveform = read_and_resample_signal(path, SAMPLE_RATE)
-        highpassed = highpass_filter(
-            "praat",
-            waveform,
-            sampling_rate=SAMPLE_RATE,
-        )
+        waveform = read_exact_16khz_waveform(path)
+        highpassed = exact_metric_highpass(waveform)
         if view == "sv":
-            metric = length_normalize_sv(
-                "praat",
-                highpassed,
-                sr=SAMPLE_RATE,
-                target_length=3.0,
-            )
-            crop_start = max(highpassed.size - metric.size, 0)
-            constant_prefix = 0
-            ranges = [[crop_start, int(metric.size)]]
-            difference = np.abs(
-                pcm16(highpassed[crop_start : crop_start + metric.size])
-                - pcm16(metric)
-            )
-            maximum_error = int(difference.max(initial=0))
-            differing_samples = int(np.count_nonzero(difference))
-            if maximum_error != 0:
-                raise ValueError("exact SV metric crop failed waveform parity")
-        elif view == "cs":
-            metric = get_voiced_segments(
-                "praat",
-                highpassed,
-                sampling_rate=SAMPLE_RATE,
-            )
             (
+                metric,
                 constant_prefix,
                 ranges,
                 maximum_error,
                 differing_samples,
-            ) = exact_cs_source_ranges(highpassed, metric)
+            ) = exact_sv_metric_waveform(highpassed)
+        elif view == "cs":
+            (
+                metric,
+                constant_prefix,
+                ranges,
+                maximum_error,
+                differing_samples,
+            ) = exact_cs_metric_waveform(highpassed)
         else:
             raise ValueError("unsupported view: " + view)
         sound = parselmouth.Sound(metric, SAMPLE_RATE)
@@ -273,6 +406,8 @@ def pulse_positions(path, view, exact_metric_topology):
             ),
             "metric_reconstruction_max_pcm16_error": maximum_error,
             "metric_reconstruction_differing_samples": differing_samples,
+            "topology_input_loader": "soundfile_float32_exact_16khz_mono",
+            "metric_highpass": "exact_in_process_praat_stop_hann_0_34_0p1",
         }
         return (
             positions,
@@ -677,6 +812,20 @@ def candidate_alpha(candidate: str) -> float:
     return CURRENT_OUTPUT_REFRESH_ALPHAS[
         CURRENT_OUTPUT_REFRESH_CANDIDATES.index(candidate)
     ]
+
+
+def shared_refresh_topology_aliases(
+    panel_rows: list[dict[str, Any]],
+    metric_output_topology_by_case: dict[str, dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Alias every frozen alpha to one detached topology per waveform."""
+    return {
+        (candidate, row["case_id"]): metric_output_topology_by_case[
+            row["case_id"]
+        ]
+        for candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES
+        for row in panel_rows
+    }
 
 
 def normalized_gradient_step(
@@ -1097,7 +1246,6 @@ def main() -> None:
 
     topology_items = []
     metric_output_topology_items = []
-    refresh_topology_items = []
     for row in panel_rows:
         for role in ("degraded_input", "base_output"):
             path_key = "degraded_path" if role == "degraded_input" else "base_path"
@@ -1122,31 +1270,14 @@ def main() -> None:
                 "exact_metric_topology": True,
             }
         )
-        for candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES:
-            refresh_topology_items.append(
-                {
-                    "id": f"refresh:{candidate}:{row['case_id']}",
-                    "case_id": row["case_id"],
-                    "role": candidate,
-                    "path": row["base_path"],
-                    "view": row["view"],
-                    "score_components": False,
-                    "exact_metric_topology": True,
-                }
-            )
     topology_exact = run_exact(
         topology_items,
         args.exact_python,
         args.avqi_code_root,
     )
-    metric_output_topology_exact = run_exact(
-        metric_output_topology_items,
-        args.exact_python,
-        args.avqi_code_root,
-    )
     refresh_batch_started = time.perf_counter()
     refresh_topology_exact = run_exact(
-        refresh_topology_items,
+        metric_output_topology_items,
         args.exact_python,
         args.avqi_code_root,
     )
@@ -1158,17 +1289,12 @@ def main() -> None:
         != topology_exact["parselmouth_version"]
         or refresh_topology_exact["praat_version"]
         != topology_exact["praat_version"]
-        or metric_output_topology_exact["parselmouth_version"]
-        != topology_exact["parselmouth_version"]
-        or metric_output_topology_exact["praat_version"]
-        != topology_exact["praat_version"]
     ):
         raise ValueError("exact runtime drift during Candidate-C refresh")
     topology_by_id = {
         row["id"]: row
         for row in (
             topology_exact["rows"]
-            + metric_output_topology_exact["rows"]
             + refresh_topology_exact["rows"]
         )
     }
@@ -1233,13 +1359,10 @@ def main() -> None:
         ]
         for row in panel_rows
     }
-    refresh_topology_by_candidate_case = {
-        (candidate, row["case_id"]): topology_by_id[
-            f"refresh:{candidate}:{row['case_id']}"
-        ]
-        for candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES
-        for row in panel_rows
-    }
+    refresh_topology_by_candidate_case = shared_refresh_topology_aliases(
+        panel_rows,
+        metric_output_topology_by_case,
+    )
 
     device = torch.device(args.device)
     predictor, calibrator, target_mean, target_scale = load_predictor(
@@ -1377,7 +1500,16 @@ def main() -> None:
                 "gradient_l2_norm": float(gradient.norm()),
                 "gradient_rms": float(gradient.square().mean().sqrt()),
                 "gradient_finite": bool(torch.isfinite(gradient).all()),
-                "pulse_topology_role": str(step_topology["role"]),
+                "pulse_topology_role": (
+                    candidate if exact_metric_branch else str(step_topology["role"])
+                ),
+                "pulse_topology_source_role": str(step_topology["role"]),
+                "unique_topology_refresh_key": (
+                    f"metric_base_output:{case_id}" if exact_metric_branch else ""
+                ),
+                "topology_reused_across_alpha_grid": bool(
+                    candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES
+                ),
                 "pulse_topology_sha256": pulse_positions_sha256(
                     step_topology["pulse_positions_samples"]
                 ),
@@ -1757,11 +1889,17 @@ def main() -> None:
                     if row["view"] == "cs"
                 ),
             },
-            "pulse_extractor_called_per_candidate_step": True,
-            "pulse_refresh_calls": len(refresh_topology_items),
+            "pulse_extractor_called_per_candidate_step": False,
+            "pulse_extractor_called_once_per_waveform_step": True,
+            "unique_pulse_refresh_calls": len(metric_output_topology_items),
+            "diagnostic_alpha_candidate_count": len(
+                CURRENT_OUTPUT_REFRESH_ALPHAS
+            ),
+            "alpha_grid_topology_reused": True,
+            "pulse_refresh_calls": len(metric_output_topology_items),
             "pulse_refresh_batch_wall_ms": refresh_batch_wall_ms,
-            "pulse_refresh_amortized_wall_ms_per_step": (
-                refresh_batch_wall_ms / len(refresh_topology_items)
+            "pulse_refresh_amortized_wall_ms_per_unique_waveform_step": (
+                refresh_batch_wall_ms / len(metric_output_topology_items)
             ),
             "pulse_refresh_internal_runtime_ms": {
                 "median": median(
@@ -1772,6 +1910,18 @@ def main() -> None:
                     row["pulse_runtime_ms"]
                     for row in refresh_topology_exact["rows"]
                 ),
+            },
+            "frozen_runtime_profile_evidence": {
+                "job_id": RUNTIME_PROFILE_JOB_ID,
+                "source_commit": RUNTIME_PROFILE_SOURCE_COMMIT,
+                "report_sha256": RUNTIME_PROFILE_REPORT_SHA256,
+                "reuse_equivalence_sha256": RUNTIME_PROFILE_REUSE_SHA256,
+                "cold_total_refresh_maximum_ms": 1158.4908701479435,
+                "warm_total_refresh_maximum_ms": 425.17857486382127,
+                "shared_refresh_maximum_ms": 420.25938304141164,
+                "authority_parity_pass": True,
+                "separate_vs_shared_exact_equivalence_count": 18,
+                "separate_vs_shared_exact_equivalence_pass": True,
             },
             "alpha_grid_frozen_before_run": list(CURRENT_OUTPUT_REFRESH_ALPHAS),
             "passing_candidates": passing_refresh_candidates,

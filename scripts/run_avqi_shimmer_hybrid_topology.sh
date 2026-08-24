@@ -8,7 +8,7 @@ ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_shimmer_hybrid_topology.py"
 
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_current_output_refresh_v11_20260824_01}"
+RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_current_output_refresh_v13_20260824_01}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 PANEL_ROOT="${PANEL_ROOT:-/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_route_c_shimmer_v6_fresh_panel_20260821_02/outputs}"
@@ -70,7 +70,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   fi
   sbatch \
     --parsable \
-    --job-name=avqi-shim-refresh-v11 \
+    --job-name=avqi-shim-refresh-v13 \
     --partition="$PARTITION" \
     --nodes=1 \
     --ntasks=1 \
