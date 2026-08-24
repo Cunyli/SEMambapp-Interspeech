@@ -35,6 +35,9 @@ IMPLEMENTATION = "exact_vectorized_frames_reused_tmpfs_numpy_sounding_v15"
 PRAAT_HIGHPASS_MODE = "praat_6_1_38_stop_hann_0_34_0p1"
 NUMPY_HIGHPASS_MODE = "numpy_official_praat_6_1_38_stop_hann_0_34_0p1"
 NUMPY_FFT_WARMUP_LENGTHS = tuple(1 << exponent for exponent in range(14, 20))
+SINC70_INTERPOLATION_DEPTH = 70
+SINC70_ABSOLUTE_WEIGHT_BOUND = 5.2
+PEAK_SCALE_TRIGGER = 0.999
 
 
 def parse_args() -> argparse.Namespace:
@@ -244,11 +247,27 @@ class ExactTopologyEngine:
         highpass_mode: str,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         peak_started = time.perf_counter()
-        peak = float(call(filtered, "Get absolute extremum", 0, 0, "Sinc70"))
+        sample_abs_max: float | None = None
+        sinc70_peak_upper_bound: float | None = None
+        peak: float | None = None
+        sinc70_skipped = False
+        peak_check_mode = "exact_praat_sinc70"
+        if highpass_mode == NUMPY_HIGHPASS_MODE:
+            sample_abs_max = float(np.max(np.abs(filtered.values)))
+            sinc70_peak_upper_bound = (
+                sample_abs_max * SINC70_ABSOLUTE_WEIGHT_BOUND
+            )
+            if sinc70_peak_upper_bound < PEAK_SCALE_TRIGGER:
+                sinc70_skipped = True
+                peak_check_mode = "proven_safe_sinc70_l1_upper_bound"
+        if not sinc70_skipped:
+            peak = float(
+                call(filtered, "Get absolute extremum", 0, 0, "Sinc70")
+            )
         peak_ms = 1000.0 * (time.perf_counter() - peak_started)
         scale_started = time.perf_counter()
         scaled = False
-        if peak > 0.999:
+        if peak is not None and peak > PEAK_SCALE_TRIGGER:
             call(filtered, "Scale peak", 0.99)
             scaled = True
         scale_ms = 1000.0 * (time.perf_counter() - scale_started)
@@ -263,6 +282,13 @@ class ExactTopologyEngine:
             "highpass_sound_construct": sound_construct_ms,
             "highpass_stop_hann_filter": filter_ms,
             "highpass_peak_extremum": peak_ms,
+            "highpass_peak_check_mode": peak_check_mode,
+            "highpass_sample_abs_max": sample_abs_max,
+            "highpass_sinc70_peak_upper_bound": sinc70_peak_upper_bound,
+            "highpass_sinc70_skipped": sinc70_skipped,
+            "highpass_sinc70_absolute_weight_bound": (
+                SINC70_ABSOLUTE_WEIGHT_BOUND
+            ),
             "highpass_scale_peak": scale_ms,
             "highpass_quantize": quantize_ms,
             "highpass_peak_value": peak,
@@ -388,6 +414,19 @@ class ExactTopologyEngine:
                 }
             )
         return rows
+
+    @staticmethod
+    def validate_sinc70_safe_bound() -> None:
+        # Praat's depth-70 kernel has 70 coefficients on each side.  From
+        # NUM_interpolate_sinc, |d| <= |sin(pi*f)| / (pi*distance).  The two
+        # nearest terms are each bounded by one; the remaining pairs by
+        # 2/(pi*k), k=1..69.  The frozen 5.2 bound is deliberately looser.
+        derived_bound = 2.0 + 2.0 / np.pi * sum(
+            1.0 / index
+            for index in range(1, SINC70_INTERPOLATION_DEPTH)
+        )
+        if not derived_bound < SINC70_ABSOLUTE_WEIGHT_BOUND:
+            raise ValueError("Sinc70 absolute-weight safety bound drift")
 
     def metric_highpass(
         self,
@@ -739,6 +778,7 @@ def main() -> None:
             f"{args.avqi_code_tree_sha256}"
         )
     validate_vectorized_zero_crossing_regression()
+    ExactTopologyEngine.validate_sinc70_safe_bound()
     engine = ExactTopologyEngine()
     print(
         READY_MARKER

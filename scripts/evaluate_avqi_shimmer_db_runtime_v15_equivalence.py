@@ -475,6 +475,18 @@ def main() -> None:
                     "highpass_peak_extremum_ms": path_timing[
                         "highpass_peak_extremum"
                     ],
+                    "highpass_peak_check_mode": path_timing[
+                        "highpass_peak_check_mode"
+                    ],
+                    "highpass_sample_abs_max": path_timing[
+                        "highpass_sample_abs_max"
+                    ],
+                    "highpass_sinc70_peak_upper_bound": path_timing[
+                        "highpass_sinc70_peak_upper_bound"
+                    ],
+                    "highpass_sinc70_skipped": path_timing[
+                        "highpass_sinc70_skipped"
+                    ],
                     "highpass_scale_peak_ms": path_timing[
                         "highpass_scale_peak"
                     ],
@@ -560,6 +572,18 @@ def main() -> None:
                         ],
                         "highpass_peak_extremum_ms": timing[
                             "highpass_peak_extremum"
+                        ],
+                        "highpass_peak_check_mode": timing[
+                            "highpass_peak_check_mode"
+                        ],
+                        "highpass_sample_abs_max": timing[
+                            "highpass_sample_abs_max"
+                        ],
+                        "highpass_sinc70_peak_upper_bound": timing[
+                            "highpass_sinc70_peak_upper_bound"
+                        ],
+                        "highpass_sinc70_skipped": timing[
+                            "highpass_sinc70_skipped"
                         ],
                         "highpass_scale_peak_ms": timing[
                             "highpass_scale_peak"
@@ -735,6 +759,9 @@ def main() -> None:
         "optimized_highpass_contract": (
             "official_praat_6_1_38_power_of_two_fft_stop_hann_"
             "33p9_to_34p1_inverse_truncate"
+        ),
+        "sinc70_scale_decision_contract": (
+            "exact_praat_sinc70_or_proven_safe_absolute_weight_bound_5p2"
         ),
         "fixed_alpha": FIXED_ALPHA,
         "scientific_gates_changed": False,

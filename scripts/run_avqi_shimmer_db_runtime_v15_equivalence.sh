@@ -9,7 +9,7 @@ SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 AUDIT_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_shimmer_db_runtime_v15_equivalence.py"
 WORKER_SCRIPT="$SOURCE_ROOT/scripts/avqi_shimmer_exact_topology_worker.py"
 
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_runtime_v15_equivalence_20260824_05_synthetic_fft_warmup}"
+RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_runtime_v15_equivalence_20260824_07_sinc70_safe_bound}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 V14_ROOT="${V14_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_candidate_c_fresh_panel_v14_20260824_01/outputs}"

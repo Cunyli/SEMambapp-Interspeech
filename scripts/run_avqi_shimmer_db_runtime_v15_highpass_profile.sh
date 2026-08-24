@@ -9,7 +9,7 @@ SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 PROFILE_SCRIPT="$SOURCE_ROOT/scripts/profile_avqi_shimmer_db_runtime_v15_highpass.py"
 WORKER_SCRIPT="$SOURCE_ROOT/scripts/avqi_shimmer_exact_topology_worker.py"
 
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_runtime_v15_highpass_profile_20260824_03}"
+RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_runtime_v15_highpass_profile_20260824_06_sinc70_safe_bound}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 V14_ROOT="${V14_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_candidate_c_fresh_panel_v14_20260824_01/outputs}"

@@ -195,6 +195,12 @@ def flatten_row(
         "highpass_sound_construct_ms": timing["highpass_sound_construct"],
         "highpass_stop_hann_filter_ms": timing["highpass_stop_hann_filter"],
         "highpass_peak_extremum_ms": timing["highpass_peak_extremum"],
+        "highpass_peak_check_mode": timing["highpass_peak_check_mode"],
+        "highpass_sample_abs_max": timing["highpass_sample_abs_max"],
+        "highpass_sinc70_peak_upper_bound": timing[
+            "highpass_sinc70_peak_upper_bound"
+        ],
+        "highpass_sinc70_skipped": timing["highpass_sinc70_skipped"],
         "highpass_scale_peak_ms": timing["highpass_scale_peak"],
         "highpass_quantize_ms": timing["highpass_quantize"],
         "textgrid_ms": timing["textgrid"],
@@ -383,7 +389,10 @@ def main() -> None:
             "stop_hann_zero_through_hz": 33.9,
             "stop_hann_transition_end_hz": 34.1,
             "inverse_output": "truncate_to_original_sample_count",
-            "sinc70_peak_and_pcm16_roundtrip_remain_praat": True,
+            "sinc70_scale_decision": (
+                "exact_praat_or_proven_safe_absolute_weight_bound_5p2"
+            ),
+            "pcm16_roundtrip_remains_praat": True,
         },
         "fixed_alpha": 0.001,
         "scientific_gates_changed": False,

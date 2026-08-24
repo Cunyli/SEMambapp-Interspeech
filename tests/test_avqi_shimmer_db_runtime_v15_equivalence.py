@@ -120,3 +120,6 @@ def test_worker_has_hash_bound_current_output_tmpfs_loader() -> None:
     assert "numpy_stop_hann_response_cache" in source
     assert "response.setflags(write=False)" in source
     assert '"panel_or_training_waveform_used": False' in source
+    assert "SINC70_ABSOLUTE_WEIGHT_BOUND = 5.2" in source
+    assert "proven_safe_sinc70_l1_upper_bound" in source
+    assert "if sinc70_peak_upper_bound < PEAK_SCALE_TRIGGER" in source
