@@ -64,8 +64,24 @@ from prepare_avqi_component_expanded_data import (
 
 
 SAMPLE_RATE = 16_000
+SHIMMER_PILOT_PROFILE = "shimmer_pulse_path_v6"
+HNR_PILOT_PROFILE = "hnr_pitch_path_v7"
 OPTIMIZED_COMPONENT = "shimmer_percent"
-SHIMMER_INDEX = AVQI_COMPONENT_NAMES.index(OPTIMIZED_COMPONENT)
+COMPONENT_INDEX = AVQI_COMPONENT_NAMES.index(OPTIMIZED_COMPONENT)
+SHIMMER_INDEX = COMPONENT_INDEX
+COMPANION_COMPONENT: str | None = "shimmer_db"
+EXPECTED_ARCHITECTURE = "direct_praat_hard_shimmer_pulse_path_v6"
+ESTIMATOR_KWARGS: dict[str, Any] = {
+    "peak_mode": "hard",
+    "shimmer_mode": "praat_pulse_path_v6",
+}
+DISPLAY_NAME = "Shimmer percent"
+VERSION_LABEL = "shimmer_v6"
+PANEL_SCHEMA_VERSION = "avqi-route-c-shimmer-fresh-panel-v1"
+FINAL_SEAL_SCHEMA_VERSION = "avqi-route-c-shimmer-final-seal-v1"
+PASS_DECISION = "PASS_SHIMMER_FRESH_SPEAKER_PANEL"
+FAIL_DECISION = "FAIL_SHIMMER_FRESH_SPEAKER_PANEL"
+CALIBRATION_NO_GO_DECISION = "NO_GO_SHIMMER_CALIBRATION_FINAL_UNOPENED"
 ALPHA_GRID = (0.0, 1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3)
 MATERIAL_GAP_THRESHOLD = 0.02
 MEDIAN_REDUCTION_GATE = 0.02
@@ -98,7 +114,7 @@ PREVIOUS_WAVEFORM_PILOT_SPEAKERS = frozenset(
 
 # Speaker split precedes recipe assignment. Within each split, CS/SV and the
 # three degradation conditions are balanced exactly (two cases per condition).
-PANEL_ROWS = (
+SHIMMER_PANEL_ROWS = (
     ("calibration", "FD26", "pathological_mild", "cs", "rir_only", 900),
     ("calibration", "FD26", "pathological_mild", "sv", "snr20", 901),
     ("calibration", "SD36", "pathological_mild", "cs", "snr10", 902),
@@ -112,6 +128,114 @@ PANEL_ROWS = (
     ("final", "SD23", "pathological_severe", "cs", "snr20", 910),
     ("final", "SD23", "pathological_severe", "sv", "snr10", 911),
 )
+
+# These HNR cases are newly simulated from unused fixed test recipes.  The
+# calibration and final speakers are disjoint.  The final speakers also avoid
+# every previously opened HNR, CPPS, or Shimmer final panel speaker.  The
+# scorer-external TAU speaker pool has otherwise been exhausted by earlier
+# component pilots, so calibration reuses three prior calibration speakers.
+HNR_PANEL_ROWS = (
+    ("calibration", "FD26", "pathological_mild", "cs", "rir_only", 940),
+    ("calibration", "FD26", "pathological_mild", "sv", "snr20", 941),
+    ("calibration", "SD36", "pathological_mild", "cs", "snr10", 942),
+    ("calibration", "SD36", "pathological_mild", "sv", "rir_only", 943),
+    ("calibration", "FD11", "pathological_severe", "cs", "snr20", 944),
+    ("calibration", "FD11", "pathological_severe", "sv", "snr10", 945),
+    ("final", "SD13", "pathological_mild", "cs", "rir_only", 946),
+    ("final", "SD13", "pathological_mild", "sv", "snr20", 947),
+    ("final", "PD_51", "pathological_severe", "cs", "snr10", 948),
+    ("final", "PD_51", "pathological_severe", "sv", "rir_only", 949),
+    ("final", "ÄHH28", "pathological_severe", "cs", "snr20", 950),
+    ("final", "ÄHH28", "pathological_severe", "sv", "snr10", 951),
+)
+
+PRIOR_FINAL_PANEL_SPEAKERS = frozenset(
+    {
+        "PD08",
+        "SD23",
+        "SD37",
+        "FD20",
+        "ÄHH05",
+        "ÄHH10",
+        "ÄHH20",
+        "ÄHH22",
+        "ÄHH25",
+        "ÄHH29",
+    }
+)
+ALL_PRIOR_PANEL_SPEAKERS = PREVIOUS_WAVEFORM_PILOT_SPEAKERS | frozenset(
+    {"FD11", "FD20", "FD26", "SD23", "SD36", "ÄHH20"}
+)
+PANEL_ROWS = SHIMMER_PANEL_ROWS
+ACTIVE_PILOT_PROFILE = SHIMMER_PILOT_PROFILE
+
+PILOT_PROFILE_CONFIGS = {
+    SHIMMER_PILOT_PROFILE: {
+        "component": "shimmer_percent",
+        "companion_component": "shimmer_db",
+        "architecture": "direct_praat_hard_shimmer_pulse_path_v6",
+        "estimator_kwargs": {
+            "peak_mode": "hard",
+            "shimmer_mode": "praat_pulse_path_v6",
+        },
+        "display_name": "Shimmer percent",
+        "version_label": "shimmer_v6",
+        "panel_rows": SHIMMER_PANEL_ROWS,
+        "panel_schema_version": "avqi-route-c-shimmer-fresh-panel-v1",
+        "final_seal_schema_version": "avqi-route-c-shimmer-final-seal-v1",
+        "pass_decision": "PASS_SHIMMER_FRESH_SPEAKER_PANEL",
+        "fail_decision": "FAIL_SHIMMER_FRESH_SPEAKER_PANEL",
+        "calibration_no_go_decision": (
+            "NO_GO_SHIMMER_CALIBRATION_FINAL_UNOPENED"
+        ),
+    },
+    HNR_PILOT_PROFILE: {
+        "component": "hnr",
+        "companion_component": None,
+        "architecture": "direct_praat_hard_hnr_pitch_path_v7",
+        "estimator_kwargs": {
+            "peak_mode": "hard",
+            "hnr_mode": "praat_pitch_path_v7",
+        },
+        "display_name": "HNR",
+        "version_label": "hnr_v7",
+        "panel_rows": HNR_PANEL_ROWS,
+        "panel_schema_version": "avqi-route-c-hnr-fresh-panel-v1",
+        "final_seal_schema_version": "avqi-route-c-hnr-final-seal-v1",
+        "pass_decision": "PASS_HNR_FRESH_SPEAKER_PANEL",
+        "fail_decision": "FAIL_HNR_FRESH_SPEAKER_PANEL",
+        "calibration_no_go_decision": "NO_GO_HNR_CALIBRATION_FINAL_UNOPENED",
+    },
+}
+
+
+def configure_pilot(profile: str) -> None:
+    try:
+        config = PILOT_PROFILE_CONFIGS[profile]
+    except KeyError as error:
+        raise ValueError(f"unknown fresh-panel profile: {profile}") from error
+    global ACTIVE_PILOT_PROFILE
+    global OPTIMIZED_COMPONENT, COMPONENT_INDEX, SHIMMER_INDEX
+    global COMPANION_COMPONENT, EXPECTED_ARCHITECTURE, ESTIMATOR_KWARGS
+    global DISPLAY_NAME, VERSION_LABEL, PANEL_ROWS
+    global PANEL_SCHEMA_VERSION, FINAL_SEAL_SCHEMA_VERSION
+    global PASS_DECISION, FAIL_DECISION, CALIBRATION_NO_GO_DECISION
+    ACTIVE_PILOT_PROFILE = profile
+    OPTIMIZED_COMPONENT = str(config["component"])
+    COMPONENT_INDEX = AVQI_COMPONENT_NAMES.index(OPTIMIZED_COMPONENT)
+    SHIMMER_INDEX = COMPONENT_INDEX
+    companion = config["companion_component"]
+    COMPANION_COMPONENT = None if companion is None else str(companion)
+    EXPECTED_ARCHITECTURE = str(config["architecture"])
+    ESTIMATOR_KWARGS = dict(config["estimator_kwargs"])
+    DISPLAY_NAME = str(config["display_name"])
+    VERSION_LABEL = str(config["version_label"])
+    PANEL_ROWS = tuple(config["panel_rows"])
+    PANEL_SCHEMA_VERSION = str(config["panel_schema_version"])
+    FINAL_SEAL_SCHEMA_VERSION = str(config["final_seal_schema_version"])
+    PASS_DECISION = str(config["pass_decision"])
+    FAIL_DECISION = str(config["fail_decision"])
+    CALIBRATION_NO_GO_DECISION = str(config["calibration_no_go_decision"])
 
 EXACT_SCORER = r"""
 import json
@@ -184,6 +308,11 @@ class PreparedCase:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--pilot-profile",
+        choices=tuple(PILOT_PROFILE_CONFIGS),
+        default=SHIMMER_PILOT_PROFILE,
+    )
     parser.add_argument("--authorization-consensus", type=Path, required=True)
     parser.add_argument("--authorization-consensus-sha256", required=True)
     parser.add_argument(
@@ -230,7 +359,7 @@ def panel_specs() -> tuple[PanelSpec, ...]:
 
 def validate_panel_specs(specs: tuple[PanelSpec, ...]) -> dict[str, Any]:
     if len(specs) != 12 or len({spec.case_id for spec in specs}) != 12:
-        raise ValueError("fresh Shimmer panel must contain twelve unique cases")
+        raise ValueError("fresh component panel must contain twelve unique cases")
     split_speakers = {
         split: {spec.speaker_id for spec in specs if spec.split == split}
         for split in ("calibration", "final")
@@ -239,8 +368,20 @@ def validate_panel_specs(specs: tuple[PanelSpec, ...]) -> dict[str, Any]:
         raise ValueError(f"expected three speakers per split: {split_speakers}")
     if split_speakers["calibration"] & split_speakers["final"]:
         raise ValueError("calibration and final speakers overlap")
-    if set.union(*split_speakers.values()) & PREVIOUS_WAVEFORM_PILOT_SPEAKERS:
+    all_speakers = set.union(*split_speakers.values())
+    prior_speakers = (
+        PREVIOUS_WAVEFORM_PILOT_SPEAKERS
+        if ACTIVE_PILOT_PROFILE == SHIMMER_PILOT_PROFILE
+        else ALL_PRIOR_PANEL_SPEAKERS
+    )
+    previous_overlap = all_speakers & prior_speakers
+    if ACTIVE_PILOT_PROFILE == SHIMMER_PILOT_PROFILE and previous_overlap:
         raise ValueError("fresh panel overlaps a previous waveform pilot speaker")
+    prior_final_overlap = split_speakers["final"] & PRIOR_FINAL_PANEL_SPEAKERS
+    if ACTIVE_PILOT_PROFILE == HNR_PILOT_PROFILE and prior_final_overlap:
+        raise ValueError(
+            "HNR final panel overlaps a previously opened final-panel speaker"
+        )
     for split in split_speakers:
         selected = [spec for spec in specs if spec.split == split]
         if {spec.view for spec in selected} != {"cs", "sv"}:
@@ -273,7 +414,8 @@ def validate_panel_specs(specs: tuple[PanelSpec, ...]) -> dict[str, Any]:
             split: sorted(speakers)
             for split, speakers in split_speakers.items()
         },
-        "previous_waveform_pilot_overlap": [],
+        "previous_waveform_pilot_overlap": sorted(previous_overlap),
+        "previous_final_panel_overlap": sorted(prior_final_overlap),
         "recipe_indices": recipe_indices,
     }
 
@@ -395,7 +537,9 @@ def validate_authorization(args: argparse.Namespace) -> dict[str, Any]:
     if promotion.get("decision") != "GO_BOUNDED_ROUTE_C_WAVEFORM_PILOT":
         raise ValueError("Route C consensus does not authorize a bounded pilot")
     if OPTIMIZED_COMPONENT not in promotion.get("components", []):
-        raise ValueError("Shimmer percent is absent from the authorized components")
+        raise ValueError(
+            f"{DISPLAY_NAME} is absent from the authorized components"
+        )
     route_consensus = consensus.get("routes", {}).get(
         "direct_differentiable_estimator",
         {},
@@ -405,7 +549,11 @@ def validate_authorization(args: argparse.Namespace) -> dict[str, Any]:
     if route_consensus.get("component_pass_counts", {}).get(
         OPTIMIZED_COMPONENT
     ) != 3:
-        raise ValueError("Shimmer percent did not pass all three confirmation seeds")
+        raise ValueError(
+            f"{DISPLAY_NAME} did not pass all three confirmation seeds"
+        )
+    if route_consensus.get("selected_form") != EXPECTED_ARCHITECTURE:
+        raise ValueError("Route C consensus selected form differs")
     if consensus.get("generator_optimizer_steps") != 0:
         raise ValueError("consensus contains generator updates")
     if consensus.get("formal_pathology_training_submitted") is not False:
@@ -437,17 +585,16 @@ def validate_authorization(args: argparse.Namespace) -> dict[str, Any]:
     if screen.get("contract", {}).get("route_scope") != "direct_only":
         raise ValueError("screen is not Route-C-only")
     route = screen.get("routes", {}).get("direct_differentiable_estimator", {})
-    architecture = "direct_praat_hard_shimmer_pulse_path_v6"
-    if route.get("selected_architecture") != architecture:
-        raise ValueError("screen did not select the v6 Shimmer pulse path")
+    if route.get("selected_architecture") != EXPECTED_ARCHITECTURE:
+        raise ValueError("screen did not select the expected component formula")
     if OPTIMIZED_COMPONENT not in route.get("eligible_components", []):
-        raise ValueError("screen did not qualify Shimmer percent")
-    shimmer_gradient = route.get("gradient", {}).get(
+        raise ValueError(f"screen did not qualify {DISPLAY_NAME}")
+    component_gradient = route.get("gradient", {}).get(
         "component_input_gradients",
         {},
     ).get(OPTIMIZED_COMPONENT, {})
-    if shimmer_gradient.get("decision") != "PASS":
-        raise ValueError("screen Shimmer-percent gradient did not pass")
+    if component_gradient.get("decision") != "PASS":
+        raise ValueError(f"screen {DISPLAY_NAME} gradient did not pass")
     if screen.get("contract", {}).get("source_sha256", {}).get("config") != (
         generator_config_hash
     ):
@@ -488,7 +635,9 @@ def validate_authorization(args: argparse.Namespace) -> dict[str, Any]:
         "screen_source_commit": screen_commit,
         "screen_model_source_sha256": screen_model_hash,
         "pilot_model_source_sha256": live_model_hash,
-        "screen_gradient_norm": float(shimmer_gradient["gradient_norm"]),
+        "pilot_profile": ACTIVE_PILOT_PROFILE,
+        "selected_architecture": EXPECTED_ARCHITECTURE,
+        "screen_gradient_norm": float(component_gradient["gradient_norm"]),
     }
 
 
@@ -502,14 +651,12 @@ def load_predictor(
     torch.Tensor,
 ]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    architecture = "direct_praat_hard_shimmer_pulse_path_v6"
-    if checkpoint.get("architecture") != architecture:
+    if checkpoint.get("architecture") != EXPECTED_ARCHITECTURE:
         raise ValueError(f"unexpected Route C checkpoint: {checkpoint.get('architecture')}")
     if tuple(checkpoint.get("components", ())) != AVQI_COMPONENT_NAMES:
         raise ValueError("Route C checkpoint component order differs")
     predictor = PraatDifferentiableAVQIComponentEstimator(
-        peak_mode="hard",
-        shimmer_mode="praat_pulse_path_v6",
+        **ESTIMATOR_KWARGS,
     ).to(device)
     predictor.load_state_dict(checkpoint["state_dict"], strict=True)
     predictor.eval()
@@ -696,10 +843,16 @@ def summarize_slice(
     *,
     require_gate: bool,
 ) -> dict[str, Any]:
-    material = [row for row in rows if row["material_shimmer_percent_gap"]]
-    before = [row["exact_absolute_gap_before_shimmer_percent"] for row in material]
-    after = [row["exact_absolute_gap_after_shimmer_percent"] for row in material]
-    reductions = [row["exact_normalized_gap_reduction_shimmer_percent"] for row in material]
+    material_key = f"material_{OPTIMIZED_COMPONENT}_gap"
+    exact_before_key = f"exact_absolute_gap_before_{OPTIMIZED_COMPONENT}"
+    exact_after_key = f"exact_absolute_gap_after_{OPTIMIZED_COMPONENT}"
+    exact_reduction_key = (
+        f"exact_normalized_gap_reduction_{OPTIMIZED_COMPONENT}"
+    )
+    material = [row for row in rows if row[material_key]]
+    before = [row[exact_before_key] for row in material]
+    after = [row[exact_after_key] for row in material]
+    reductions = [row[exact_reduction_key] for row in material]
     improvement = improvement_fraction_or_none(before, after)
     median_reduction = median_or_none(reductions)
     gates = {
@@ -748,27 +901,37 @@ def slice_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def summarize_rows(rows: list[dict[str, Any]], expected_rows: int) -> dict[str, Any]:
     coverage_passed = len(rows) == expected_rows
-    material = [row for row in rows if row["material_shimmer_percent_gap"]]
-    exact_before = [
-        row["exact_absolute_gap_before_shimmer_percent"] for row in material
-    ]
-    exact_after = [
-        row["exact_absolute_gap_after_shimmer_percent"] for row in material
-    ]
-    exact_reductions = [
-        row["exact_normalized_gap_reduction_shimmer_percent"] for row in material
-    ]
-    proxy_before = [row["proxy_absolute_gap_before_shimmer_percent"] for row in material]
-    proxy_after = [row["proxy_absolute_gap_after_shimmer_percent"] for row in material]
-    proxy_reductions = [
-        row["proxy_normalized_gap_reduction_shimmer_percent"] for row in material
-    ]
+    material_key = f"material_{OPTIMIZED_COMPONENT}_gap"
+    exact_before_key = f"exact_absolute_gap_before_{OPTIMIZED_COMPONENT}"
+    exact_after_key = f"exact_absolute_gap_after_{OPTIMIZED_COMPONENT}"
+    exact_reduction_key = (
+        f"exact_normalized_gap_reduction_{OPTIMIZED_COMPONENT}"
+    )
+    proxy_before_key = f"proxy_absolute_gap_before_{OPTIMIZED_COMPONENT}"
+    proxy_after_key = f"proxy_absolute_gap_after_{OPTIMIZED_COMPONENT}"
+    proxy_reduction_key = (
+        f"proxy_normalized_gap_reduction_{OPTIMIZED_COMPONENT}"
+    )
+    material = [row for row in rows if row[material_key]]
+    exact_before = [row[exact_before_key] for row in material]
+    exact_after = [row[exact_after_key] for row in material]
+    exact_reductions = [row[exact_reduction_key] for row in material]
+    proxy_before = [row[proxy_before_key] for row in material]
+    proxy_after = [row[proxy_after_key] for row in material]
+    proxy_reductions = [row[proxy_reduction_key] for row in material]
     exact_improvement = improvement_fraction_or_none(exact_before, exact_after)
     proxy_improvement = improvement_fraction_or_none(proxy_before, proxy_after)
     exact_median_reduction = median_or_none(exact_reductions)
     proxy_median_reduction = median_or_none(proxy_reductions)
-    db_reduction = median_or_none(
-        [row["exact_normalized_gap_reduction_shimmer_db"] for row in rows]
+    companion_reduction = (
+        None
+        if COMPANION_COMPONENT is None
+        else median_or_none(
+            [
+                row[f"exact_normalized_gap_reduction_{COMPANION_COMPONENT}"]
+                for row in rows
+            ]
+        )
     )
     nonselected = {}
     for component in AVQI_COMPONENT_NAMES:
@@ -799,7 +962,7 @@ def summarize_rows(rows: list[dict[str, Any]], expected_rows: int) -> dict[str, 
         "reason": "incomplete candidate coverage",
     }
     slices = slice_summaries(rows) if coverage_passed else {}
-    gates = {
+    gates: dict[str, bool] = {
         "complete_case_coverage": coverage_passed,
         "material_cases_ge_5": len(material) >= 5,
         "exact_improvement_fraction_ge_0_80": (
@@ -818,9 +981,6 @@ def summarize_rows(rows: list[dict[str, Any]], expected_rows: int) -> dict[str, 
             proxy_median_reduction is not None
             and proxy_median_reduction >= MEDIAN_REDUCTION_GATE
         ),
-        "exact_shimmer_db_median_reduction_nonnegative": (
-            db_reduction is not None and db_reduction >= 0.0
-        ),
         "all_nonselected_component_medians_within_0_05": all(
             item["decision"] == "PASS" for item in nonselected.values()
         ),
@@ -830,19 +990,26 @@ def summarize_rows(rows: list[dict[str, Any]], expected_rows: int) -> dict[str, 
         "full_band_pathology_guardrails": pathology["decision"] == "PASS",
         "denoising_nonregression": denoising["decision"] == "PASS",
     }
-    return {
+    if COMPANION_COMPONENT is not None:
+        gates[f"exact_{COMPANION_COMPONENT}_median_reduction_nonnegative"] = (
+            companion_reduction is not None and companion_reduction >= 0.0
+        )
+    exact_summary_key = f"exact_{OPTIMIZED_COMPONENT}"
+    proxy_summary_key = f"proxy_{OPTIMIZED_COMPONENT}"
+    summary = {
         "rows": len(rows),
         "expected_rows": expected_rows,
         "material_rows": len(material),
-        "exact_shimmer_percent": {
+        exact_summary_key: {
             "improvement_fraction_material": exact_improvement,
             "median_normalized_gap_reduction_material": exact_median_reduction,
         },
-        "proxy_shimmer_percent": {
+        proxy_summary_key: {
             "improvement_fraction_material": proxy_improvement,
             "median_normalized_gap_reduction_material": proxy_median_reduction,
         },
-        "exact_shimmer_db_median_normalized_gap_reduction": db_reduction,
+        "companion_component": COMPANION_COMPONENT,
+        "exact_companion_median_normalized_gap_reduction": companion_reduction,
         "nonselected_components": nonselected,
         "safety": {
             "worst_residual_rms_db": worst_residual,
@@ -855,6 +1022,11 @@ def summarize_rows(rows: list[dict[str, Any]], expected_rows: int) -> dict[str, 
         "gates": gates,
         "decision": "PASS" if all(gates.values()) else "FAIL",
     }
+    if COMPANION_COMPONENT is not None:
+        summary[
+            f"exact_{COMPANION_COMPONENT}_median_normalized_gap_reduction"
+        ] = companion_reduction
+    return summary
 
 
 def choose_calibration_alpha(
@@ -867,11 +1039,12 @@ def choose_calibration_alpha(
     ]
     if not passing:
         return None
+    exact_summary_key = f"exact_{OPTIMIZED_COMPONENT}"
     return min(
         passing,
         key=lambda alpha: (
             -float(
-                summaries[alpha]["exact_shimmer_percent"]
+                summaries[alpha][exact_summary_key]
                 ["median_normalized_gap_reduction_material"]
             ),
             alpha,
@@ -937,13 +1110,14 @@ def write_completion(
 def markdown_summary(report: dict[str, Any]) -> str:
     calibration = report["calibration"]
     final = report.get("final")
+    exact_summary_key = f"exact_{OPTIMIZED_COMPONENT}"
     lines = [
-        "# Route C Shimmer v6 fresh speaker-disjoint waveform pilot",
+        f"# Route C {DISPLAY_NAME} fresh speaker-disjoint waveform pilot",
         "",
         f"**Decision:** `{report['decision']}`",
         "",
         (
-            "This pilot isolates Shimmer percent. S3_500 was used only for "
+            f"This pilot isolates {DISPLAY_NAME}. S3_500 was used only for "
             "frozen inference; no generator parameter was updated."
         ),
         "",
@@ -951,15 +1125,15 @@ def markdown_summary(report: dict[str, Any]) -> str:
         "|---|---:|---:|---:|",
         (
             f"| calibration | {calibration['material_rows']} | "
-            f"{calibration['exact_shimmer_percent']['improvement_fraction_material']} | "
-            f"{calibration['exact_shimmer_percent']['median_normalized_gap_reduction_material']} |"
+            f"{calibration[exact_summary_key]['improvement_fraction_material']} | "
+            f"{calibration[exact_summary_key]['median_normalized_gap_reduction_material']} |"
         ),
     ]
     if final is not None:
         lines.append(
             f"| final | {final['material_rows']} | "
-            f"{final['exact_shimmer_percent']['improvement_fraction_material']} | "
-            f"{final['exact_shimmer_percent']['median_normalized_gap_reduction_material']} |"
+            f"{final[exact_summary_key]['improvement_fraction_material']} | "
+            f"{final[exact_summary_key]['median_normalized_gap_reduction_material']} |"
         )
     lines.extend(
         [
@@ -981,6 +1155,7 @@ def markdown_summary(report: dict[str, Any]) -> str:
 
 def main() -> None:
     args = parse_args()
+    configure_pilot(args.pilot_profile)
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite output: {args.output_dir}")
     if repository_head(REPO_ROOT) != args.source_commit:
@@ -1071,7 +1246,7 @@ def main() -> None:
                 raise ValueError(f"fixed recipe contract drift at {spec.recipe_index}")
             simulation_seed = stable_seed(
                 args.seed,
-                "avqi_shimmer_fresh_panel_v1",
+                f"avqi_{VERSION_LABEL}_fresh_panel_v1",
                 spec.split,
                 spec.speaker_id,
                 spec.view,
@@ -1181,10 +1356,18 @@ def main() -> None:
             }
         )
     panel_contract = {
-        "schema_version": "avqi-route-c-shimmer-fresh-panel-v1",
+        "schema_version": PANEL_SCHEMA_VERSION,
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
         "seed": args.seed,
+        "pilot_profile": ACTIVE_PILOT_PROFILE,
+        "isolated_component": OPTIMIZED_COMPONENT,
+        "selected_architecture": EXPECTED_ARCHITECTURE,
+        "loss_target": (
+            "normalized bidirectional gap to same-speaker clean pathological "
+            "CS/SV target"
+        ),
+        "avqi_scalar_coefficient_used_for_direction": False,
         "speaker_split_before_simulation": True,
         "panel_validation": panel_validation,
         "conditions": ["rir_only", "snr20", "snr10"],
@@ -1258,12 +1441,14 @@ def main() -> None:
             base,
         )
         loss = (
-            (base_proxy[0, SHIMMER_INDEX] - target_proxy[0, SHIMMER_INDEX])
-            / target_scale[SHIMMER_INDEX].clamp_min(1e-8)
+            (base_proxy[0, COMPONENT_INDEX] - target_proxy[0, COMPONENT_INDEX])
+            / target_scale[COMPONENT_INDEX].clamp_min(1e-8)
         ).square()
         gradient = torch.autograd.grad(loss, base)[0]
         if not torch.isfinite(gradient).all():
-            raise RuntimeError(f"non-finite Shimmer gradient: {case.spec.case_id}")
+            raise RuntimeError(
+                f"non-finite {DISPLAY_NAME} gradient: {case.spec.case_id}"
+            )
         gradient_rms = float(gradient.square().mean().sqrt())
         for alpha_index, alpha in enumerate(ALPHA_GRID):
             candidate = candidate_from_gradient(base, gradient, alpha)
@@ -1343,20 +1528,30 @@ def main() -> None:
             proxy_target = candidate_record["proxy_target"]
             proxy_before = candidate_record["proxy_before"]
             proxy_after = candidate_record["proxy_after"]
-            row["proxy_absolute_gap_before_shimmer_percent"] = abs(
-                float(proxy_before[SHIMMER_INDEX] - proxy_target[SHIMMER_INDEX])
+            proxy_before_key = f"proxy_absolute_gap_before_{OPTIMIZED_COMPONENT}"
+            proxy_after_key = f"proxy_absolute_gap_after_{OPTIMIZED_COMPONENT}"
+            proxy_reduction_key = (
+                f"proxy_normalized_gap_reduction_{OPTIMIZED_COMPONENT}"
             )
-            row["proxy_absolute_gap_after_shimmer_percent"] = abs(
-                float(proxy_after[SHIMMER_INDEX] - proxy_target[SHIMMER_INDEX])
+            row[proxy_before_key] = abs(
+                float(
+                    proxy_before[COMPONENT_INDEX]
+                    - proxy_target[COMPONENT_INDEX]
+                )
             )
-            row["proxy_normalized_gap_reduction_shimmer_percent"] = (
-                row["proxy_absolute_gap_before_shimmer_percent"]
-                - row["proxy_absolute_gap_after_shimmer_percent"]
-            ) / max(float(scales[SHIMMER_INDEX]), 1e-8)
+            row[proxy_after_key] = abs(
+                float(
+                    proxy_after[COMPONENT_INDEX]
+                    - proxy_target[COMPONENT_INDEX]
+                )
+            )
+            row[proxy_reduction_key] = (
+                row[proxy_before_key] - row[proxy_after_key]
+            ) / max(float(scales[COMPONENT_INDEX]), 1e-8)
             component_fields(row, target_exact, base_exact, candidate_exact, scales)
-            row["material_shimmer_percent_gap"] = (
-                row["exact_absolute_gap_before_shimmer_percent"]
-                / max(float(scales[SHIMMER_INDEX]), 1e-8)
+            row[f"material_{OPTIMIZED_COMPONENT}_gap"] = (
+                row[f"exact_absolute_gap_before_{OPTIMIZED_COMPONENT}"]
+                / max(float(scales[COMPONENT_INDEX]), 1e-8)
                 > MATERIAL_GAP_THRESHOLD
             )
             row.update(waveform_safety(base_waveform, candidate_waveform))
@@ -1386,7 +1581,7 @@ def main() -> None:
         "selection_rule": (
             "among nonzero alphas passing every calibration exact, proxy, "
             "non-target, full-band, residual, and denoising gate, maximize "
-            "median exact Shimmer-percent normalized gap reduction; tie to "
+            f"median exact {DISPLAY_NAME} normalized gap reduction; tie to "
             "the smaller alpha"
         ),
         "selected_alpha": selected_alpha,
@@ -1401,18 +1596,19 @@ def main() -> None:
     write_csv(args.output_dir / "calibration_alpha_results.csv", calibration_csv_rows)
 
     if selected_alpha is None:
+        exact_summary_key = f"exact_{OPTIMIZED_COMPONENT}"
         report = {
-            "decision": "NO_GO_SHIMMER_CALIBRATION_FINAL_UNOPENED",
+            "decision": CALIBRATION_NO_GO_DECISION,
             "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
             "final_exact_panel_opened": False,
             "selected_alpha": None,
             "calibration": max(
                 calibration_summaries.values(),
                 key=lambda item: (
-                    item["exact_shimmer_percent"][
+                    item[exact_summary_key][
                         "median_normalized_gap_reduction_material"
                     ]
-                    if item["exact_shimmer_percent"][
+                    if item[exact_summary_key][
                         "median_normalized_gap_reduction_material"
                     ]
                     is not None
@@ -1450,8 +1646,8 @@ def main() -> None:
             base,
         )
         loss = (
-            (base_proxy[0, SHIMMER_INDEX] - target_proxy[0, SHIMMER_INDEX])
-            / target_scale[SHIMMER_INDEX].clamp_min(1e-8)
+            (base_proxy[0, COMPONENT_INDEX] - target_proxy[0, COMPONENT_INDEX])
+            / target_scale[COMPONENT_INDEX].clamp_min(1e-8)
         ).square()
         gradient = torch.autograd.grad(loss, base)[0]
         candidate = candidate_from_gradient(base, gradient, selected_alpha)
@@ -1460,7 +1656,7 @@ def main() -> None:
                 f"selected alpha is invalid on sealed final case: {case.spec.case_id}"
             )
         candidate_path = final_candidate_root / (
-            f"{safe_case_name(case.spec)}__shimmer_v6.wav"
+            f"{safe_case_name(case.spec)}__{VERSION_LABEL}.wav"
         )
         sf.write(
             candidate_path,
@@ -1486,7 +1682,7 @@ def main() -> None:
         }
 
     final_panel_seal = {
-        "schema_version": "avqi-route-c-shimmer-final-seal-v1",
+        "schema_version": FINAL_SEAL_SCHEMA_VERSION,
         "selected_alpha": selected_alpha,
         "alpha_selection_sha256": sha256_file(args.output_dir / "alpha_selection.json"),
         "exact_final_scoring_started_after_this_seal": True,
@@ -1571,20 +1767,30 @@ def main() -> None:
         proxy_target = candidate_record["proxy_target"]
         proxy_before = candidate_record["proxy_before"]
         proxy_after = candidate_record["proxy_after"]
-        row["proxy_absolute_gap_before_shimmer_percent"] = abs(
-            float(proxy_before[SHIMMER_INDEX] - proxy_target[SHIMMER_INDEX])
+        proxy_before_key = f"proxy_absolute_gap_before_{OPTIMIZED_COMPONENT}"
+        proxy_after_key = f"proxy_absolute_gap_after_{OPTIMIZED_COMPONENT}"
+        proxy_reduction_key = (
+            f"proxy_normalized_gap_reduction_{OPTIMIZED_COMPONENT}"
         )
-        row["proxy_absolute_gap_after_shimmer_percent"] = abs(
-            float(proxy_after[SHIMMER_INDEX] - proxy_target[SHIMMER_INDEX])
+        row[proxy_before_key] = abs(
+            float(
+                proxy_before[COMPONENT_INDEX]
+                - proxy_target[COMPONENT_INDEX]
+            )
         )
-        row["proxy_normalized_gap_reduction_shimmer_percent"] = (
-            row["proxy_absolute_gap_before_shimmer_percent"]
-            - row["proxy_absolute_gap_after_shimmer_percent"]
-        ) / max(float(scales[SHIMMER_INDEX]), 1e-8)
+        row[proxy_after_key] = abs(
+            float(
+                proxy_after[COMPONENT_INDEX]
+                - proxy_target[COMPONENT_INDEX]
+            )
+        )
+        row[proxy_reduction_key] = (
+            row[proxy_before_key] - row[proxy_after_key]
+        ) / max(float(scales[COMPONENT_INDEX]), 1e-8)
         component_fields(row, target_exact, base_exact, candidate_exact, scales)
-        row["material_shimmer_percent_gap"] = (
-            row["exact_absolute_gap_before_shimmer_percent"]
-            / max(float(scales[SHIMMER_INDEX]), 1e-8)
+        row[f"material_{OPTIMIZED_COMPONENT}_gap"] = (
+            row[f"exact_absolute_gap_before_{OPTIMIZED_COMPONENT}"]
+            / max(float(scales[COMPONENT_INDEX]), 1e-8)
             > MATERIAL_GAP_THRESHOLD
         )
         row.update(waveform_safety(base_waveform, candidate_waveform))
@@ -1600,16 +1806,12 @@ def main() -> None:
     final_summary = finalize_summary(
         summarize_rows(final_rows, expected_rows=len(final_cases))
     )
-    decision = (
-        "PASS_SHIMMER_FRESH_SPEAKER_PANEL"
-        if final_summary["decision"] == "PASS"
-        else "FAIL_SHIMMER_FRESH_SPEAKER_PANEL"
-    )
+    decision = PASS_DECISION if final_summary["decision"] == "PASS" else FAIL_DECISION
     report = {
         "decision": decision,
         "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
         "training_boundary_reason": (
-            "This isolated bounded waveform pilot can promote Shimmer percent "
+            f"This isolated bounded waveform pilot can promote {DISPLAY_NAME} "
             "as a Route C component, but it does not test a combined AVQI loss "
             "inside generator optimization."
         ),

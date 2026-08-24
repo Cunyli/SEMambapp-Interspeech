@@ -860,6 +860,21 @@ def train_waveform_predictor(
             cpps_mode="praat_view_input_v12",
             cpps_power_floor=1e-6,
         )
+    elif architecture == "direct_praat_hard_hnr_pitch_path_v7":
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            hnr_mode="praat_pitch_path_v7",
+        )
+    elif (
+        architecture
+        == "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7"
+    ):
+        predictor = PraatDifferentiableAVQIComponentEstimator(
+            peak_mode="hard",
+            cpps_mode="praat_view_input_v12",
+            cpps_power_floor=1e-6,
+            hnr_mode="praat_pitch_path_v7",
+        )
     elif architecture == "direct_praat_hard_shimmer_rms_v3":
         predictor = PraatDifferentiableAVQIComponentEstimator(
             peak_mode="hard",
@@ -2669,6 +2684,9 @@ def main() -> None:
         "direct_praat_soft_v2",
         "direct_praat_hard_v2",
         "direct_praat_hard_cpps_relative_log1p_v10",
+        "direct_praat_hard_cpps_view_input_v12",
+        "direct_praat_hard_hnr_pitch_path_v7",
+        "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7",
         "direct_praat_hard_shimmer_rms_v3",
         "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
         "direct_praat_hard_shimmer_pulse_chain_v5",
@@ -2867,6 +2885,63 @@ def main() -> None:
                     }
                     if "direct_praat_hard_cpps_relative_log1p_v10"
                     in waveform_architectures
+                    else None
+                ),
+                "direct_praat_hard_cpps_view_input_v12": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "detached CPPS view topology",
+                        "formulas": [
+                            "Praat 34 Hz stop-Hann metric-branch high-pass",
+                            "view-aware CS/SV CPPS input topology",
+                            "exact-aligned Praat PowerCepstrogram/Get CPPS forward",
+                            "frame-relative log1p CPPS surrogate derivative",
+                            "the other five frozen v2 component formulas",
+                        ],
+                    }
+                    if "direct_praat_hard_cpps_view_input_v12"
+                    in waveform_architectures
+                    else None
+                ),
+                "direct_praat_hard_hnr_pitch_path_v7": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "detached Praat pitch-candidate path",
+                        "formulas": [
+                            "Praat-timed one-period forward cross-correlation",
+                            "14 voiced candidates plus an unvoiced state",
+                            "octave and voiced/unvoiced Viterbi path costs",
+                            "live selected strengths with voiced-frame HNR mean",
+                            "endpoint-regularized HNR backward transform",
+                            "the other five frozen v2 component formulas",
+                        ],
+                    }
+                    if "direct_praat_hard_hnr_pitch_path_v7"
+                    in waveform_architectures
+                    else None
+                ),
+                "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7": (
+                    {
+                        "neural_predictor": False,
+                        "trainable_parameters": 0,
+                        "alignment": "positive per-component affine on train only",
+                        "peak_mode": "detached CPPS view and HNR pitch topology",
+                        "formulas": [
+                            "view-aware exact-aligned CPPS v12 forward",
+                            "frame-relative log1p CPPS surrogate derivative",
+                            "Praat pitch-path HNR v7 forward",
+                            "endpoint-regularized HNR backward transform",
+                            "the other four frozen v2 component formulas",
+                        ],
+                    }
+                    if (
+                        "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7"
+                        in waveform_architectures
+                    )
                     else None
                 ),
                 "direct_praat_hard_shimmer_rms_v3": (
@@ -3118,6 +3193,9 @@ def main() -> None:
         "direct_praat_soft_v2",
         "direct_praat_hard_v2",
         "direct_praat_hard_cpps_relative_log1p_v10",
+        "direct_praat_hard_cpps_view_input_v12",
+        "direct_praat_hard_hnr_pitch_path_v7",
+        "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7",
         "direct_praat_hard_shimmer_rms_v3",
         "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
         "direct_praat_hard_shimmer_pulse_chain_v5",

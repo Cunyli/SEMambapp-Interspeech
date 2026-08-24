@@ -68,6 +68,11 @@ EXPECTED_DIRECT_C_SCREEN_FORMS = (
     {DIRECT_ROUTE: ["direct_praat_hard_cpps_view_input_v12"]},
     {
         DIRECT_ROUTE: [
+            "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7"
+        ]
+    },
+    {
+        DIRECT_ROUTE: [
             "direct_praat_hard_v2",
             "direct_praat_hard_shimmer_rms_v3",
         ]
@@ -88,6 +93,12 @@ EXPECTED_DIRECT_C_SCREEN_FORMS = (
         DIRECT_ROUTE: [
             "direct_praat_hard_v2",
             "direct_praat_hard_shimmer_pulse_path_v6",
+        ]
+    },
+    {
+        DIRECT_ROUTE: [
+            "direct_praat_hard_v2",
+            "direct_praat_hard_hnr_pitch_path_v7",
         ]
     },
 )

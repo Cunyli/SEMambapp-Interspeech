@@ -1119,6 +1119,191 @@ def test_praat_raw_cc_v3_hnr_has_finite_nonzero_input_gradient() -> None:
     assert float(waveform.grad.norm()) > 0.0
 
 
+def test_praat_pitch_path_v7_uses_global_candidate_path() -> None:
+    frequencies = torch.tensor(
+        [
+            [0.0, 180.0, 360.0],
+            [0.0, 180.0, 360.0],
+            [0.0, 180.0, 360.0],
+            [0.0, 180.0, 360.0],
+        ]
+    )
+    strengths = torch.tensor(
+        [
+            [0.0, 0.80, 0.90],
+            [0.0, 0.98, 0.90],
+            [0.0, 0.80, 0.90],
+            [0.0, 0.80, 0.90],
+        ]
+    )
+    valid = torch.ones_like(frequencies, dtype=torch.bool)
+    intensity = torch.ones(frequencies.shape[0])
+
+    selected = PraatDifferentiableAVQIComponentEstimator._praat_hnr_v7_path(
+        frequencies,
+        strengths,
+        valid,
+        intensity,
+        time_step=1.0 / 300.0,
+    )
+
+    assert torch.equal(selected, torch.full_like(selected, 2))
+
+
+def test_praat_pitch_path_v7_hnr_keeps_exact_forward_and_bounded_backward() -> None:
+    strengths = torch.tensor([0.25, 0.50, 0.75], requires_grad=True)
+    actual = PraatDifferentiableAVQIComponentEstimator._praat_hnr_v7_mean(
+        strengths
+    )
+    expected = (10.0 * torch.log10(strengths.detach() / (1.0 - strengths.detach()))).mean()
+
+    assert torch.equal(actual.detach(), expected)
+    actual.backward()
+    assert strengths.grad is not None
+    assert torch.isfinite(strengths.grad).all()
+    assert float(strengths.grad.abs().max()) < 20.0
+
+
+def test_praat_pitch_path_v7_hnr_is_invariant_and_noise_sensitive() -> None:
+    torch.manual_seed(20260824)
+    sample_rate = 16_000
+    time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
+    clean = torch.sin(2.0 * math.pi * 170.0 * time)
+    noisy = clean + 0.20 * torch.randn_like(clean)
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        hnr_mode="praat_pitch_path_v7",
+    )
+
+    clean_hnr = estimator.raw_hnr(clean)
+    gained_hnr = estimator.raw_hnr(clean * 0.25)
+    noisy_hnr = estimator.raw_hnr(noisy)
+
+    assert torch.allclose(clean_hnr, gained_hnr, atol=2e-3, rtol=2e-3)
+    assert float(clean_hnr - noisy_hnr) > 0.1
+
+
+def test_praat_pitch_path_v7_hnr_has_finite_nonzero_bounded_input_gradient() -> None:
+    torch.manual_seed(20260824)
+    sample_rate = 16_000
+    time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
+    waveform = (
+        torch.sin(2.0 * math.pi * 180.0 * time)
+        + 0.03 * torch.randn_like(time)
+    ).requires_grad_()
+    estimator = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        hnr_mode="praat_pitch_path_v7",
+    )
+
+    prediction = estimator.raw_hnr(waveform)
+    prediction.sum().backward()
+
+    assert waveform.grad is not None
+    assert torch.isfinite(prediction).all()
+    assert torch.isfinite(waveform.grad).all()
+    assert float(waveform.grad.norm()) > 0.0
+    assert float(waveform.grad.abs().max()) <= 1e4
+
+
+def test_praat_pitch_path_v7_changes_only_hnr_component() -> None:
+    torch.manual_seed(20260824)
+    sample_rate = 16_000
+    time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
+    waveform = (
+        torch.sin(2.0 * math.pi * 185.0 * time)
+        + 0.08 * torch.randn_like(time)
+    )
+    baseline = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        hnr_mode="raw_cc_v3",
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+    candidate = PraatDifferentiableAVQIComponentEstimator(
+        peak_mode="hard",
+        hnr_mode="praat_pitch_path_v7",
+        max_frames=64,
+        cpps_max_frames=128,
+    )
+
+    baseline_components = baseline.raw_components(waveform)
+    candidate_components = candidate.raw_components(waveform)
+    non_hnr = torch.tensor([0, 2, 3, 4, 5])
+
+    assert torch.equal(
+        baseline_components.index_select(-1, non_hnr),
+        candidate_components.index_select(-1, non_hnr),
+    )
+
+
+def test_cpps_v12_and_hnr_v7_share_one_estimator_without_component_drift() -> None:
+    torch.manual_seed(20260824)
+    sample_rate = 16_000
+    time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
+    waveform = (
+        torch.sin(2.0 * math.pi * 180.0 * time)
+        + 0.25 * torch.sin(2.0 * math.pi * 360.0 * time)
+        + 0.03 * torch.randn_like(time)
+    )
+    common = {
+        "peak_mode": "hard",
+        "max_frames": 64,
+        "cpps_max_frames": 128,
+    }
+    combined = PraatDifferentiableAVQIComponentEstimator(
+        **common,
+        cpps_mode="praat_view_input_v12",
+        cpps_power_floor=1e-6,
+        hnr_mode="praat_pitch_path_v7",
+    )
+    cpps_only = PraatDifferentiableAVQIComponentEstimator(
+        **common,
+        cpps_mode="praat_view_input_v12",
+        cpps_power_floor=1e-6,
+        hnr_mode="raw_cc_v3",
+    )
+    hnr_only = PraatDifferentiableAVQIComponentEstimator(
+        **common,
+        hnr_mode="praat_pitch_path_v7",
+    )
+    baseline = PraatDifferentiableAVQIComponentEstimator(**common)
+
+    combined_components = combined.raw_components(
+        waveform,
+        speaking_type="sv",
+    )[0]
+    cpps_components = cpps_only.raw_components(
+        waveform,
+        speaking_type="sv",
+    )[0]
+    hnr_components = hnr_only.raw_components(waveform)[0]
+    baseline_components = baseline.raw_components(waveform)[0]
+
+    assert torch.equal(combined_components[0], cpps_components[0])
+    assert torch.equal(combined_components[1], hnr_components[1])
+    assert torch.equal(combined_components[2:], baseline_components[2:])
+    assert sum(parameter.numel() for parameter in combined.parameters()) == 0
+
+    gradient_waveform = waveform.clone().requires_grad_()
+    gradient_components = combined.raw_components(
+        gradient_waveform,
+        speaking_type="sv",
+    )[0]
+    cpps_gradient = torch.autograd.grad(
+        gradient_components[0],
+        gradient_waveform,
+        retain_graph=True,
+    )[0]
+    hnr_gradient = torch.autograd.grad(
+        gradient_components[1],
+        gradient_waveform,
+    )[0]
+    for gradient in (cpps_gradient, hnr_gradient):
+        assert torch.isfinite(gradient).all()
+        assert 0.0 < float(gradient.norm()) <= 1e4
+
+
 def test_praat_differentiable_v2_is_invariant_and_family_sensitive() -> None:
     sample_rate = 16_000
     time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate

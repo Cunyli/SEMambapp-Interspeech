@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1171,7 +1172,12 @@ class PraatDifferentiableAVQIComponentEstimator(
     smoothed cepstral analysis, cycle-synchronous amplitude perturbation, and
     a global LTAS. The optional ``raw_cc_v3`` HNR branch follows Praat's
     one-period forward cross-correlation timing more closely without altering
-    the other five components. The ``hann_rms_v3`` shimmer branch replaces the
+    the other five components. The ``praat_pitch_path_v7`` HNR branch keeps
+    Praat's detached multi-candidate pitch path and hard voiced-frame topology
+    while gathering the selected correlation strengths from the live waveform.
+    Its forward HNR uses Praat's voiced-frame arithmetic mean, while an
+    endpoint-regularized odds transform bounds only the backward pass. The
+    ``hann_rms_v3`` shimmer branch replaces the
     legacy analytic-envelope sample with Praat-like period-scaled Hann RMS and
     soft period/amplitude validity gates. The
     ``hann_rms_raw_cc_surrogate_v4`` branch keeps the v3 value in the forward
@@ -1223,7 +1229,11 @@ class PraatDifferentiableAVQIComponentEstimator(
             raise ValueError(f"unsupported CPPS mode: {cpps_mode}")
         if not math.isfinite(cpps_power_floor) or cpps_power_floor <= 0.0:
             raise ValueError("CPPS power floor must be finite and positive")
-        if hnr_mode not in {"linear_ac_v2", "raw_cc_v3"}:
+        if hnr_mode not in {
+            "linear_ac_v2",
+            "raw_cc_v3",
+            "praat_pitch_path_v7",
+        }:
             raise ValueError(f"unsupported HNR mode: {hnr_mode}")
         if shimmer_mode not in {
             "analytic_envelope_v2",
@@ -2308,9 +2318,360 @@ class PraatDifferentiableAVQIComponentEstimator(
     def _raw_cc_v3_hnr(self, prepared: torch.Tensor) -> torch.Tensor:
         return self._raw_cc_v3_pitch_features(prepared)[-1]
 
+    @staticmethod
+    def _praat_hnr_v7_mean(selected_strength: torch.Tensor) -> torch.Tensor:
+        """Return Praat's HNR mean with a bounded monotone backward transform."""
+        if selected_strength.ndim != 1 or selected_strength.numel() == 0:
+            raise ValueError("Praat HNR requires selected voiced strengths")
+
+        detached = selected_strength.detach().to(dtype=torch.float64)
+        safe = detached.clamp(1e-15, 1.0 - 1e-15)
+        exact_hnr = 10.0 * torch.log10(safe / (1.0 - safe))
+        exact_hnr = torch.where(
+            detached <= 1e-15,
+            torch.full_like(exact_hnr, -150.0),
+            exact_hnr,
+        )
+        exact_hnr = torch.where(
+            detached > 1.0 - 1e-15,
+            torch.full_like(exact_hnr, 150.0),
+            exact_hnr,
+        ).to(dtype=selected_strength.dtype)
+
+        # A 1e-3 additive odds floor caps d(HNR)/d(strength) without changing
+        # the exact forward value or multiplying the gradient arbitrarily.
+        backward_floor = 1e-3
+        live = selected_strength.clamp(0.0, 1.0)
+        backward_hnr = 10.0 * torch.log10(
+            (live + backward_floor) / (1.0 - live + backward_floor)
+        )
+        frame_hnr = backward_hnr + (exact_hnr - backward_hnr).detach()
+        return frame_hnr.mean()
+
+    @staticmethod
+    def _praat_hnr_v7_path(
+        frequencies: torch.Tensor,
+        strengths: torch.Tensor,
+        valid: torch.Tensor,
+        intensity: torch.Tensor,
+        time_step: float,
+    ) -> torch.Tensor:
+        """Select Praat's HNR pitch path on detached CPU topology tensors."""
+        if frequencies.ndim != 2 or strengths.shape != frequencies.shape:
+            raise ValueError("HNR candidates must be frame-by-state matrices")
+        if valid.shape != frequencies.shape or valid.dtype != torch.bool:
+            raise ValueError("HNR candidate validity must match candidate shape")
+        if intensity.shape != frequencies.shape[:1]:
+            raise ValueError("HNR intensity must have one value per frame")
+        if frequencies.shape[0] == 0 or frequencies.shape[1] < 2:
+            raise ValueError("HNR pitch path requires frames and candidates")
+
+        silence_threshold = 0.03
+        voicing_threshold = 0.45
+        octave_cost = 0.01
+        octave_jump_cost = 0.35 * (0.01 / time_step)
+        voiced_unvoiced_cost = 0.14 * (0.01 / time_step)
+        ceiling = 600.0
+
+        frequency = frequencies.detach().to(device="cpu", dtype=torch.float64).numpy()
+        strength = strengths.detach().to(device="cpu", dtype=torch.float64).numpy()
+        candidate_valid = valid.detach().to(device="cpu").numpy()
+        frame_intensity = (
+            intensity.detach().to(device="cpu", dtype=torch.float64).numpy()
+        )
+        voiced = (
+            candidate_valid
+            & (frequency > 0.0)
+            & (frequency <= ceiling)
+        )
+        unvoiced_strength = voicing_threshold + np.maximum(
+            2.0
+            - frame_intensity
+            / (silence_threshold / (1.0 + voicing_threshold)),
+            0.0,
+        )
+        emission = np.broadcast_to(
+            unvoiced_strength[:, np.newaxis],
+            strength.shape,
+        ).copy()
+        voiced_emission = strength - octave_cost * np.log2(
+            ceiling / np.maximum(frequency, 1e-30)
+        )
+        emission = np.where(voiced, voiced_emission, emission)
+        emission[~candidate_valid] = -np.inf
+
+        frame_count, state_count = frequency.shape
+        delta = emission[0].copy()
+        backpointer = np.zeros((frame_count, state_count), dtype=np.int64)
+        for frame_index in range(1, frame_count):
+            previous_voiced = voiced[frame_index - 1]
+            current_voiced = voiced[frame_index]
+            both_voiced = (
+                current_voiced[:, np.newaxis]
+                & previous_voiced[np.newaxis, :]
+            )
+            changed_voicing = (
+                current_voiced[:, np.newaxis]
+                ^ previous_voiced[np.newaxis, :]
+            )
+            frequency_ratio = np.maximum(
+                frequency[frame_index][:, np.newaxis],
+                1e-30,
+            ) / np.maximum(
+                frequency[frame_index - 1][np.newaxis, :],
+                1e-30,
+            )
+            transition_cost = np.zeros_like(frequency_ratio)
+            transition_cost = np.where(
+                both_voiced,
+                octave_jump_cost * np.abs(np.log2(frequency_ratio)),
+                transition_cost,
+            )
+            transition_cost = np.where(
+                changed_voicing,
+                voiced_unvoiced_cost,
+                transition_cost,
+            )
+            path_score = delta[np.newaxis, :] - transition_cost
+            best_previous = np.argmax(path_score, axis=-1)
+            best_score = path_score[np.arange(state_count), best_previous]
+            delta = emission[frame_index] + best_score
+            backpointer[frame_index] = best_previous
+
+        selected = np.zeros(frame_count, dtype=np.int64)
+        selected[-1] = int(np.argmax(delta))
+        for frame_index in range(frame_count - 1, 0, -1):
+            selected[frame_index - 1] = backpointer[
+                frame_index,
+                selected[frame_index],
+            ]
+        return torch.from_numpy(selected).to(device=frequencies.device)
+
+    def _praat_pitch_path_v7_pitch_features(
+        self,
+        prepared: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return Praat-timed raw-CC frames and path-selected HNR."""
+        pitch_floor = 75.0
+        pitch_ceiling = 600.0
+        time_step = 1.0 / (4.0 * pitch_floor)
+        periods_per_window = 1.0
+        analysis_width = 1.0 / pitch_floor + periods_per_window / pitch_floor
+
+        minimum_samples = math.ceil(analysis_width * self.sample_rate)
+        if prepared.numel() < minimum_samples:
+            prepared = F.pad(prepared, (0, minimum_samples - prepared.numel()))
+        sample_count = prepared.numel()
+        duration = sample_count / self.sample_rate
+        frame_count = math.floor((duration - analysis_width) / time_step) + 1
+        frame_count = max(frame_count, 1)
+        first_time = (
+            0.5 * duration
+            - 0.5 * frame_count * time_step
+            + 0.5 * time_step
+        )
+        frame_time = first_time + torch.arange(
+            frame_count,
+            device=prepared.device,
+            dtype=torch.float64,
+        ) * time_step
+
+        nsamp_period = math.floor(self.sample_rate / pitch_floor)
+        halfnsamp_period = nsamp_period // 2 + 1
+        nsamp_window = math.floor(
+            periods_per_window * self.sample_rate / pitch_floor
+        )
+        halfnsamp_window = nsamp_window // 2 - 1
+        nsamp_window = 2 * halfnsamp_window
+        maximum_lag = min(
+            math.floor(nsamp_window / periods_per_window) + 2,
+            nsamp_window,
+        )
+
+        left_sample = torch.floor(
+            frame_time * self.sample_rate - 0.5
+        ).to(dtype=torch.long)
+        local_mean_start = left_sample + 1 - nsamp_period
+        local_mean_offsets = torch.arange(
+            2 * nsamp_period,
+            device=prepared.device,
+        )
+        local_mean_index = local_mean_start.unsqueeze(-1) + local_mean_offsets
+        local_mean_index = local_mean_index.clamp(0, sample_count - 1)
+        local_mean = prepared[local_mean_index].mean(dim=-1, keepdim=True)
+
+        intensity_start = left_sample + 1 - halfnsamp_window
+        intensity_offsets = torch.arange(
+            nsamp_window,
+            device=prepared.device,
+        )
+        intensity_index = intensity_start.unsqueeze(-1) + intensity_offsets
+        intensity_index = intensity_index.clamp(0, sample_count - 1)
+        intensity_frame = prepared[intensity_index] - local_mean
+        local_peak_start = max(
+            0,
+            halfnsamp_window + 1 - halfnsamp_period - 1,
+        )
+        local_peak_end = min(
+            nsamp_window,
+            halfnsamp_window + halfnsamp_period,
+        )
+        local_peak = intensity_frame[
+            :, local_peak_start:local_peak_end
+        ].abs().amax(dim=-1)
+        global_peak = (
+            prepared - prepared.mean()
+        ).abs().amax().clamp_min(1e-10)
+        intensity = (local_peak / global_peak).clamp_max(1.0)
+
+        raw_start = torch.floor(
+            (frame_time - 1.0 / pitch_floor) * self.sample_rate - 0.5
+        ).to(dtype=torch.long)
+        segment_length = nsamp_window + maximum_lag
+        raw_start = raw_start.clamp(0, max(sample_count - segment_length, 0))
+        segment_offsets = torch.arange(
+            segment_length,
+            device=prepared.device,
+        )
+        segment_index = raw_start.unsqueeze(-1) + segment_offsets
+        segment = prepared[segment_index] - local_mean
+        reference = segment[:, :nsamp_window]
+
+        fft_size = 1 << (segment_length + nsamp_window - 2).bit_length()
+        segment_spectrum = torch.fft.rfft(segment, n=fft_size, dim=-1)
+        reference_spectrum = torch.fft.rfft(reference, n=fft_size, dim=-1)
+        numerator = torch.fft.irfft(
+            segment_spectrum * reference_spectrum.conj(),
+            n=fft_size,
+            dim=-1,
+        )[:, : maximum_lag + 1]
+        squared_prefix = F.pad(segment.square().cumsum(dim=-1), (1, 0))
+        target_energy = (
+            squared_prefix[
+                :, nsamp_window : nsamp_window + maximum_lag + 1
+            ]
+            - squared_prefix[:, : maximum_lag + 1]
+        )
+        reference_energy = reference.square().sum(dim=-1, keepdim=True)
+        denominator = (
+            (reference_energy * target_energy).clamp_min(0.0) + 1e-12
+        ).sqrt()
+        correlation = numerator / denominator
+
+        candidate_lag = torch.arange(
+            2,
+            maximum_lag,
+            device=prepared.device,
+            dtype=torch.long,
+        )
+        topology_correlation = correlation.detach()
+        candidate_mid = topology_correlation.index_select(1, candidate_lag)
+        candidate_left = topology_correlation.index_select(1, candidate_lag - 1)
+        candidate_right = topology_correlation.index_select(1, candidate_lag + 1)
+        local_maximum = (
+            (candidate_mid > 0.5 * 0.45)
+            & (candidate_mid > candidate_left)
+            & (candidate_mid >= candidate_right)
+        )
+        derivative = 0.5 * (candidate_right - candidate_left)
+        curvature = 2.0 * candidate_mid - candidate_left - candidate_right
+        offset = torch.where(
+            curvature.abs() > 1e-10,
+            derivative / curvature,
+            torch.zeros_like(curvature),
+        ).clamp(-1.0, 1.0)
+        refined_lag = candidate_lag.to(dtype=prepared.dtype).unsqueeze(0) + offset
+        refined_frequency = self.sample_rate / refined_lag.clamp_min(1.0)
+        refined_strength = candidate_mid + 0.5 * derivative.square() / (
+            curvature.abs().clamp_min(1e-10)
+        )
+        refined_strength = torch.where(
+            refined_strength > 1.0,
+            refined_strength.reciprocal(),
+            refined_strength,
+        )
+        retention_score = refined_strength - 0.01 * torch.log2(
+            pitch_floor / refined_frequency
+        )
+        retention_score = retention_score.masked_fill(~local_maximum, -torch.inf)
+        number_to_keep = min(14, retention_score.shape[-1])
+        kept_score, kept_index = retention_score.topk(number_to_keep, dim=-1)
+        kept_valid = torch.isfinite(kept_score)
+        kept_frequency = refined_frequency.gather(1, kept_index)
+
+        integer_lag = candidate_lag.unsqueeze(0).expand(frame_count, -1).gather(
+            1,
+            kept_index,
+        )
+        live_mid = correlation.gather(1, integer_lag)
+        live_left = correlation.gather(1, integer_lag - 1)
+        live_right = correlation.gather(1, integer_lag + 1)
+        live_derivative = 0.5 * (live_right - live_left)
+        live_curvature = 2.0 * live_mid - live_left - live_right
+        live_strength = live_mid + 0.5 * live_derivative.square() / (
+            live_curvature.abs().clamp_min(1e-10)
+        )
+        live_strength = torch.where(
+            live_strength > 1.0,
+            live_strength.reciprocal(),
+            live_strength,
+        )
+
+        state_count = number_to_keep + 1
+        frequencies = prepared.new_zeros((frame_count, state_count))
+        strengths = prepared.new_zeros((frame_count, state_count))
+        valid = torch.zeros(
+            (frame_count, state_count),
+            device=prepared.device,
+            dtype=torch.bool,
+        )
+        valid[:, 0] = True
+        frequencies[:, 1:] = kept_frequency
+        strengths[:, 1:] = live_strength
+        valid[:, 1:] = kept_valid
+        selected_state = self._praat_hnr_v7_path(
+            frequencies,
+            strengths,
+            valid,
+            intensity,
+            time_step,
+        )
+        selected_frequency = frequencies.gather(
+            1,
+            selected_state.unsqueeze(-1),
+        ).squeeze(-1)
+        selected_strength = strengths.gather(
+            1,
+            selected_state.unsqueeze(-1),
+        ).squeeze(-1)
+        selected_valid = valid.gather(
+            1,
+            selected_state.unsqueeze(-1),
+        ).squeeze(-1)
+        voiced = (
+            selected_valid
+            & (selected_frequency > 0.0)
+            & (selected_frequency <= pitch_ceiling)
+        ).detach()
+        period = torch.where(
+            voiced,
+            self.sample_rate / selected_frequency.clamp_min(1e-10),
+            torch.full_like(selected_frequency, self.sample_rate / pitch_floor),
+        ).detach()
+        if not bool(voiced.any().item()):
+            fallback = self._raw_cc_v3_hnr(prepared)
+            return reference, period, voiced.to(prepared.dtype), fallback
+        hnr = self._praat_hnr_v7_mean(selected_strength[voiced])
+        return reference, period, voiced.to(prepared.dtype), hnr
+
+    def _praat_pitch_path_v7_hnr(self, prepared: torch.Tensor) -> torch.Tensor:
+        return self._praat_pitch_path_v7_pitch_features(prepared)[-1]
+
     def _hnr_one(self, prepared: torch.Tensor) -> torch.Tensor:
         if self.hnr_mode == "raw_cc_v3":
             return self._raw_cc_v3_hnr(prepared)
+        if self.hnr_mode == "praat_pitch_path_v7":
+            return self._praat_pitch_path_v7_hnr(prepared)
         return self._linear_ac_v2_pitch_features(prepared)[-1]
 
     def _hann_windowed_rms(
@@ -3194,11 +3555,12 @@ class PraatDifferentiableAVQIComponentEstimator(
         frames, period, voicing_weight, linear_ac_hnr = (
             self._linear_ac_v2_pitch_features(prepared)
         )
-        hnr = (
-            self._raw_cc_v3_hnr(prepared)
-            if self.hnr_mode == "raw_cc_v3"
-            else linear_ac_hnr
-        )
+        if self.hnr_mode == "raw_cc_v3":
+            hnr = self._raw_cc_v3_hnr(prepared)
+        elif self.hnr_mode == "praat_pitch_path_v7":
+            hnr = self._praat_pitch_path_v7_hnr(prepared)
+        else:
+            hnr = linear_ac_hnr
 
         if self.shimmer_mode in {
             "praat_pulse_chain_v5",

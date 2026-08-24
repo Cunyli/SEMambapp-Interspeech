@@ -65,6 +65,8 @@ DIRECT_ARCHITECTURES = (
     "direct_praat_hard_v2",
     "direct_praat_hard_cpps_relative_log1p_v10",
     "direct_praat_hard_cpps_view_input_v12",
+    "direct_praat_hard_hnr_pitch_path_v7",
+    "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7",
     "direct_praat_hard_shimmer_rms_v3",
     "direct_praat_hard_shimmer_raw_cc_surrogate_v4",
     "direct_praat_hard_shimmer_pulse_chain_v5",
@@ -175,7 +177,43 @@ def direct_contract(
                         "hard_topology_detached": True,
                         "selected_waveform_values_differentiable": True,
                     }
-                    if "direct_praat_hard_cpps_view_input_v12" in architectures
+                    if any(
+                        architecture
+                        in {
+                            "direct_praat_hard_cpps_view_input_v12",
+                            "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7",
+                        }
+                        for architecture in architectures
+                    )
+                    else None
+                ),
+                "hnr_pitch_path_v7": (
+                    {
+                        "candidate_topology": "detached Praat-style Viterbi path",
+                        "waveform_gradient": "live selected raw-CC strengths",
+                        "aggregation": "arithmetic mean over selected voiced frames",
+                        "backward_endpoint_floor": 1e-3,
+                    }
+                    if any(
+                        architecture
+                        in {
+                            "direct_praat_hard_hnr_pitch_path_v7",
+                            "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7",
+                        }
+                        for architecture in architectures
+                    )
+                    else None
+                ),
+                "cpps_v12_hnr_v7_integration": (
+                    {
+                        "scope": "formula_and_scorer_regression_only",
+                        "joint_scientific_pass_claimed": False,
+                        "generator_updates_allowed": False,
+                    }
+                    if (
+                        "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7"
+                        in architectures
+                    )
                     else None
                 ),
             },
@@ -400,7 +438,8 @@ def main() -> None:
                 "optimizer_steps": 0,
                 "direct_alignment": training["direct_alignment"],
                 "speaking_type_required": (
-                    architecture == "direct_praat_hard_cpps_view_input_v12"
+                    getattr(predictor, "cpps_mode", None)
+                    == "praat_view_input_v12"
                 ),
             },
             args.checkpoint_dir / f"direct_{architecture}_estimator.pt",

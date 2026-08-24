@@ -55,6 +55,13 @@ def test_avqi_diagnostic_separates_models_from_reports() -> None:
     assert '"direct_praat_hard_cpps_view_input_v12"' in source
     assert '"direct_praat_hard_cpps_view_input_v12"' in direct_source
     assert '"direct_praat_hard_cpps_view_input_v12"' in multiseed
+    assert '"direct_praat_hard_hnr_pitch_path_v7"' in source
+    assert '"direct_praat_hard_hnr_pitch_path_v7"' in direct_source
+    assert '"direct_praat_hard_hnr_pitch_path_v7"' in multiseed
+    combined = '"direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7"'
+    assert combined in source
+    assert combined in direct_source
+    assert combined in multiseed
     assert '"shared_dual_head": {"status": "SKIPPED_USER_SCOPE"}' in direct_source
     assert (
         '"frozen_independent_predictor": {"status": "SKIPPED_USER_SCOPE"}'
@@ -142,6 +149,26 @@ def test_route_c_hnr_formula_diagnostic_is_nonfinal_and_read_only() -> None:
     assert "--expected-internal-valid-rows 2134" in launcher
     assert "--expected-internal-usable-rows 2106" in launcher
     assert "missing_clean_pair_rows" in source
+
+
+def test_route_c_hnr_v7_audits_before_candidate_screen() -> None:
+    audit = read("scripts/audit_hnr_route_c_v7.py")
+    parity = read("scripts/evaluate_hnr_v7_baseline_parity.py")
+    launcher = read("scripts/run_avqi_hnr_v7_baseline_parity.sh")
+    model = read("model/avqi_components.py")
+    confirm = read("scripts/run_avqi_component_v4_confirm.sh")
+
+    assert '"praat_pitch_path_v7"' in model
+    assert "_praat_hnr_v7_path" in model
+    assert "_praat_hnr_v7_mean" in model
+    assert '"formal_generator_training_authorized": False' in audit
+    assert '"fresh_bounded_waveform_panel_authorized": False' in audit
+    assert '"candidate_selection_performed": False' in parity
+    assert '"final_or_fresh_waveform_panel_accessed": False' in parity
+    assert '"generator_optimizer_steps": 0' in parity
+    assert "EXPECTED_SPLIT_ROWS" in parity
+    assert "CONFIRM_SLURM_SUBMIT" in launcher
+    assert "direct_praat_hard_hnr_pitch_path_v7" in confirm
 
 
 def test_avqi_expansion_is_training_only_and_hash_locked() -> None:

@@ -16,6 +16,7 @@ TIME_LIMIT="${TIME_LIMIT:-00:30:00}"
 TEST_FILES=(
   tests/test_artifact_layout.py
   tests/test_avqi_components.py
+  tests/test_avqi_hnr_fresh_panel.py
   tests/test_avqi_shimmer_fresh_panel.py
   tests/test_direct_avqi_waveform_optimization.py
   tests/test_shifted_anechoic_target.py
@@ -80,7 +81,7 @@ mkdir -p "$OUTPUT_DIR"
 PYTEST_LOG="$OUTPUT_DIR/pytest.log"
 python -m pytest -q "${TEST_FILES[@]}" 2>&1 | tee "$PYTEST_LOG"
 PYTEST_LOG_SHA256="$(sha256sum "$PYTEST_LOG" | awk '{print $1}')"
-TEST_FILES_JSON='["tests/test_artifact_layout.py","tests/test_avqi_components.py","tests/test_avqi_shimmer_fresh_panel.py","tests/test_direct_avqi_waveform_optimization.py","tests/test_shifted_anechoic_target.py"]'
+TEST_FILES_JSON='["tests/test_artifact_layout.py","tests/test_avqi_components.py","tests/test_avqi_hnr_fresh_panel.py","tests/test_avqi_shimmer_fresh_panel.py","tests/test_direct_avqi_waveform_optimization.py","tests/test_shifted_anechoic_target.py"]'
 jq -n \
   --arg source_commit "$SOURCE_COMMIT" \
   --arg slurm_job_id "$SLURM_JOB_ID" \
