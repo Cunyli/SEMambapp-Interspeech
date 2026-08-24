@@ -1207,7 +1207,7 @@ def main() -> None:
                     "path": str(path.resolve()),
                     "view": case.spec.view,
                     "score_components": True,
-                    "exact_metric_topology": True,
+                    "exact_metric_topology": role != "target",
                 }
             )
     final_exact = run_exact(
@@ -1229,7 +1229,10 @@ def main() -> None:
         base_row = final_by_id[f"base:{case_id}"]
         candidate_row = final_by_id[f"candidate:{case_id}"]
         for row in (target_row, base_row, candidate_row):
-            if row.get("scoring_status") != "ok" or row.get("pulse_count", 0) < 3:
+            topology_required = row.get("role") != "target"
+            if row.get("scoring_status") != "ok" or (
+                topology_required and row.get("pulse_count", 0) < 3
+            ):
                 raise RuntimeError(
                     f"sealed exact scoring failed: {row.get('id')} "
                     f"{row.get('error_type')} {row.get('error_message')}"
