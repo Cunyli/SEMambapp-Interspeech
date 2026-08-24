@@ -1,5 +1,5 @@
 #!/bin/bash
-# Profile the two immutable Candidate-C v14 refresh outliers on CPU.
+# Profile the two immutable Candidate-C v14 refresh outliers on a V100 node.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +20,8 @@ PANEL_CONTRACT_SHA256="${PANEL_CONTRACT_SHA256:-28d9726b2ecfa97d40cc973d768cb852
 AVQI_CODE_TREE_SHA256="${AVQI_CODE_TREE_SHA256:-46987b3c447cb579aab4d34e87655938e4aa64e1b28c0e2348c4ea3e48f107f2}"
 WARM_REPEATS="${WARM_REPEATS:-7}"
 
-PARTITION="${PARTITION:-batch-milan}"
+PARTITION="${PARTITION:-gpu-v100-32g}"
+GPU_TYPE="${GPU_TYPE:-v100}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-4}"
 MEMORY="${MEMORY:-12G}"
 TIME_LIMIT="${TIME_LIMIT:-00:20:00}"
@@ -65,6 +66,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     --partition="$PARTITION" \
     --nodes=1 \
     --ntasks=1 \
+    --gres="gpu:${GPU_TYPE}:1" \
     --cpus-per-task="$CPUS_PER_TASK" \
     --mem="$MEMORY" \
     --time="$TIME_LIMIT" \
