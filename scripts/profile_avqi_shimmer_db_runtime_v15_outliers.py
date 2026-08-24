@@ -82,6 +82,18 @@ EXTRA_PROBE_CONFIGS = {
         "wav_roundtrip_mode": "praat_reused_tmpfs_wav",
         "sounding_assembly_mode": "numpy_exact_interval_slices",
     },
+    "probe_vectorized_frame_scan": {
+        "frame_scan_mode": "numpy_vectorized_exact_aligned_frames",
+        "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
+        "wav_roundtrip_mode": "praat_temp_wav",
+        "sounding_assembly_mode": "praat_extract_and_concatenate",
+    },
+    "probe_vectorized_frames_tmpfs_wav_numpy_sounding": {
+        "frame_scan_mode": "numpy_vectorized_exact_aligned_frames",
+        "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
+        "wav_roundtrip_mode": "praat_reused_tmpfs_wav",
+        "sounding_assembly_mode": "numpy_exact_interval_slices",
+    },
 }
 FROZEN_OUTLIER_CASE_IDS = (
     "sealed_final__SD05__cs__rir_only",

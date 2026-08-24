@@ -200,6 +200,54 @@ def exact_zero_crossing_rate(part):
     )
 
 
+def exact_zero_crossing_rates_aligned_frames(frames):
+    values = np.asarray(frames, dtype=np.float64)
+    left = values[:, :-1]
+    right = values[:, 1:]
+    crossing_mask = (
+        ((left <= 0.0) & (right > 0.0))
+        | ((left >= 0.0) & (right < 0.0))
+    )
+    denominator = left - right
+    fraction = np.divide(
+        left,
+        denominator,
+        out=np.zeros_like(denominator),
+        where=denominator != 0.0,
+    )
+    sample_indices = np.arange(left.shape[1], dtype=np.float64)[None, :]
+    crossings = (
+        0.5 / SAMPLE_RATE
+        + (sample_indices + fraction) / SAMPLE_RATE
+    )
+    distance_to_first = np.where(
+        crossing_mask,
+        np.abs(crossings - 0.0025),
+        np.inf,
+    )
+    first_indices = np.argmin(distance_to_first, axis=1)
+    columns = np.arange(left.shape[1], dtype=np.int64)[None, :]
+    last_mask = (
+        crossing_mask
+        & (columns >= first_indices[:, None])
+        & (crossings >= 0.0275)
+    )
+    has_enough_crossings = np.count_nonzero(crossing_mask, axis=1) >= 2
+    has_last = np.any(last_mask, axis=1)
+    last_indices = np.argmax(last_mask, axis=1)
+    rows = np.arange(values.shape[0], dtype=np.int64)
+    first_crossings = crossings[rows, first_indices]
+    last_crossings = crossings[rows, last_indices]
+    crossing_distance = last_crossings - first_crossings
+    rates = np.divide(
+        last_indices - first_indices,
+        crossing_distance,
+        out=np.full(values.shape[0], np.nan, dtype=np.float64),
+        where=(has_enough_crossings & has_last & (crossing_distance != 0.0)),
+    )
+    return rates
+
+
 def compress_source_indices(indices):
     if indices.size == 0:
         return []
@@ -425,53 +473,90 @@ def direct_refresh(
     extreme_right = float(only_loud.xmax) - width
     kept_parts = []
     kept_source_indices = []
-    while right < extreme_right:
-        local_start = int(
-            round((left - float(only_loud.xmin)) * SAMPLE_RATE)
-        )
-        if frame_scan_mode == "praat_per_frame":
-            part = call(
-                only_loud,
-                "Extract part",
-                left,
-                right,
-                "rectangular",
-                1.0,
-                "no",
+    if frame_scan_mode == "numpy_vectorized_exact_aligned_frames":
+        frame_starts = []
+        while right < extreme_right:
+            frame_starts.append(
+                int(round((left - float(only_loud.xmin)) * SAMPLE_RATE))
             )
-            part_values = np.asarray(part.values[0], dtype=np.float64)
-            partial_power = float(call(part, "Get power in air"))
-            zero_crossing_rate = None
-        elif frame_scan_mode == "numpy_exact_aligned_frames":
-            frame_sample_count = int(round(width * SAMPLE_RATE))
-            part_values = only_loud_values[
-                local_start : local_start + frame_sample_count
-            ]
-            if part_values.size != frame_sample_count:
-                raise ValueError("NumPy exact frame scan exceeded only-loud data")
-            partial_power = float(np.mean(np.square(part_values)) / 400.0)
-            zero_crossing_rate = None
-        else:
-            raise ValueError("unsupported exact frame scan: " + frame_scan_mode)
-        if partial_power > global_power * 0.30:
+            left += width
+            right = left + width
+        frame_sample_count = int(round(width * SAMPLE_RATE))
+        frame_indices = (
+            np.asarray(frame_starts, dtype=np.int64)[:, None]
+            + np.arange(frame_sample_count, dtype=np.int64)[None, :]
+        )
+        if frame_indices.size == 0 or int(frame_indices.max()) >= only_loud_values.size:
+            raise ValueError("vectorized exact frame scan exceeded only-loud data")
+        frame_values = only_loud_values[frame_indices]
+        partial_powers = np.mean(np.square(frame_values), axis=1) / 400.0
+        zero_crossing_rates = exact_zero_crossing_rates_aligned_frames(
+            frame_values
+        )
+        keep = (
+            (partial_powers > global_power * 0.30)
+            & np.isfinite(zero_crossing_rates)
+            & (zero_crossing_rates < 3000.0)
+        )
+        kept_parts.extend(frame_values[keep])
+        kept_source_indices.extend(only_loud_indices[frame_indices[keep]])
+    else:
+        while right < extreme_right:
+            local_start = int(
+                round((left - float(only_loud.xmin)) * SAMPLE_RATE)
+            )
             if frame_scan_mode == "praat_per_frame":
-                zero_crossing_rate = exact_zero_crossing_rate(part)
+                part = call(
+                    only_loud,
+                    "Extract part",
+                    left,
+                    right,
+                    "rectangular",
+                    1.0,
+                    "no",
+                )
+                part_values = np.asarray(part.values[0], dtype=np.float64)
+                partial_power = float(call(part, "Get power in air"))
+                zero_crossing_rate = None
+            elif frame_scan_mode == "numpy_exact_aligned_frames":
+                frame_sample_count = int(round(width * SAMPLE_RATE))
+                part_values = only_loud_values[
+                    local_start : local_start + frame_sample_count
+                ]
+                if part_values.size != frame_sample_count:
+                    raise ValueError(
+                        "NumPy exact frame scan exceeded only-loud data"
+                    )
+                partial_power = float(np.mean(np.square(part_values)) / 400.0)
+                zero_crossing_rate = None
             else:
-                zero_crossing_rate = exact_zero_crossing_rate_values(
-                    part_values,
-                    0.5 / SAMPLE_RATE,
-                    1.0 / SAMPLE_RATE,
+                raise ValueError(
+                    "unsupported exact frame scan: " + frame_scan_mode
                 )
-            if np.isfinite(zero_crossing_rate) and zero_crossing_rate < 3000.0:
-                local_end = local_start + part_values.size
-                if local_end > only_loud_indices.size:
-                    raise ValueError("exact frame mapping exceeds only-loud data")
-                kept_parts.append(part_values)
-                kept_source_indices.append(
-                    only_loud_indices[local_start:local_end]
-                )
-        left += width
-        right = left + width
+            if partial_power > global_power * 0.30:
+                if frame_scan_mode == "praat_per_frame":
+                    zero_crossing_rate = exact_zero_crossing_rate(part)
+                else:
+                    zero_crossing_rate = exact_zero_crossing_rate_values(
+                        part_values,
+                        0.5 / SAMPLE_RATE,
+                        1.0 / SAMPLE_RATE,
+                    )
+                if (
+                    np.isfinite(zero_crossing_rate)
+                    and zero_crossing_rate < 3000.0
+                ):
+                    local_end = local_start + part_values.size
+                    if local_end > only_loud_indices.size:
+                        raise ValueError(
+                            "exact frame mapping exceeds only-loud data"
+                        )
+                    kept_parts.append(part_values)
+                    kept_source_indices.append(
+                        only_loud_indices[local_start:local_end]
+                    )
+            left += width
+            right = left + width
     if not kept_parts:
         raise ValueError("exact CS preprocessing retained no 30-ms frame")
     source_selection_ms = 1000.0 * (
