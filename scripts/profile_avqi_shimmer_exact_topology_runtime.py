@@ -90,6 +90,10 @@ from avqi_code.main import (
 SAMPLE_RATE = 16000
 MAPPING_WINDOW = 32
 RESULT_MARKER = "AVQI_SHIMMER_RUNTIME_RESULT="
+RUNTIME_WAV_DIRECTORY = tempfile.TemporaryDirectory(
+    prefix="avqi-shimmer-runtime-",
+    dir="/dev/shm" if os.path.isdir("/dev/shm") else None,
+)
 
 
 def pcm16(values):
@@ -128,6 +132,15 @@ def praat_wav_roundtrip(sound):
         os.unlink(path)
     if sample_rate != SAMPLE_RATE:
         raise ValueError("Praat WAV roundtrip changed sample rate")
+    return result
+
+
+def praat_reused_wav_roundtrip(sound, slot):
+    path = os.path.join(RUNTIME_WAV_DIRECTORY.name, slot + ".wav")
+    call(sound, "Save as WAV file", path)
+    result, sample_rate = sf.read(path, dtype="float64")
+    if sample_rate != SAMPLE_RATE:
+        raise ValueError("Praat reused WAV roundtrip changed sample rate")
     return result
 
 
@@ -317,6 +330,8 @@ def direct_refresh(
     quantize_started = time.perf_counter()
     if wav_roundtrip_mode == "praat_temp_wav":
         highpassed = praat_wav_roundtrip(filtered)
+    elif wav_roundtrip_mode == "praat_reused_tmpfs_wav":
+        highpassed = praat_reused_wav_roundtrip(filtered, "highpass")
     elif wav_roundtrip_mode == "soundfile_in_memory_pcm16":
         highpassed = pcm16_roundtrip(filtered.values[0])
     else:
@@ -471,6 +486,11 @@ def direct_refresh(
     if wav_roundtrip_mode == "praat_temp_wav":
         metric = praat_wav_roundtrip(
             parselmouth.Sound(metric_values, SAMPLE_RATE)
+        )
+    elif wav_roundtrip_mode == "praat_reused_tmpfs_wav":
+        metric = praat_reused_wav_roundtrip(
+            parselmouth.Sound(metric_values, SAMPLE_RATE),
+            "metric",
         )
     else:
         metric = pcm16_roundtrip(metric_values)
@@ -696,6 +716,7 @@ for line in sys.stdin:
                 ),
             }
         elif request["op"] == "quit":
+            RUNTIME_WAV_DIRECTORY.cleanup()
             response = {"status": "ok", "quitting": True}
             print(
                 RESULT_MARKER + json.dumps(response, sort_keys=True),

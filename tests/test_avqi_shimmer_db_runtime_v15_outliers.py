@@ -32,6 +32,8 @@ def test_runtime_v15_outlier_scope_is_strictly_frozen() -> None:
         "probe_in_memory_pcm16_roundtrip",
         "probe_numpy_sounding_assembly",
         "probe_combined_roundtrip_and_sounding",
+        "probe_reused_tmpfs_praat_wav",
+        "probe_reused_tmpfs_wav_and_numpy_sounding",
     }
     assert 'request.get(\n                    "input_loader"' in EXACT_WORKER
     assert 'elif input_loader == "soundfile_float32_exact_16khz_mono"' in (
