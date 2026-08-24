@@ -26,6 +26,8 @@ import torch
 from model.avqi_components import AVQI_COMPONENT_NAMES
 from scripts.avqi_shimmer_exact_topology_runtime import (
     EXPECTED_IMPLEMENTATION,
+    NUMPY_HIGHPASS_MODE,
+    PRAAT_HIGHPASS_MODE,
     ExactShimmerTopologyWorker,
     require_exact_topology_equal,
     topology_sha256,
@@ -86,6 +88,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slurm-job-id", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--warm-repeats", type=int, default=DEFAULT_WARM_REPEATS)
+    parser.add_argument(
+        "--highpass-mode",
+        choices=(PRAAT_HIGHPASS_MODE, NUMPY_HIGHPASS_MODE),
+        default=PRAAT_HIGHPASS_MODE,
+        help="Optimized worker high-pass; frozen reference remains exact Praat.",
+    )
     return parser.parse_args()
 
 
@@ -431,7 +439,8 @@ def main() -> None:
             start=1,
         ):
             frozen_topology = frozen_by_case[row["case_id"]]
-            path_refreshed, path_wall_ms = worker.refresh([item])
+            path_item = {**item, "highpass_mode": PRAAT_HIGHPASS_MODE}
+            path_refreshed, path_wall_ms = worker.refresh([path_item])
             path_topology = path_refreshed[0]
             require_exact_topology_equal(
                 frozen_topology,
@@ -447,6 +456,28 @@ def main() -> None:
                     "condition": row["condition"],
                     "input_read_ms": path_timing["input_read"],
                     "highpass_ms": path_timing["highpass"],
+                    "highpass_mode": path_topology["metric_highpass"],
+                    "highpass_pcm16_sha256": path_topology[
+                        "highpass_pcm16_sha256"
+                    ],
+                    "metric_pcm16_sha256": path_topology[
+                        "metric_pcm16_sha256"
+                    ],
+                    "highpass_input_pcm16_roundtrip_ms": path_timing[
+                        "highpass_input_pcm16_roundtrip"
+                    ],
+                    "highpass_sound_construct_ms": path_timing[
+                        "highpass_sound_construct"
+                    ],
+                    "highpass_stop_hann_filter_ms": path_timing[
+                        "highpass_stop_hann_filter"
+                    ],
+                    "highpass_peak_extremum_ms": path_timing[
+                        "highpass_peak_extremum"
+                    ],
+                    "highpass_scale_peak_ms": path_timing[
+                        "highpass_scale_peak"
+                    ],
                     "highpass_filter_compute_ms": path_timing[
                         "highpass_filter_compute"
                     ],
@@ -460,6 +491,7 @@ def main() -> None:
                     worker.refresh_current_waveforms(
                         [item],
                         [base_waveforms[row["case_id"]]],
+                        highpass_mode=args.highpass_mode,
                     )
                 )
                 optimized_topology = refreshed[0]
@@ -469,6 +501,18 @@ def main() -> None:
                     optimized_topology,
                     f"{row['case_id']}:repeat={repeat_index}",
                 )
+                highpass_pcm16_equal = (
+                    optimized_topology["highpass_pcm16_sha256"]
+                    == path_topology["highpass_pcm16_sha256"]
+                )
+                metric_pcm16_equal = (
+                    optimized_topology["metric_pcm16_sha256"]
+                    == path_topology["metric_pcm16_sha256"]
+                )
+                if not highpass_pcm16_equal or not metric_pcm16_equal:
+                    raise ValueError(
+                        f"{row['case_id']}: optimized high-pass PCM16 drift"
+                    )
                 if repeat_index == 1:
                     optimized_by_case[row["case_id"]] = optimized_topology
                 else:
@@ -494,6 +538,32 @@ def main() -> None:
                         "input_read_ms": timing["input_read"],
                         "client_tmpfs_staging_ms": staging["staging_ms"],
                         "highpass_ms": timing["highpass"],
+                        "highpass_mode": optimized_topology[
+                            "metric_highpass"
+                        ],
+                        "highpass_pcm16_sha256": optimized_topology[
+                            "highpass_pcm16_sha256"
+                        ],
+                        "metric_pcm16_sha256": optimized_topology[
+                            "metric_pcm16_sha256"
+                        ],
+                        "highpass_pcm16_equal_to_praat": highpass_pcm16_equal,
+                        "metric_pcm16_equal_to_praat": metric_pcm16_equal,
+                        "highpass_input_pcm16_roundtrip_ms": timing[
+                            "highpass_input_pcm16_roundtrip"
+                        ],
+                        "highpass_sound_construct_ms": timing[
+                            "highpass_sound_construct"
+                        ],
+                        "highpass_stop_hann_filter_ms": timing[
+                            "highpass_stop_hann_filter"
+                        ],
+                        "highpass_peak_extremum_ms": timing[
+                            "highpass_peak_extremum"
+                        ],
+                        "highpass_scale_peak_ms": timing[
+                            "highpass_scale_peak"
+                        ],
                         "highpass_filter_compute_ms": timing[
                             "highpass_filter_compute"
                         ],
@@ -577,6 +647,17 @@ def main() -> None:
                 "topology_sha256": topology_sha256(
                     optimized_by_case[case_id]
                 ),
+                "highpass_mode": optimized_by_case[case_id][
+                    "metric_highpass"
+                ],
+                "highpass_pcm16_sha256": optimized_by_case[case_id][
+                    "highpass_pcm16_sha256"
+                ],
+                "metric_pcm16_sha256": optimized_by_case[case_id][
+                    "metric_pcm16_sha256"
+                ],
+                "highpass_pcm16_equal_to_praat": True,
+                "metric_pcm16_equal_to_praat": True,
                 "source_mapping_equal": True,
                 "pulse_positions_equal": True,
                 "forward_proxy_hex": optimized_signature["proxy_before_hex"],
@@ -649,6 +730,12 @@ def main() -> None:
         "route_type": "hybrid_praat_assisted_straight_through_metric_branch",
         "pure_torch_estimator": False,
         "implementation": EXPECTED_IMPLEMENTATION,
+        "optimized_highpass_mode": args.highpass_mode,
+        "reference_highpass_mode": PRAAT_HIGHPASS_MODE,
+        "optimized_highpass_contract": (
+            "official_praat_6_1_38_power_of_two_fft_stop_hann_"
+            "33p9_to_34p1_inverse_truncate"
+        ),
         "fixed_alpha": FIXED_ALPHA,
         "scientific_gates_changed": False,
         "formal_refresh_gate_ms": FORMAL_REFRESH_GATE_MS,

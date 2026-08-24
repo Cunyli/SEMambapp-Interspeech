@@ -32,6 +32,8 @@ SAMPLE_RATE = 16_000
 READY_MARKER = "AVQI_SHIMMER_TOPOLOGY_READY="
 RESULT_MARKER = "AVQI_SHIMMER_TOPOLOGY_RESULT="
 IMPLEMENTATION = "exact_vectorized_frames_reused_tmpfs_numpy_sounding_v15"
+PRAAT_HIGHPASS_MODE = "praat_6_1_38_stop_hann_0_34_0p1"
+NUMPY_HIGHPASS_MODE = "numpy_official_praat_6_1_38_stop_hann_0_34_0p1"
 
 
 def parse_args() -> argparse.Namespace:
@@ -229,31 +231,133 @@ class ExactTopologyEngine:
             raise ValueError("Praat reused WAV roundtrip changed sample rate")
         return result
 
-    def exact_metric_highpass(
+    def finish_metric_highpass(
         self,
-        waveform: np.ndarray,
-    ) -> tuple[np.ndarray, dict[str, float]]:
-        started = time.perf_counter()
-        input_pcm16 = pcm16_roundtrip(waveform)
-        sound = parselmouth.Sound(input_pcm16, SAMPLE_RATE)
-        filter_started = time.perf_counter()
-        filtered = call(sound, "Filter (stop Hann band)", 0, 34, 0.1)
+        filtered: parselmouth.Sound,
+        *,
+        total_started: float,
+        input_roundtrip_ms: float,
+        sound_construct_ms: float,
+        filter_ms: float,
+        highpass_mode: str,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        peak_started = time.perf_counter()
         peak = float(call(filtered, "Get absolute extremum", 0, 0, "Sinc70"))
+        peak_ms = 1000.0 * (time.perf_counter() - peak_started)
+        scale_started = time.perf_counter()
+        scaled = False
         if peak > 0.999:
             call(filtered, "Scale peak", 0.99)
-        filter_compute_ms = 1000.0 * (
-            time.perf_counter() - filter_started
-        )
+            scaled = True
+        scale_ms = 1000.0 * (time.perf_counter() - scale_started)
         quantize_started = time.perf_counter()
         highpassed = self.praat_wav_roundtrip(filtered, "highpass")
         quantize_ms = 1000.0 * (
             time.perf_counter() - quantize_started
         )
         return highpassed, {
-            "highpass": 1000.0 * (time.perf_counter() - started),
-            "highpass_filter_compute": filter_compute_ms,
+            "highpass": 1000.0 * (time.perf_counter() - total_started),
+            "highpass_input_pcm16_roundtrip": input_roundtrip_ms,
+            "highpass_sound_construct": sound_construct_ms,
+            "highpass_stop_hann_filter": filter_ms,
+            "highpass_peak_extremum": peak_ms,
+            "highpass_scale_peak": scale_ms,
             "highpass_quantize": quantize_ms,
+            "highpass_peak_value": peak,
+            "highpass_peak_scaled": scaled,
+            "highpass_mode": highpass_mode,
+            # Backward-compatible v15 receipt field.  In the frozen worker this
+            # covered the filter, Sinc70 extremum, and optional peak scaling.
+            "highpass_filter_compute": filter_ms + peak_ms + scale_ms,
         }
+
+    def praat_metric_highpass(
+        self,
+        waveform: np.ndarray,
+    ) -> tuple[np.ndarray, dict[str, float]]:
+        total_started = time.perf_counter()
+        input_started = time.perf_counter()
+        input_pcm16 = pcm16_roundtrip(waveform)
+        input_roundtrip_ms = 1000.0 * (
+            time.perf_counter() - input_started
+        )
+        construct_started = time.perf_counter()
+        sound = parselmouth.Sound(input_pcm16, SAMPLE_RATE)
+        sound_construct_ms = 1000.0 * (
+            time.perf_counter() - construct_started
+        )
+        filter_started = time.perf_counter()
+        filtered = call(sound, "Filter (stop Hann band)", 0, 34, 0.1)
+        filter_ms = 1000.0 * (time.perf_counter() - filter_started)
+        return self.finish_metric_highpass(
+            filtered,
+            total_started=total_started,
+            input_roundtrip_ms=input_roundtrip_ms,
+            sound_construct_ms=sound_construct_ms,
+            filter_ms=filter_ms,
+            highpass_mode=PRAAT_HIGHPASS_MODE,
+        )
+
+    def numpy_official_metric_highpass(
+        self,
+        waveform: np.ndarray,
+    ) -> tuple[np.ndarray, dict[str, float]]:
+        total_started = time.perf_counter()
+        input_started = time.perf_counter()
+        input_pcm16 = pcm16_roundtrip(waveform)
+        input_roundtrip_ms = 1000.0 * (
+            time.perf_counter() - input_started
+        )
+        filter_started = time.perf_counter()
+        number_of_fourier_samples = 2
+        while number_of_fourier_samples < input_pcm16.size:
+            number_of_fourier_samples *= 2
+        spectrum = np.fft.rfft(
+            input_pcm16,
+            n=number_of_fourier_samples,
+        )
+        frequencies = (
+            np.arange(spectrum.size, dtype=np.float64)
+            * SAMPLE_RATE
+            / number_of_fourier_samples
+        )
+        f3 = 34.0 - 0.1
+        f4 = 34.0 + 0.1
+        response = np.ones(spectrum.size, dtype=np.float64)
+        response[frequencies <= f3] = 0.0
+        transition = (frequencies > f3) & (frequencies <= f4)
+        response[transition] = 0.5 - 0.5 * np.cos(
+            np.pi / (2.0 * 0.1) * (frequencies[transition] - f3)
+        )
+        filtered_values = np.fft.irfft(
+            spectrum * response,
+            n=number_of_fourier_samples,
+        )[: input_pcm16.size]
+        filter_ms = 1000.0 * (time.perf_counter() - filter_started)
+        construct_started = time.perf_counter()
+        filtered = parselmouth.Sound(filtered_values, SAMPLE_RATE)
+        sound_construct_ms = 1000.0 * (
+            time.perf_counter() - construct_started
+        )
+        return self.finish_metric_highpass(
+            filtered,
+            total_started=total_started,
+            input_roundtrip_ms=input_roundtrip_ms,
+            sound_construct_ms=sound_construct_ms,
+            filter_ms=filter_ms,
+            highpass_mode=NUMPY_HIGHPASS_MODE,
+        )
+
+    def metric_highpass(
+        self,
+        waveform: np.ndarray,
+        highpass_mode: str,
+    ) -> tuple[np.ndarray, dict[str, float]]:
+        if highpass_mode == PRAAT_HIGHPASS_MODE:
+            return self.praat_metric_highpass(waveform)
+        if highpass_mode == NUMPY_HIGHPASS_MODE:
+            return self.numpy_official_metric_highpass(waveform)
+        raise ValueError(f"unsupported exact high-pass mode: {highpass_mode}")
 
     def exact_cs_metric_waveform(
         self,
@@ -415,9 +519,13 @@ class ExactTopologyEngine:
         input_read_ms: float,
         input_loader: str,
         waveform_float32_sha256: str,
+        highpass_mode: str,
     ) -> dict[str, Any]:
         total_started = time.perf_counter()
-        highpassed, highpass_timing = self.exact_metric_highpass(waveform)
+        highpassed, highpass_timing = self.metric_highpass(
+            waveform,
+            highpass_mode,
+        )
         if view == "cs":
             metric, constant_prefix, ranges, view_timing = (
                 self.exact_cs_metric_waveform(highpassed)
@@ -474,7 +582,7 @@ class ExactTopologyEngine:
             "topology_preprocessing": "exact_avqi_view_metric_waveform",
             "topology_input_loader": input_loader,
             "source_waveform_float32_sha256": waveform_float32_sha256,
-            "metric_highpass": "exact_in_process_praat_stop_hann_0_34_0p1",
+            "metric_highpass": highpass_mode,
             "frame_scan_mode": "numpy_vectorized_exact_aligned_frames",
             "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
             "wav_roundtrip_mode": "praat_reused_tmpfs_wav",
@@ -483,7 +591,12 @@ class ExactTopologyEngine:
             "timing_ms": timing,
         }
 
-    def refresh_path(self, path: Path, view: str) -> dict[str, Any]:
+    def refresh_path(
+        self,
+        path: Path,
+        view: str,
+        highpass_mode: str,
+    ) -> dict[str, Any]:
         input_started = time.perf_counter()
         waveform, sample_rate = sf.read(path, dtype="float32")
         if sample_rate != SAMPLE_RATE or waveform.ndim != 1 or waveform.size == 0:
@@ -497,6 +610,7 @@ class ExactTopologyEngine:
             input_read_ms,
             "soundfile_float32_exact_16khz_mono",
             bytes_sha256(float32_values.tobytes()),
+            highpass_mode,
         )
 
     def refresh_raw_float32(
@@ -505,6 +619,7 @@ class ExactTopologyEngine:
         sample_count: int,
         expected_sha256: str,
         view: str,
+        highpass_mode: str,
     ) -> dict[str, Any]:
         input_started = time.perf_counter()
         payload = path.read_bytes()
@@ -524,6 +639,7 @@ class ExactTopologyEngine:
             input_read_ms,
             "client_tmpfs_raw_float32_current_output",
             observed_sha256,
+            highpass_mode,
         )
 
     def warmup(self) -> dict[str, Any]:
@@ -548,6 +664,7 @@ class ExactTopologyEngine:
                 0.0,
                 "synthetic_in_memory_float32",
                 bytes_sha256(float32_waveform.tobytes()),
+                PRAAT_HIGHPASS_MODE,
             )
             rows.append(
                 {
@@ -622,11 +739,13 @@ def main() -> None:
                             int(item["raw_float32_sample_count"]),
                             str(item["raw_float32_sha256"]),
                             str(item["view"]),
+                            str(item.get("highpass_mode", PRAAT_HIGHPASS_MODE)),
                         )
                     else:
                         topology = engine.refresh_path(
                             Path(item["path"]),
                             str(item["view"]),
+                            str(item.get("highpass_mode", PRAAT_HIGHPASS_MODE)),
                         )
                     rows.append(
                         {

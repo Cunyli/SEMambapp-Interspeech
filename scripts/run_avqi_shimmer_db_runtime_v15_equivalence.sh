@@ -9,7 +9,7 @@ SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 AUDIT_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_shimmer_db_runtime_v15_equivalence.py"
 WORKER_SCRIPT="$SOURCE_ROOT/scripts/avqi_shimmer_exact_topology_worker.py"
 
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_runtime_v15_equivalence_20260824_02_tmpfs_physical_core}"
+RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_runtime_v15_equivalence_20260824_04_numpy_official_highpass}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 V14_ROOT="${V14_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_candidate_c_fresh_panel_v14_20260824_01/outputs}"
@@ -34,6 +34,7 @@ TIME_LIMIT="${TIME_LIMIT:-00:30:00}"
 SOFTWARE_STACK_MODULE="${SOFTWARE_STACK_MODULE:-triton/2025.1-gcc}"
 COMPILER_MODULE="${COMPILER_MODULE:-gcc/13.3.0}"
 WARM_REPEATS="${WARM_REPEATS:-3}"
+HIGHPASS_MODE="${HIGHPASS_MODE:-numpy_official_praat_6_1_38_stop_hann_0_34_0p1}"
 
 if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
   echo "Refusing to run from dirty source: $SOURCE_ROOT" >&2
@@ -77,7 +78,7 @@ export TARGET_LABEL_CONTRACT_SHA256 CANDIDATE_SEAL CANDIDATE_SEAL_SHA256
 export PREDICTOR_CHECKPOINT PREDICTOR_CHECKPOINT_SHA256 EXACT_PYTHON
 export AVQI_CODE_ROOT AVQI_CODE_TREE_SHA256 PARTITION GPU_TYPE CPUS_PER_TASK
 export MEMORY TIME_LIMIT SOFTWARE_STACK_MODULE COMPILER_MODULE WARM_REPEATS
-export SOURCE_COMMIT
+export HIGHPASS_MODE SOURCE_COMMIT
 
 mkdir -p "$LOG_DIR"
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
@@ -151,6 +152,7 @@ python "$AUDIT_SCRIPT" \
   --slurm-job-id "$SLURM_JOB_ID" \
   --device cuda \
   --warm-repeats "$WARM_REPEATS" \
+  --highpass-mode "$HIGHPASS_MODE" \
   2>&1 | tee -a "$LIVE_LOG"
 
 echo "event=complete job=$SLURM_JOB_ID time=$(date -Is)" | tee -a "$LIVE_LOG"

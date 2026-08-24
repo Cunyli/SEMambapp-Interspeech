@@ -19,6 +19,11 @@ RESULT_MARKER = "AVQI_SHIMMER_TOPOLOGY_RESULT="
 EXPECTED_IMPLEMENTATION = (
     "exact_vectorized_frames_reused_tmpfs_numpy_sounding_v15"
 )
+PRAAT_HIGHPASS_MODE = "praat_6_1_38_stop_hann_0_34_0p1"
+NUMPY_HIGHPASS_MODE = "numpy_official_praat_6_1_38_stop_hann_0_34_0p1"
+ALLOWED_HIGHPASS_MODES = frozenset(
+    {PRAAT_HIGHPASS_MODE, NUMPY_HIGHPASS_MODE}
+)
 ALLOWED_CURRENT_OUTPUT_ROLES = frozenset(
     {
         "current_output_topology",
@@ -269,6 +274,13 @@ class ExactShimmerTopologyWorker:
                 raise ValueError("clean target topology path is forbidden")
             if view not in {"cs", "sv"}:
                 raise ValueError(f"unsupported exact topology view: {view}")
+            highpass_mode = str(
+                item.get("highpass_mode", PRAAT_HIGHPASS_MODE)
+            )
+            if highpass_mode not in ALLOWED_HIGHPASS_MODES:
+                raise ValueError(
+                    f"unsupported exact high-pass mode: {highpass_mode}"
+                )
             if not path.is_file():
                 raise FileNotFoundError(f"missing current-output waveform: {path}")
             refresh_keys.append((str(path.resolve()), view))
@@ -291,6 +303,11 @@ class ExactShimmerTopologyWorker:
                 raise ValueError("exact topology worker case identity drift")
             if row.get("implementation") != EXPECTED_IMPLEMENTATION:
                 raise ValueError("exact topology row implementation drift")
+            expected_highpass_mode = str(
+                item.get("highpass_mode", PRAAT_HIGHPASS_MODE)
+            )
+            if row.get("metric_highpass") != expected_highpass_mode:
+                raise ValueError("exact topology high-pass mode drift")
             if row.get("scoring_status") != "ok" or int(
                 row.get("pulse_count", 0)
             ) < 3:
@@ -303,8 +320,13 @@ class ExactShimmerTopologyWorker:
         self,
         items: list[dict[str, Any]],
         waveforms: list[np.ndarray],
+        highpass_mode: str = PRAAT_HIGHPASS_MODE,
     ) -> tuple[list[dict[str, Any]], float, list[dict[str, Any]]]:
         """Refresh current in-memory waveforms through hash-bound tmpfs slots."""
+        if highpass_mode not in ALLOWED_HIGHPASS_MODES:
+            raise ValueError(
+                f"unsupported exact high-pass mode: {highpass_mode}"
+            )
         self._validate_current_output_items(items)
         if len(waveforms) != len(items):
             raise ValueError("current waveform/item count drift")
@@ -325,6 +347,7 @@ class ExactShimmerTopologyWorker:
             staged_items.append(
                 {
                     **item,
+                    "highpass_mode": highpass_mode,
                     "raw_float32_path": str(slot),
                     "raw_float32_sample_count": int(values.size),
                     "raw_float32_sha256": payload_hash,
@@ -342,7 +365,10 @@ class ExactShimmerTopologyWorker:
         response, wall_ms = self.request(
             {"op": "refresh", "items": staged_items}
         )
-        rows = self._validate_rows(response, items)
+        validation_items = [
+            {**item, "highpass_mode": highpass_mode} for item in items
+        ]
+        rows = self._validate_rows(response, validation_items)
         for row, staging in zip(rows, staging_rows, strict=True):
             if row.get("topology_input_loader") != (
                 "client_tmpfs_raw_float32_current_output"
