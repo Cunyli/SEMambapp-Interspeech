@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from scripts.evaluate_avqi_shimmer_hybrid_topology import (
     CACHE_RECORD_MAX_BYTES,
     CANDIDATE_NAMES,
     FIXED_ALPHA,
+    GENERATOR_HOP_SIZE,
     cache_record_sha256,
     cache_record_valid,
     finalize_cache_record,
+    map_input_metric_pulses_to_output,
     nearest_match_rate,
 )
 
@@ -52,3 +55,30 @@ def test_cache_record_hash_and_size_fail_closed_on_mutation() -> None:
     mutated = dict(record)
     mutated["input_sha256"] = "drifted"
     assert not cache_record_valid(mutated)
+
+
+def test_metric_pulse_mapping_handles_only_bounded_trailing_truncation() -> None:
+    cs = map_input_metric_pulses_to_output(
+        np.asarray([10.0, 94_950.0]),
+        input_frame_count=94_970,
+        output_frame_count=94_900,
+        view="cs",
+    )
+    np.testing.assert_array_equal(cs, np.asarray([10.0]))
+
+    sv = map_input_metric_pulses_to_output(
+        np.asarray([10.0, 47_900.0]),
+        input_frame_count=48_955,
+        output_frame_count=48_900,
+        view="sv",
+    )
+    np.testing.assert_array_equal(sv, np.asarray([65.0, 47_955.0]))
+    assert GENERATOR_HOP_SIZE == 100
+
+    with pytest.raises(ValueError, match="timeline drift"):
+        map_input_metric_pulses_to_output(
+            np.asarray([10.0]),
+            input_frame_count=48_100,
+            output_frame_count=48_000,
+            view="sv",
+        )

@@ -42,6 +42,7 @@ from model.avqi_components import (
 
 SAMPLE_RATE = 16_000
 SV_METRIC_SAMPLES = 3 * SAMPLE_RATE
+GENERATOR_HOP_SIZE = 100
 SHIMMER_PERCENT_INDEX = AVQI_COMPONENT_NAMES.index("shimmer_percent")
 SHIMMER_DB_INDEX = AVQI_COMPONENT_NAMES.index("shimmer_db")
 FIXED_ALPHA = 1e-3
@@ -297,14 +298,26 @@ def validate_panel_contract(
             validate_hash(artifact, row[f"{role}_sha256"], f"{role} waveform")
         degraded = sf.info(row["degraded_path"])
         base = sf.info(row["base_path"])
+        target = sf.info(row["target_path"])
         if (
             degraded.samplerate != SAMPLE_RATE
             or base.samplerate != SAMPLE_RATE
+            or target.samplerate != SAMPLE_RATE
             or degraded.channels != 1
             or base.channels != 1
-            or degraded.frames != base.frames
+            or target.channels != 1
+            or degraded.frames != target.frames
         ):
-            raise ValueError(f"input/output time-axis drift: {row['case_id']}")
+            raise ValueError(f"panel waveform contract drift: {row['case_id']}")
+        trailing_truncation = degraded.frames - base.frames
+        if not 0 <= trailing_truncation < GENERATOR_HOP_SIZE:
+            raise ValueError(
+                f"unsupported input/output timeline drift: {row['case_id']} "
+                f"({degraded.frames} -> {base.frames})"
+            )
+        row["degraded_frame_count"] = degraded.frames
+        row["base_frame_count"] = base.frames
+        row["trailing_truncation_samples"] = trailing_truncation
     return contract, rows
 
 
@@ -497,6 +510,32 @@ def nearest_match_rate(
         np.abs(target[left_bounded] - source),
     )
     return float(np.mean(distance <= tolerance))
+
+
+def map_input_metric_pulses_to_output(
+    pulse_positions: np.ndarray,
+    *,
+    input_frame_count: int,
+    output_frame_count: int,
+    view: str,
+) -> np.ndarray:
+    trailing_truncation = input_frame_count - output_frame_count
+    if not 0 <= trailing_truncation < GENERATOR_HOP_SIZE:
+        raise ValueError("unsupported input/output timeline drift")
+    if view == "sv":
+        input_metric_start = max(input_frame_count - SV_METRIC_SAMPLES, 0)
+        output_metric_start = max(output_frame_count - SV_METRIC_SAMPLES, 0)
+        output_metric_frames = min(output_frame_count, SV_METRIC_SAMPLES)
+    elif view == "cs":
+        input_metric_start = 0
+        output_metric_start = 0
+        output_metric_frames = output_frame_count
+    else:
+        raise ValueError(f"unsupported view: {view}")
+    mapped = np.asarray(pulse_positions, dtype=np.float64) + (
+        input_metric_start - output_metric_start
+    )
+    return mapped[(mapped >= 0.0) & (mapped < output_metric_frames)]
 
 
 def exact_component_fields(
@@ -799,6 +838,11 @@ def main() -> None:
             "input_sha256": row["degraded_sha256"],
             "sample_rate": SAMPLE_RATE,
             "frame_count": sf.info(row["degraded_path"]).frames,
+            "metric_crop_start_sample": (
+                max(sf.info(row["degraded_path"]).frames - SV_METRIC_SAMPLES, 0)
+                if row["view"] == "sv"
+                else 0
+            ),
             "metric_preprocessing": (
                 "exact Praat 34 Hz high-pass, full timeline"
                 if row["view"] == "cs"
@@ -853,7 +897,13 @@ def main() -> None:
             continue
         for candidate in CANDIDATE_NAMES:
             waveform = base_cpu.to(device).requires_grad_(True)
-            input_pulses = waveform.new_tensor(cache["pulse_positions_samples"])
+            mapped_input_positions = map_input_metric_pulses_to_output(
+                np.asarray(cache["pulse_positions_samples"], dtype=np.float64),
+                input_frame_count=panel_row["degraded_frame_count"],
+                output_frame_count=panel_row["base_frame_count"],
+                view=panel_row["view"],
+            )
+            input_pulses = waveform.new_tensor(mapped_input_positions)
             output_pulses = waveform.new_tensor(
                 output_topology["pulse_positions_samples"]
             )
@@ -907,7 +957,25 @@ def main() -> None:
                 "output_sha256": sha256_file(output_path),
                 "cache_record_sha256": cache["record_sha256"],
                 "cache_pulse_count": cache["pulse_count"],
+                "mapped_cache_pulse_count": int(mapped_input_positions.size),
                 "base_output_pulse_count": output_topology["pulse_count"],
+                "degraded_frame_count": panel_row["degraded_frame_count"],
+                "base_frame_count": panel_row["base_frame_count"],
+                "trailing_truncation_samples": panel_row[
+                    "trailing_truncation_samples"
+                ],
+                "input_to_output_metric_position_shift_samples": (
+                    max(
+                        panel_row["degraded_frame_count"] - SV_METRIC_SAMPLES,
+                        0,
+                    )
+                    - max(
+                        panel_row["base_frame_count"] - SV_METRIC_SAMPLES,
+                        0,
+                    )
+                    if panel_row["view"] == "sv"
+                    else 0
+                ),
                 **safety,
             }
             candidate_records.append(record)
@@ -947,9 +1015,14 @@ def main() -> None:
                 f"exact candidate scoring failed for {case_id}/{candidate}: "
                 f"{exact['error_type']} {exact['error_message']}"
             )
-        cache_positions = np.asarray(
-            cache_by_case[case_id]["pulse_positions_samples"],
-            dtype=np.float64,
+        cache_positions = map_input_metric_pulses_to_output(
+            np.asarray(
+                cache_by_case[case_id]["pulse_positions_samples"],
+                dtype=np.float64,
+            ),
+            input_frame_count=record["degraded_frame_count"],
+            output_frame_count=record["base_frame_count"],
+            view=record["view"],
         )
         base_positions = np.asarray(
             output_topology_by_case[case_id]["pulse_positions_samples"],
@@ -1004,9 +1077,14 @@ def main() -> None:
         for row in cache_rows
     ) / len(cache_rows)
     cache_records_hash_valid = all(cache_record_valid(row) for row in cache_rows)
+    timeline_contract_valid = all(
+        0 <= row["trailing_truncation_samples"] < GENERATOR_HOP_SIZE
+        for row in panel_rows
+    )
     cache_gate = (
         cache_coverage >= CACHE_COVERAGE_MIN
         and cache_records_hash_valid
+        and timeline_contract_valid
         and all(row["pulse_runtime_ms"] <= CACHE_RUNTIME_MAX_MS for row in cache_rows)
         and all(row["record_bytes"] <= CACHE_RECORD_MAX_BYTES for row in cache_rows)
         and all(not row["clean_target_pulse_topology_present"] for row in cache_rows)
@@ -1063,7 +1141,14 @@ def main() -> None:
             "degraded_input_only": True,
             "clean_target_pulse_topology_present": False,
             "input_hash_bound": True,
-            "output_time_axis_must_match_input": True,
+            "output_start_time_aligned": True,
+            "output_trailing_truncation_lt_generator_hop": True,
+            "generator_hop_size_samples": GENERATOR_HOP_SIZE,
+            "maximum_observed_trailing_truncation_samples": max(
+                row["trailing_truncation_samples"] for row in panel_rows
+            ),
+            "timeline_contract_valid": timeline_contract_valid,
+            "sv_metric_coordinates_compensate_trailing_truncation": True,
             "exact_output_relocates_pulses": True,
             "coverage": cache_coverage,
             "coverage_min": CACHE_COVERAGE_MIN,
