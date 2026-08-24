@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -29,6 +30,7 @@ from model.avqi_components import (
     pool_frequency_aware_shared_feature_map,
     standardized_component_loss,
 )
+from scripts import evaluate_avqi_component_backprop as component_backprop
 from scripts.avqi_vctk_selection import (
     CONDITIONS,
     select_exact_complete_external_rows,
@@ -1302,6 +1304,73 @@ def test_cpps_v12_and_hnr_v7_share_one_estimator_without_component_drift() -> No
     for gradient in (cpps_gradient, hnr_gradient):
         assert torch.isfinite(gradient).all()
         assert 0.0 < float(gradient.norm()) <= 1e4
+
+
+def test_cpps_v12_hnr_v7_combined_scorer_has_zero_optimizer_steps(
+    monkeypatch,
+) -> None:
+    cached_components = torch.tensor(
+        [
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            [1.5, 2.5, 3.5, 4.5, 5.5, 6.5],
+        ]
+    )
+    examples = [
+        SimpleNamespace(
+            split="surrogate_train",
+            own_target=cached_components[0],
+        ),
+        SimpleNamespace(
+            split="surrogate_train",
+            own_target=cached_components[1],
+        ),
+        SimpleNamespace(
+            split="surrogate_calibration",
+            own_target=cached_components[2],
+        ),
+    ]
+
+    def fake_cache(
+        predictor: torch.nn.Module,
+        current_examples: list[SimpleNamespace],
+        device: torch.device,
+    ) -> torch.Tensor:
+        assert current_examples is examples
+        assert isinstance(
+            predictor,
+            PraatDifferentiableAVQIComponentEstimator,
+        )
+        assert predictor.cpps_mode == "praat_view_input_v12"
+        assert predictor.hnr_mode == "praat_pitch_path_v7"
+        return cached_components.to(device)
+
+    monkeypatch.setattr(
+        component_backprop,
+        "cache_direct_component_features",
+        fake_cache,
+    )
+    predictor, training, _, _, cached_inputs = (
+        component_backprop.train_waveform_predictor(
+            examples,
+            torch.device("cpu"),
+            epochs=0,
+            patience=0,
+            seed=20260824,
+            architecture=(
+                "direct_praat_hard_cpps_view_input_v12_hnr_pitch_path_v7"
+            ),
+            max_optimizer_steps=0,
+        )
+    )
+
+    assert isinstance(predictor, PraatDifferentiableAVQIComponentEstimator)
+    assert predictor.cpps_mode == "praat_view_input_v12"
+    assert predictor.hnr_mode == "praat_pitch_path_v7"
+    assert training["optimizer_steps"] == 0
+    assert training["trainable_parameter_count"] == 0
+    assert sum(parameter.numel() for parameter in predictor.parameters()) == 0
+    assert torch.equal(cached_inputs, cached_components)
 
 
 def test_praat_differentiable_v2_is_invariant_and_family_sensitive() -> None:
