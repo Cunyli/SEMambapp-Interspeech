@@ -207,6 +207,55 @@ component-level promotion, not evidence for putting a combined AVQI loss into
 generator training, and not a claim that dual-head or independent-predictor
 research can never work.
 
+Shimmer dB was subsequently isolated from the Shimmer-% path. Pure-Torch pulse
+locators did not retain exact noisy-output topology, while a disclosed
+Candidate C refreshed each current output's exact Praat pulse topology once,
+detached that discrete topology, and differentiated only the existing live
+asymmetric-Hann amplitude and dB-ratio path. The fixed mechanism step was
+`0.001`; it is a Praat-assisted straight-through metric branch, not a
+pure-Torch estimator. Six new hash-ranked pathological speakers produced 12
+speaker-disjoint CS/SV cases with balanced RIR-only, SNR20, and SNR10 recipes.
+Candidates were sealed before exact base/candidate outcomes were opened.
+
+| Candidate-C fresh Shimmer-dB result | Value | Gate |
+|---|---:|---|
+| Material exact improvements | `10/11` (`90.9%`) | pass (`>=80%`) |
+| Median normalized exact gap reduction | `0.04378` | pass (`>=0.02`) |
+| Required CS/SV, mild/severe, RIR/SNR20/SNR10 slices | `7/7` | pass |
+| Gradient L2 range | `0.0583--26.8139` | pass |
+| Exact output topology stability | `12/12` | pass |
+| Full-band pathology / denoising / non-target / waveform safety | all pass | pass |
+| Current-output topology refresh | median `239.19 ms`, max `823.31 ms` | **fail** (`<=500 ms`) |
+
+Two CS refreshes took `823.31 ms` and `595.62 ms`; the other ten took
+`138.57--364.92 ms`. Therefore all waveform-effect and non-runtime gates pass,
+but the component decision is
+`NO_GO_SHIMMER_DB_CANDIDATE_C_FRESH_PANEL` under the unchanged 500 ms runtime
+contract. This is evidence that the exact-topology amplitude gradient is
+directionally useful, not permission to hide its Praat dependency or promote
+the current runtime implementation. Job `19906678` created the immutable seal;
+after an unused clean-target topology assertion interrupted reporting, job
+`19906781` finalized only those hash-bound waveforms without rerunning
+simulation, generator inference, or candidate generation. The report and
+results SHA256 values are
+`32488e52070d5555172d241b79cde72d2f31cb8d8c9a1962f6e95d5c498e73ad`
+and
+`809fadcfb48311d910b64fd001d2d2925dbe85bc0265a6229114e9ad01185795`.
+
+LTAS slope required no further formula development. On its frozen 24-speaker,
+48-case external authority panel, all 192 selected exact rows were valid,
+overall exact/candidate Spearman was `0.9658`, and the candidate/exact 3 kHz
+low-pass standardized-distance ratio was `1.0501` (CS `1.0714`, SV `0.9740`).
+The existing absolute `0.10` anti-shortcut threshold is not uniformly
+consistent with exact Praat SV behavior; the formula is authority-aligned, but
+changing production to the proposed exact-relative `[0.75,1.25]` contract
+remains a separate gate-review decision and was not performed here. Its frozen
+authority report SHA256 is
+`01e8ecfc9997ce3c02c8ad51034167a9a74f9f070ee0912c5ee85c73265519ee`.
+
+The authoritative training decision therefore remains
+`NO_GO_AVQI_T2_TRAINING`, with generator optimizer steps equal to zero.
+
 The current locked receipts are on Triton under
 `runs/avqi_component_direct_c_v5_multiseed_20260817_01/`,
 `runs/avqi_component_direct_c_v5_waveform_pilot_offset4_20260817_02/`, and
