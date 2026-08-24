@@ -52,14 +52,17 @@ def test_panel_rejects_previously_opened_waveform_speaker() -> None:
     namespace = load_namespace()
     specs = list(namespace["panel_specs"]())
     panel_spec = namespace["PanelSpec"]
-    original = specs[0]
-    specs[0] = panel_spec(
-        "FD26",
-        original.sample_group,
-        original.view,
-        original.condition,
-        original.recipe_index,
-    )
+    original_speaker = specs[0].speaker_id
+    for index, original in enumerate(specs):
+        if original.speaker_id != original_speaker:
+            continue
+        specs[index] = panel_spec(
+            "FD26",
+            original.sample_group,
+            original.view,
+            original.condition,
+            original.recipe_index,
+        )
     with pytest.raises(ValueError, match="previous waveform"):
         namespace["validate_panel_specs"](tuple(specs))
 
