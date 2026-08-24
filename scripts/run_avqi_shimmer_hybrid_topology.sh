@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run the opened-panel Shimmer hybrid/coupled mechanism diagnostic on Slurm.
+# Run the opened-panel Shimmer hybrid/Candidate-C mechanism diagnostic on Slurm.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,7 +8,7 @@ ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 PYTHON_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_shimmer_hybrid_topology.py"
 
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_hybrid_topology_v9_20260824_01}"
+RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_current_output_refresh_v10_20260824_01}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 PANEL_ROOT="${PANEL_ROOT:-/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_route_c_shimmer_v6_fresh_panel_20260821_02/outputs}"
@@ -70,7 +70,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   fi
   sbatch \
     --parsable \
-    --job-name=avqi-shim-hybrid-v9 \
+    --job-name=avqi-shim-refresh-v10 \
     --partition="$PARTITION" \
     --nodes=1 \
     --ntasks=1 \
@@ -101,7 +101,7 @@ eval "$(conda shell.bash hook)"
 conda activate semambapp
 export PYTHONPATH="$SOURCE_ROOT:$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-LIVE_LOG="$LOG_DIR/shimmer_hybrid_${SLURM_JOB_ID}.log"
+LIVE_LOG="$LOG_DIR/shimmer_refresh_${SLURM_JOB_ID}.log"
 echo "event=start job=$SLURM_JOB_ID commit=$SOURCE_COMMIT time=$(date -Is)" | tee -a "$LIVE_LOG"
 python -c 'import torch; print("torch", torch.__version__); print("cuda", torch.cuda.is_available()); print("device", torch.cuda.get_device_name(0))' | tee -a "$LIVE_LOG"
 python "$PYTHON_SCRIPT" \

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit cached-input-pulse and coupled Shimmer gradients on an opened panel.
+"""Audit Praat-assisted and coupled Shimmer gradients on an opened panel.
 
 This is a mechanism diagnostic, not a promotion panel.  Exact Praat extracts
 pulse positions from each degraded input once.  PyTorch then evaluates the
@@ -8,10 +8,11 @@ the time-aligned frozen S3_500 output.  Exact Praat independently relocates
 pulses and scores all six components after every fixed bounded waveform step.
 
 The script also evaluates the already-promoted Shimmer-percent gradient, the
-frozen v6 Shimmer-dB gradient, and a non-deployable output-pulse oracle upper
-bound.  The alpha, cases, gates, and candidate names are fixed; opened exact
-results never select a hyperparameter.  No generator optimizer is loaded or
-run.
+frozen v6 Shimmer-dB gradient, and Candidate C: exact Praat refreshes the
+current output topology separately for each fixed alpha/step, after which only
+the live Torch amplitude and dB path receives gradients.  A supervisor-frozen
+three-point alpha grid may freeze a mechanism parameter on this opened panel,
+but cannot promote the component.  No generator optimizer is loaded or run.
 """
 
 from __future__ import annotations
@@ -46,6 +47,8 @@ GENERATOR_HOP_SIZE = 100
 SHIMMER_PERCENT_INDEX = AVQI_COMPONENT_NAMES.index("shimmer_percent")
 SHIMMER_DB_INDEX = AVQI_COMPONENT_NAMES.index("shimmer_db")
 FIXED_ALPHA = 1e-3
+CURRENT_OUTPUT_REFRESH_ALPHAS = (3e-4, 1e-3, 3e-3)
+CURRENT_OUTPUT_REFRESH_PREFIX = "praat_current_output_topology_refresh_db"
 MATERIAL_GAP_THRESHOLD = 0.02
 MEDIAN_REDUCTION_GATE = 0.02
 IMPROVEMENT_FRACTION_GATE = 0.80
@@ -65,13 +68,22 @@ REQUIRED_EFFECT_SLICES = (
     "view=sv",
     "severity=pathological_mild",
     "severity=pathological_severe",
+    "condition=rir_only",
+    "condition=snr20",
+    "condition=snr10",
 )
-CANDIDATE_NAMES = (
+CURRENT_OUTPUT_REFRESH_CANDIDATES = (
+    f"{CURRENT_OUTPUT_REFRESH_PREFIX}_alpha_0p0003",
+    f"{CURRENT_OUTPUT_REFRESH_PREFIX}_alpha_0p001",
+    f"{CURRENT_OUTPUT_REFRESH_PREFIX}_alpha_0p003",
+)
+BASELINE_CANDIDATE_NAMES = (
     "v6_db",
     "praat_input_topology_absolute_db",
     "shimmer_percent_coupled",
     "output_pulse_oracle_db",
 )
+CANDIDATE_NAMES = BASELINE_CANDIDATE_NAMES + CURRENT_OUTPUT_REFRESH_CANDIDATES
 COMPONENT_PREFIXES = {
     "cpps": "cpps",
     "hnr": "hnr",
@@ -441,7 +453,10 @@ def candidate_proxy(
             metric_sample_count=SV_METRIC_SAMPLES if view == "sv" else None,
         )[1]
         return proxy, "shimmer_db"
-    if candidate == "output_pulse_oracle_db":
+    if (
+        candidate == "output_pulse_oracle_db"
+        or candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES
+    ):
         proxy = predictor.raw_shimmer_from_pulse_positions(
             waveform,
             output_pulses,
@@ -462,9 +477,18 @@ def candidate_proxy(
     raise ValueError(f"unknown Shimmer hybrid candidate: {candidate}")
 
 
+def candidate_alpha(candidate: str) -> float:
+    if candidate not in CURRENT_OUTPUT_REFRESH_CANDIDATES:
+        return FIXED_ALPHA
+    return CURRENT_OUTPUT_REFRESH_ALPHAS[
+        CURRENT_OUTPUT_REFRESH_CANDIDATES.index(candidate)
+    ]
+
+
 def normalized_gradient_step(
     waveform: torch.Tensor,
     gradient: torch.Tensor,
+    alpha: float,
 ) -> torch.Tensor:
     gradient_rms = gradient.square().mean().sqrt()
     base_rms = waveform.square().mean().sqrt()
@@ -472,8 +496,13 @@ def normalized_gradient_step(
         return waveform.detach().clone()
     return (
         waveform.detach()
-        - FIXED_ALPHA * base_rms * gradient / gradient_rms
+        - alpha * base_rms * gradient / gradient_rms
     )
+
+
+def pulse_positions_sha256(positions: list[float] | np.ndarray) -> str:
+    values = np.asarray(positions, dtype="<f8")
+    return hashlib.sha256(values.tobytes()).hexdigest()
 
 
 def db_ratio(numerator: float, denominator: float) -> float:
@@ -676,6 +705,11 @@ def aggregate_candidate(
     required_slice_gate = all(
         slices[name]["decision"] == "PASS" for name in REQUIRED_EFFECT_SLICES
     )
+    forward_errors = [
+        row["forward_normalized_abs_error_shimmer_db"]
+        for row in selected
+        if row["forward_normalized_abs_error_shimmer_db"] is not None
+    ]
     effect_pass = (
         bool(material)
         and median(d_b_reductions) >= MEDIAN_REDUCTION_GATE
@@ -712,6 +746,30 @@ def aggregate_candidate(
         ),
         "gradient_l2_max": max(row["gradient_l2_norm"] for row in selected),
         "all_gradients_finite": all(row["gradient_finite"] for row in selected),
+        "pulse_refresh_runtime_ms": {
+            "median": median(
+                row["pulse_refresh_runtime_ms"] for row in selected
+            ),
+            "maximum": max(
+                row["pulse_refresh_runtime_ms"] for row in selected
+            ),
+        },
+        "torch_step_runtime_ms": {
+            "median": median(row["torch_step_runtime_ms"] for row in selected),
+            "maximum": max(row["torch_step_runtime_ms"] for row in selected),
+        },
+        "total_metric_step_overhead_ms": {
+            "median": median(
+                row["total_metric_step_overhead_ms"] for row in selected
+            ),
+            "maximum": max(
+                row["total_metric_step_overhead_ms"] for row in selected
+            ),
+        },
+        "forward_normalized_abs_error_shimmer_db": {
+            "median": median(forward_errors) if forward_errors else None,
+            "maximum": max(forward_errors) if forward_errors else None,
+        },
         "nonselected_median_normalized_gap_increase": nonselected_medians,
         "minimum_residual_rms_db": min(
             row["residual_rms_db"] for row in selected
@@ -739,6 +797,10 @@ def aggregate_candidate(
                 <= GRADIENT_NORM_RANGE[1]
                 for row in selected
             ),
+            "pulse_refresh_runtime": max(
+                row["pulse_refresh_runtime_ms"] for row in selected
+            )
+            <= CACHE_RUNTIME_MAX_MS,
             "nonselected": all(
                 value <= NONSELECTED_MEDIAN_INCREASE_GATE
                 for value in nonselected_medians.values()
@@ -802,6 +864,7 @@ def main() -> None:
     waveform_root.mkdir(parents=True)
 
     topology_items = []
+    refresh_topology_items = []
     for row in panel_rows:
         for role in ("degraded_input", "base_output"):
             path_key = "degraded_path" if role == "degraded_input" else "base_path"
@@ -815,12 +878,42 @@ def main() -> None:
                     "score_components": False,
                 }
             )
+        for candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES:
+            refresh_topology_items.append(
+                {
+                    "id": f"refresh:{candidate}:{row['case_id']}",
+                    "case_id": row["case_id"],
+                    "role": candidate,
+                    "path": row["base_path"],
+                    "view": row["view"],
+                    "score_components": False,
+                }
+            )
     topology_exact = run_exact(
         topology_items,
         args.exact_python,
         args.avqi_code_root,
     )
-    topology_by_id = {row["id"]: row for row in topology_exact["rows"]}
+    refresh_batch_started = time.perf_counter()
+    refresh_topology_exact = run_exact(
+        refresh_topology_items,
+        args.exact_python,
+        args.avqi_code_root,
+    )
+    refresh_batch_wall_ms = 1000.0 * (
+        time.perf_counter() - refresh_batch_started
+    )
+    if (
+        refresh_topology_exact["parselmouth_version"]
+        != topology_exact["parselmouth_version"]
+        or refresh_topology_exact["praat_version"]
+        != topology_exact["praat_version"]
+    ):
+        raise ValueError("exact runtime drift during Candidate-C refresh")
+    topology_by_id = {
+        row["id"]: row
+        for row in topology_exact["rows"] + refresh_topology_exact["rows"]
+    }
 
     cache_rows = []
     for row in panel_rows:
@@ -876,6 +969,13 @@ def main() -> None:
         row["case_id"]: topology_by_id[f"base_output:{row['case_id']}"]
         for row in panel_rows
     }
+    refresh_topology_by_candidate_case = {
+        (candidate, row["case_id"]): topology_by_id[
+            f"refresh:{candidate}:{row['case_id']}"
+        ]
+        for candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES
+        for row in panel_rows
+    }
 
     device = torch.device(args.device)
     predictor, calibrator, target_mean, target_scale = load_predictor(
@@ -904,9 +1004,23 @@ def main() -> None:
                 view=panel_row["view"],
             )
             input_pulses = waveform.new_tensor(mapped_input_positions)
+            if candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES:
+                step_topology = refresh_topology_by_candidate_case[
+                    (candidate, case_id)
+                ]
+            else:
+                step_topology = output_topology
+            if (
+                step_topology["scoring_status"] != "ok"
+                or step_topology["pulse_count"] < 3
+            ):
+                continue
             output_pulses = waveform.new_tensor(
-                output_topology["pulse_positions_samples"]
+                step_topology["pulse_positions_samples"]
             )
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            torch_step_started = time.perf_counter()
             proxy, optimized_component = candidate_proxy(
                 candidate,
                 predictor,
@@ -925,7 +1039,23 @@ def main() -> None:
                 / target_scale[optimized_index].clamp_min(1e-8)
             ).square()
             gradient = torch.autograd.grad(loss, waveform)[0]
-            candidate_waveform = normalized_gradient_step(waveform, gradient)
+            alpha = candidate_alpha(candidate)
+            candidate_waveform = normalized_gradient_step(
+                waveform,
+                gradient,
+                alpha,
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            torch_step_runtime_ms = 1000.0 * (
+                time.perf_counter() - torch_step_started
+            )
+            pulse_refresh_runtime_ms = (
+                float(step_topology["pulse_runtime_ms"])
+                if candidate == "output_pulse_oracle_db"
+                or candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES
+                else 0.0
+            )
             output_path = waveform_root / (
                 f"{safe_name(case_id)}__{candidate}.wav"
             )
@@ -946,13 +1076,22 @@ def main() -> None:
                 "condition": panel_row["condition"],
                 "candidate": candidate,
                 "optimized_component": optimized_component,
-                "fixed_alpha": FIXED_ALPHA,
+                "fixed_alpha": alpha,
                 "proxy_before": float(proxy.detach()),
                 "proxy_target": target_value,
                 "proxy_loss": float(loss.detach()),
                 "gradient_l2_norm": float(gradient.norm()),
                 "gradient_rms": float(gradient.square().mean().sqrt()),
                 "gradient_finite": bool(torch.isfinite(gradient).all()),
+                "pulse_topology_role": str(step_topology["role"]),
+                "pulse_topology_sha256": pulse_positions_sha256(
+                    step_topology["pulse_positions_samples"]
+                ),
+                "pulse_refresh_runtime_ms": pulse_refresh_runtime_ms,
+                "torch_step_runtime_ms": torch_step_runtime_ms,
+                "total_metric_step_overhead_ms": (
+                    pulse_refresh_runtime_ms + torch_step_runtime_ms
+                ),
                 "output_path": str(output_path.resolve()),
                 "output_sha256": sha256_file(output_path),
                 "cache_record_sha256": cache["record_sha256"],
@@ -1028,17 +1167,41 @@ def main() -> None:
             output_topology_by_case[case_id]["pulse_positions_samples"],
             dtype=np.float64,
         )
+        if candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES:
+            topology_reference = refresh_topology_by_candidate_case[
+                (candidate, case_id)
+            ]
+        else:
+            topology_reference = output_topology_by_case[case_id]
+        reference_positions = np.asarray(
+            topology_reference["pulse_positions_samples"],
+            dtype=np.float64,
+        )
         after_positions = np.asarray(
             exact["pulse_positions_samples"],
             dtype=np.float64,
         )
-        base_match = nearest_match_rate(cache_positions, base_positions)
-        after_match = nearest_match_rate(cache_positions, after_positions)
-        base_count_ratio = base_positions.size / max(cache_positions.size, 1)
-        after_count_ratio = after_positions.size / max(cache_positions.size, 1)
+        cache_to_base_match = nearest_match_rate(cache_positions, base_positions)
+        cache_to_candidate_match = nearest_match_rate(
+            cache_positions,
+            after_positions,
+        )
+        reference_to_candidate_match = nearest_match_rate(
+            reference_positions,
+            after_positions,
+        )
+        candidate_to_reference_match = nearest_match_rate(
+            after_positions,
+            reference_positions,
+        )
+        candidate_reference_count_ratio = after_positions.size / max(
+            reference_positions.size,
+            1,
+        )
         topology_pass = (
-            after_match >= base_match - TOPOLOGY_MATCH_DROP_MAX
-            and abs(after_count_ratio - base_count_ratio)
+            reference_to_candidate_match >= 1.0 - TOPOLOGY_MATCH_DROP_MAX
+            and candidate_to_reference_match >= 1.0 - TOPOLOGY_MATCH_DROP_MAX
+            and abs(candidate_reference_count_ratio - 1.0)
             <= TOPOLOGY_COUNT_RATIO_DRIFT_MAX
         )
         component_fields = exact_component_fields(
@@ -1054,16 +1217,38 @@ def main() -> None:
             / max(target_scale_np[SHIMMER_DB_INDEX], 1e-8)
             > MATERIAL_GAP_THRESHOLD
         )
+        forward_normalized_error = (
+            abs(
+                record["proxy_before"]
+                - component_fields["exact_before_shimmer_db"]
+            )
+            / max(target_scale_np[SHIMMER_DB_INDEX], 1e-8)
+            if record["optimized_component"] == "shimmer_db"
+            else None
+        )
         csv_rows.append(
             {
                 **record,
                 **component_fields,
                 "material_shimmer_db_gap": material,
                 "candidate_exact_pulse_count": exact["pulse_count"],
-                "base_cache_match_rate_16_samples": base_match,
-                "candidate_cache_match_rate_16_samples": after_match,
-                "base_cache_pulse_count_ratio": base_count_ratio,
-                "candidate_cache_pulse_count_ratio": after_count_ratio,
+                "cache_to_base_match_rate_16_samples": cache_to_base_match,
+                "cache_to_candidate_match_rate_16_samples": (
+                    cache_to_candidate_match
+                ),
+                "topology_reference_role": topology_reference["role"],
+                "reference_to_candidate_match_rate_16_samples": (
+                    reference_to_candidate_match
+                ),
+                "candidate_to_reference_match_rate_16_samples": (
+                    candidate_to_reference_match
+                ),
+                "candidate_reference_pulse_count_ratio": (
+                    candidate_reference_count_ratio
+                ),
+                "forward_normalized_abs_error_shimmer_db": (
+                    forward_normalized_error
+                ),
                 "topology_stability_pass": topology_pass,
             }
         )
@@ -1112,8 +1297,72 @@ def main() -> None:
     coupled_pass = candidate_aggregates[
         "shimmer_percent_coupled"
     ]["all_gates_pass"]
+    passing_refresh_candidates = [
+        candidate
+        for candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES
+        if candidate_aggregates[candidate]["all_gates_pass"]
+    ]
+    selected_refresh_candidate = (
+        min(
+            passing_refresh_candidates,
+            key=lambda candidate: (
+                -candidate_aggregates[candidate][
+                    "median_exact_db_normalized_gap_reduction"
+                ],
+                candidate_alpha(candidate),
+            ),
+        )
+        if passing_refresh_candidates
+        else None
+    )
+    selected_refresh_alpha = (
+        candidate_alpha(selected_refresh_candidate)
+        if selected_refresh_candidate is not None
+        else None
+    )
+    oracle_rows = {
+        row["case_id"]: row
+        for row in csv_rows
+        if row["candidate"] == "output_pulse_oracle_db"
+    }
+    refresh_alpha_001 = CURRENT_OUTPUT_REFRESH_CANDIDATES[1]
+    refresh_alpha_001_rows = {
+        row["case_id"]: row
+        for row in csv_rows
+        if row["candidate"] == refresh_alpha_001
+    }
+    oracle_coverage_equal = set(oracle_rows) == set(refresh_alpha_001_rows)
+    oracle_alias_equivalence = {
+        "case_coverage_equal": oracle_coverage_equal,
+        "pulse_topology_hash_equal": oracle_coverage_equal
+        and all(
+            oracle_rows[case_id]["pulse_topology_sha256"]
+            == refresh_alpha_001_rows[case_id]["pulse_topology_sha256"]
+            for case_id in oracle_rows
+        ),
+        "waveform_hash_equal": oracle_coverage_equal
+        and all(
+            oracle_rows[case_id]["output_sha256"]
+            == refresh_alpha_001_rows[case_id]["output_sha256"]
+            for case_id in oracle_rows
+        ),
+        "exact_six_component_values_equal": oracle_coverage_equal
+        and all(
+            all(
+                oracle_rows[case_id][f"exact_after_{COMPONENT_PREFIXES[name]}"]
+                == refresh_alpha_001_rows[case_id][
+                    f"exact_after_{COMPONENT_PREFIXES[name]}"
+                ]
+                for name in AVQI_COMPONENT_NAMES
+            )
+            for case_id in oracle_rows
+        ),
+    }
+    oracle_alias_equivalence["proved_equal"] = all(
+        oracle_alias_equivalence.values()
+    )
     report = {
-        "schema_version": "avqi-route-c-shimmer-hybrid-opened-diagnostic-v1",
+        "schema_version": "avqi-route-c-shimmer-hybrid-opened-diagnostic-v2",
         "decision": (
             "PASS_ABSOLUTE_CACHE_MECHANISM_ONLY_FRESH_REQUIRED"
             if hybrid_pass
@@ -1124,8 +1373,13 @@ def main() -> None:
             if coupled_pass
             else "FAIL_COUPLED_DB_COIMPROVEMENT_MECHANISM"
         ),
+        "candidate_c_decision": (
+            "PASS_CURRENT_OUTPUT_EXACT_TOPOLOGY_REFRESH_FREEZE_FOR_FRESH_PANEL"
+            if selected_refresh_candidate is not None
+            else "FAIL_CURRENT_OUTPUT_EXACT_TOPOLOGY_REFRESH_DO_NOT_PROMOTE"
+        ),
         "panel_status": "already_opened_mechanism_diagnostic_only",
-        "fresh_panel_authorized": hybrid_pass or coupled_pass,
+        "fresh_panel_authorized": selected_refresh_candidate is not None,
         "promotion_authorized": False,
         "formal_generator_training_authorized": False,
         "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
@@ -1136,7 +1390,36 @@ def main() -> None:
         "device": str(device),
         "candidate_names": list(CANDIDATE_NAMES),
         "fixed_alpha": FIXED_ALPHA,
-        "alpha_selected_from_opened_panel": False,
+        "candidate_c": {
+            "route_type": "hybrid_praat_assisted_straight_through_metric_branch",
+            "pure_torch_estimator": False,
+            "topology_detached": True,
+            "pulse_extractor_called_per_candidate_step": True,
+            "pulse_refresh_calls": len(refresh_topology_items),
+            "pulse_refresh_batch_wall_ms": refresh_batch_wall_ms,
+            "pulse_refresh_amortized_wall_ms_per_step": (
+                refresh_batch_wall_ms / len(refresh_topology_items)
+            ),
+            "pulse_refresh_internal_runtime_ms": {
+                "median": median(
+                    row["pulse_runtime_ms"]
+                    for row in refresh_topology_exact["rows"]
+                ),
+                "maximum": max(
+                    row["pulse_runtime_ms"]
+                    for row in refresh_topology_exact["rows"]
+                ),
+            },
+            "alpha_grid_frozen_before_run": list(CURRENT_OUTPUT_REFRESH_ALPHAS),
+            "passing_candidates": passing_refresh_candidates,
+            "selected_candidate": selected_refresh_candidate,
+            "selected_alpha": selected_refresh_alpha,
+            "oracle_alias_at_alpha_0p001": oracle_alias_equivalence,
+        },
+        "alpha_selected_from_opened_panel": selected_refresh_alpha is not None,
+        "opened_panel_alpha_use": (
+            "mechanism_parameter_freeze_only; never component promotion"
+        ),
         "cache_contract": {
             "degraded_input_only": True,
             "clean_target_pulse_topology_present": False,
@@ -1177,6 +1460,8 @@ def main() -> None:
             "topology_match_tolerance_samples": TOPOLOGY_MATCH_TOLERANCE_SAMPLES,
             "topology_match_drop_max": TOPOLOGY_MATCH_DROP_MAX,
             "topology_count_ratio_drift_max": TOPOLOGY_COUNT_RATIO_DRIFT_MAX,
+            "required_effect_slices": list(REQUIRED_EFFECT_SLICES),
+            "pulse_refresh_runtime_max_ms": CACHE_RUNTIME_MAX_MS,
         },
         "candidate_aggregates": candidate_aggregates,
         "exact_runtime": {
@@ -1188,8 +1473,8 @@ def main() -> None:
         "artifacts": {},
         "limitations": [
             "The twelve cases and their exact references were opened by the prior Shimmer-percent pilot.",
-            "This run can falsify a mechanism but cannot select alpha or promote a component.",
-            "The output-pulse oracle is non-deployable and is reported only as an upper bound.",
+            "The supervisor-authorized frozen three-point grid can freeze a Candidate-C mechanism alpha here but cannot promote the component.",
+            "Candidate C is Praat-assisted and cannot be reported as a pure-PyTorch estimator.",
             "Basic waveform safety is measured here; full pathology and denoising gates remain mandatory on a fresh panel.",
         ],
     }
@@ -1208,9 +1493,14 @@ def main() -> None:
     }
     write_json(report_path, report)
     receipt = {
-        "schema_version": "avqi-route-c-shimmer-hybrid-opened-receipt-v1",
+        "schema_version": "avqi-route-c-shimmer-hybrid-opened-receipt-v2",
         "decision": report["decision"],
         "coupled_baseline_decision": report["coupled_baseline_decision"],
+        "candidate_c_decision": report["candidate_c_decision"],
+        "candidate_c_selected_alpha": report["candidate_c"]["selected_alpha"],
+        "candidate_c_oracle_alias_proved_equal": report["candidate_c"]
+        ["oracle_alias_at_alpha_0p001"]["proved_equal"],
+        "fresh_panel_authorized": report["fresh_panel_authorized"],
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
         "generator_optimizer_steps": 0,

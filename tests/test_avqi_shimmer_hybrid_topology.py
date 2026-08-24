@@ -6,8 +6,12 @@ import pytest
 from scripts.evaluate_avqi_shimmer_hybrid_topology import (
     CACHE_RECORD_MAX_BYTES,
     CANDIDATE_NAMES,
+    CURRENT_OUTPUT_REFRESH_ALPHAS,
+    CURRENT_OUTPUT_REFRESH_CANDIDATES,
     FIXED_ALPHA,
     GENERATOR_HOP_SIZE,
+    REQUIRED_EFFECT_SLICES,
+    candidate_alpha,
     cache_record_sha256,
     cache_record_valid,
     finalize_cache_record,
@@ -23,7 +27,20 @@ def test_hybrid_candidate_contract_is_fixed() -> None:
         "praat_input_topology_absolute_db",
         "shimmer_percent_coupled",
         "output_pulse_oracle_db",
+        "praat_current_output_topology_refresh_db_alpha_0p0003",
+        "praat_current_output_topology_refresh_db_alpha_0p001",
+        "praat_current_output_topology_refresh_db_alpha_0p003",
     )
+    assert CURRENT_OUTPUT_REFRESH_ALPHAS == (3e-4, 1e-3, 3e-3)
+    assert tuple(
+        candidate_alpha(candidate)
+        for candidate in CURRENT_OUTPUT_REFRESH_CANDIDATES
+    ) == CURRENT_OUTPUT_REFRESH_ALPHAS
+    assert {
+        "condition=rir_only",
+        "condition=snr20",
+        "condition=snr10",
+    }.issubset(REQUIRED_EFFECT_SLICES)
     assert CACHE_RECORD_MAX_BYTES == 65_536
 
 
