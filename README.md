@@ -293,6 +293,36 @@ preregistered v16 candidate is a uniform topology-certified trust region:
 only topology, finite/safety, and frozen-topology proxy checks. It must not use
 candidate exact outcomes or tune on these opened speakers.
 
+That v16 trust-region family was then falsified on a preregistered four-case
+opened-v15 mechanism prototype before any 24-case engineering expansion. The
+fixed ladder was `0.001`, `0.0005`, `0.00025`, and `0.000125`; all four
+candidates were rendered to PCM24 and exact-topology refreshed concurrently,
+and every refresh plus staging was counted inside the unchanged `500 ms`
+per-case contract. Job `19913009` selected `0.0005` for
+`PD_37/CS/SNR20`, restoring exact count/match (`202 -> 202`, `1.0/1.0`), and
+kept both stable SV controls at `0.001`. However, `FD23/CS/RIR` had no valid
+step: every ladder point changed `452 -> 454` pulses with the same
+`0.8119469/0.8083700` bidirectional match, despite finite nonzero PCM24 updates
+and proxy-gap improvement at every alpha. Its total metric-step runtime was
+`679.064 ms`, so it also failed the frozen latency gate; the other three cases
+were `169.283--319.918 ms` and passed.
+
+Selector coverage was therefore `3/4`. The implementation failed closed before
+opening any candidate exact Shimmer-dB or other exact-component outcome, as
+required by the preregistered anti-leakage contract. Decision:
+`NO_GO_SHIMMER_DB_TOPOLOGY_TRUST_REGION_SELECTOR_4CASE_PROTOTYPE`. This closes
+the fixed four-level topology-certified trust-region family without extending
+the ladder post hoc; it does not invalidate the exact-topology amplitude
+gradient or all Shimmer-dB routes. The authoritative run is
+`runs/avqi_route_c_shimmer_db_trust_region_v16_prototype_v15_20260824_02_instrumented/`;
+report, attempts CSV, and receipt SHA256 values are
+`f7999c7739f67974c5bf4d4327228ce68d8c56d38b59d21109a8f299d9d9fd28`,
+`af017652b1416edd269732429d5febf609c302a34a77092b7816f3fc9ad09b2c`,
+and
+`940ecd0c04f073f33435d9a3440eabfcc291741acc238701b87c126055c438ba`.
+The preceding job `19912936` only exposed and motivated correction of PCM24
+instrumentation and stage timing; it is not the scientific decision run.
+
 LTAS slope required no further formula development. On its frozen 24-speaker,
 48-case external authority panel, all 192 selected exact rows were valid,
 overall exact/candidate Spearman was `0.9658`, and the candidate/exact 3 kHz
