@@ -438,6 +438,54 @@ def zero_crossing_shape_preserving_gradient_projection(
     }
 
 
+def synthetic_candidate_d_warmup(device: torch.device) -> dict[str, Any]:
+    """Prime only Candidate-D plan/projection kernels on a synthetic waveform."""
+    started = time.perf_counter()
+    sample_count = 5 * SAMPLE_RATE
+    timeline_cpu = np.arange(sample_count, dtype=np.float32)
+    waveform_cpu = (
+        0.08
+        * np.sin(2.0 * np.pi * 125.0 * timeline_cpu / SAMPLE_RATE)
+    ).astype(np.float32)
+    pulse_positions = np.arange(64, sample_count - 64, 128, dtype=np.float64)
+    topology = {
+        "topology_preprocessing": "exact_avqi_view_metric_waveform",
+        "source_sample_count": sample_count,
+        "metric_sample_count": sample_count,
+        "metric_constant_prefix_samples": 0,
+        "metric_source_ranges": [[0, sample_count]],
+        "metric_source_range_count": 1,
+        "metric_mapped_sample_count": sample_count,
+        "metric_reconstruction_max_pcm16_error": 0,
+        "metric_reconstruction_differing_samples": 0,
+        "pulse_positions_samples": pulse_positions.tolist(),
+        "pulse_count": int(pulse_positions.size),
+    }
+    plan = build_zero_crossing_cycle_plan(waveform_cpu, topology)
+    waveform = torch.from_numpy(waveform_cpu).to(device)
+    modulation = 1.0 + 0.2 * torch.sin(
+        2.0 * torch.pi * torch.arange(sample_count, device=device) / 2048.0
+    )
+    synthetic_gradient = waveform * modulation
+    projected, projection = zero_crossing_shape_preserving_gradient_projection(
+        waveform,
+        synthetic_gradient,
+        plan,
+    )
+    candidate = normalized_gradient_step(waveform, projected, FIXED_ALPHA)
+    synchronize(device)
+    return {
+        "synthetic_only": True,
+        "panel_or_training_waveform_used": False,
+        "sample_count": sample_count,
+        "pulse_count": int(pulse_positions.size),
+        "complete_cycle_count": projection["complete_cycle_count"],
+        "projected_gradient_valid": projection["projected_gradient_valid"],
+        "candidate_finite": bool(torch.isfinite(candidate).all()),
+        "runtime_ms": 1000.0 * (time.perf_counter() - started),
+    }
+
+
 def selector_contract() -> dict[str, Any]:
     return {
         "candidate": CANDIDATE_D_NAME,
@@ -501,7 +549,9 @@ def evaluate_case(
     base_topology = dict(base_rows[0])
     base_staging_ms = float(base_staging[0]["staging_ms"])
     base_refresh_ms = base_staging_ms + base_request_wall_ms
+    plan_started = time.perf_counter()
     plan = build_zero_crossing_cycle_plan(base_values, base_topology)
+    plan_runtime_ms = 1000.0 * (time.perf_counter() - plan_started)
 
     waveform = base_waveform.to(device).requires_grad_(True)
     source_indices = torch.as_tensor(
@@ -551,6 +601,7 @@ def evaluate_case(
         subtype="PCM_24",
     )
     write_ms = 1000.0 * (time.perf_counter() - write_started)
+    proxy_after_started = time.perf_counter()
     stored = read_waveform(candidate_path)
     stored_values = stored.numpy()
     stored_device = stored.to(device)
@@ -563,6 +614,10 @@ def evaluate_case(
                 base_topology["metric_constant_prefix_samples"]
             ),
         )[1]
+    synchronize(device)
+    stored_proxy_runtime_ms = 1000.0 * (
+        time.perf_counter() - proxy_after_started
+    )
     normalized_proxy_gap_before = abs(float(proxy_before.detach()) - target_shimmer_db) / max(
         scale_value,
         1e-8,
@@ -571,6 +626,7 @@ def evaluate_case(
         scale_value,
         1e-8,
     )
+    safety_started = time.perf_counter()
     safety = waveform_safety(base_values, stored_values)
     finite_safety_pass = (
         bool(np.isfinite(stored_values).all())
@@ -580,6 +636,9 @@ def evaluate_case(
         and safety["clip_fraction"] <= MAXIMUM_CLIP_FRACTION
     )
     pcm24 = pcm24_effective_step(base_path, candidate_path)
+    safety_pcm24_runtime_ms = 1000.0 * (
+        time.perf_counter() - safety_started
+    )
     candidate_rows, candidate_request_wall_ms = worker.refresh(
         [candidate_topology_item(case_id, panel_row["view"], candidate_path)]
     )
@@ -633,7 +692,10 @@ def evaluate_case(
         "base_refresh_request_wall_ms": base_request_wall_ms,
         "base_refresh_client_staging_ms": base_staging_ms,
         "gradient_projection_runtime_ms": gradient_runtime_ms,
+        "zero_crossing_plan_runtime_ms": plan_runtime_ms,
         "pcm24_write_ms": write_ms,
+        "stored_proxy_runtime_ms": stored_proxy_runtime_ms,
+        "safety_pcm24_runtime_ms": safety_pcm24_runtime_ms,
         "candidate_refresh_request_wall_ms": candidate_request_wall_ms,
         "candidate_refresh_internal_ms": float(
             candidate_topology["pulse_runtime_ms"]
@@ -702,7 +764,12 @@ def preselection_row(panel_row: dict[str, Any], record: dict[str, Any]) -> dict[
         "gradient_projection_runtime_ms": record[
             "gradient_projection_runtime_ms"
         ],
+        "zero_crossing_plan_runtime_ms": record[
+            "zero_crossing_plan_runtime_ms"
+        ],
         "pcm24_write_ms": record["pcm24_write_ms"],
+        "stored_proxy_runtime_ms": record["stored_proxy_runtime_ms"],
+        "safety_pcm24_runtime_ms": record["safety_pcm24_runtime_ms"],
         "candidate_refresh_request_wall_ms": record[
             "candidate_refresh_request_wall_ms"
         ],
@@ -889,6 +956,7 @@ def main() -> None:
         device,
     )
     torch_warmup = synthetic_torch_warmup(predictor, target_scale, device)
+    candidate_d_synthetic_warmup = synthetic_candidate_d_warmup(device)
     worker = ExactShimmerTopologyWorker(
         args.exact_python,
         args.runtime_worker_script,
@@ -941,6 +1009,7 @@ def main() -> None:
         "slurm_job_id": args.slurm_job_id,
         "source_sha256": source_hashes,
         "torch_synthetic_warmup": torch_warmup,
+        "candidate_d_synthetic_warmup": candidate_d_synthetic_warmup,
         "worker_startup": worker_startup,
         "worker_synthetic_warmup": {
             "request_wall_ms": worker_warmup_ms,
@@ -956,7 +1025,16 @@ def main() -> None:
                 "gradient_projection_runtime_ms": record[
                     "gradient_projection_runtime_ms"
                 ],
+                "zero_crossing_plan_runtime_ms": record[
+                    "zero_crossing_plan_runtime_ms"
+                ],
                 "pcm24_write_ms": record["pcm24_write_ms"],
+                "stored_proxy_runtime_ms": record[
+                    "stored_proxy_runtime_ms"
+                ],
+                "safety_pcm24_runtime_ms": record[
+                    "safety_pcm24_runtime_ms"
+                ],
                 "candidate_refresh_request_wall_ms": record[
                     "candidate_refresh_request_wall_ms"
                 ],

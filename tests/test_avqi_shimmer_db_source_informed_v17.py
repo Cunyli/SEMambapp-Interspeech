@@ -10,6 +10,7 @@ from scripts.evaluate_avqi_shimmer_db_source_informed_v17 import (
     build_zero_crossing_cycle_plan,
     select_candidate_d,
     selector_contract,
+    synthetic_candidate_d_warmup,
     zero_crossing_shape_preserving_gradient_projection,
 )
 
@@ -92,3 +93,11 @@ def test_selector_and_contract_exclude_exact_outcomes() -> None:
         COEFFICIENT_SMOOTHING_KERNEL
     )
     assert "candidate_exact_shimmer_db" in contract["forbidden_information"]
+
+
+def test_candidate_d_warmup_is_synthetic_and_finite() -> None:
+    report = synthetic_candidate_d_warmup(torch.device("cpu"))
+    assert report["synthetic_only"] is True
+    assert report["panel_or_training_waveform_used"] is False
+    assert report["projected_gradient_valid"] is True
+    assert report["candidate_finite"] is True
