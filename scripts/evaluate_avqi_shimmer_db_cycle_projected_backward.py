@@ -53,6 +53,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PROJECTED_CANDIDATE_NAME = (
     "praat_current_output_topology_cycle_projected_backward_db_alpha_0p001"
 )
+PULSE_LINEAR_CANDIDATE_NAME = (
+    "praat_current_output_topology_pulse_linear_backward_db_alpha_0p001"
+)
 EXPECTED_CASE_COUNT = 12
 EXPECTED_SLICE_COUNTS = {
     "view": {"cs": 6, "sv": 6},
@@ -78,6 +81,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--slurm-job-id", required=True)
+    parser.add_argument(
+        "--backward-mode",
+        choices=("cycle-constant", "pulse-linear"),
+        default="cycle-constant",
+    )
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
 
@@ -217,6 +225,80 @@ def cycle_multiplicative_gradient_projection(
     return projected
 
 
+def pulse_linear_multiplicative_gradient_projection(
+    waveform: torch.Tensor,
+    gradient: torch.Tensor,
+    topology: dict[str, Any],
+) -> torch.Tensor:
+    """Shape backward as a pulse-knot, linearly interpolated gain envelope."""
+    if waveform.ndim != 1 or gradient.shape != waveform.shape:
+        raise ValueError("pulse-linear projection expects matching 1-D tensors")
+    source_indices = torch.as_tensor(
+        metric_source_indices_from_topology(
+            topology,
+            source_sample_count=waveform.numel(),
+        ),
+        dtype=torch.long,
+        device=waveform.device,
+    )
+    pulses = waveform.new_tensor(topology["pulse_positions_samples"]).detach()
+    if pulses.numel() < 3:
+        raise ValueError("pulse-linear projection requires at least three pulses")
+    metric_positions = torch.arange(
+        source_indices.numel(),
+        dtype=waveform.dtype,
+        device=waveform.device,
+    ) + int(topology["metric_constant_prefix_samples"])
+    supported = (metric_positions >= pulses[0]) & (
+        metric_positions <= pulses[-1]
+    )
+    positions = metric_positions[supported]
+    supported_indices = source_indices[supported]
+    if supported_indices.numel() == 0:
+        raise ValueError("pulse-linear projection has no mapped support")
+    right = torch.searchsorted(pulses, positions, right=False).clamp(
+        1,
+        pulses.numel() - 1,
+    )
+    left = right - 1
+    interval = (pulses[right] - pulses[left]).clamp_min(
+        torch.finfo(waveform.dtype).tiny
+    )
+    right_weight = ((positions - pulses[left]) / interval).clamp(0.0, 1.0)
+    left_weight = 1.0 - right_weight
+    reference = waveform.detach().index_select(0, supported_indices)
+    raw = gradient.detach().index_select(0, supported_indices)
+    pulse_count = int(pulses.numel())
+    numerators = waveform.new_zeros(pulse_count)
+    denominators = waveform.new_zeros(pulse_count)
+    numerators.scatter_add_(0, left, left_weight * raw * reference)
+    numerators.scatter_add_(0, right, right_weight * raw * reference)
+    denominators.scatter_add_(
+        0,
+        left,
+        (left_weight * reference).square(),
+    )
+    denominators.scatter_add_(
+        0,
+        right,
+        (right_weight * reference).square(),
+    )
+    coefficients = torch.where(
+        denominators > torch.finfo(waveform.dtype).tiny,
+        numerators / denominators.clamp_min(torch.finfo(waveform.dtype).tiny),
+        torch.zeros_like(numerators),
+    )
+    envelope = (
+        left_weight * coefficients.index_select(0, left)
+        + right_weight * coefficients.index_select(0, right)
+    )
+    projected = torch.zeros_like(gradient)
+    projected.index_copy_(0, supported_indices, envelope * reference)
+    if not torch.isfinite(projected).all():
+        raise ValueError("pulse-linear projected gradient is non-finite")
+    return projected
+
+
 def topology_items(panel_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -294,6 +376,14 @@ def main() -> None:
         args.predictor_checkpoint,
         device,
     )
+    if args.backward_mode == "pulse-linear":
+        candidate_name = PULSE_LINEAR_CANDIDATE_NAME
+        project_gradient = pulse_linear_multiplicative_gradient_projection
+        backward_projection = "pulse_knot_linearly_interpolated_multiplicative"
+    else:
+        candidate_name = PROJECTED_CANDIDATE_NAME
+        project_gradient = cycle_multiplicative_gradient_projection
+        backward_projection = "orthogonal_per_exact_pulse_cycle_multiplicative"
     target_scale_np = target_scale.detach().cpu().numpy().astype(np.float64)
     candidate_records: dict[str, dict[str, Any]] = {}
     for index, panel_row in enumerate(panel_rows, start=1):
@@ -325,7 +415,7 @@ def main() -> None:
         scale = target_scale[SHIMMER_DB_INDEX].clamp_min(1e-8)
         loss = ((proxy_before - target) / scale).square()
         raw_gradient = torch.autograd.grad(loss, waveform)[0]
-        projected_gradient = cycle_multiplicative_gradient_projection(
+        projected_gradient = project_gradient(
             waveform,
             raw_gradient,
             topology,
@@ -341,7 +431,9 @@ def main() -> None:
             raise ValueError(f"zero cycle-projected gradient: {case_id}")
         if not torch.isfinite(candidate).all() or float(candidate.abs().max()) >= 0.999:
             raise ValueError(f"invalid cycle-projected candidate: {case_id}")
-        output_path = waveform_root / f"{case_id}__cycle_projected.wav"
+        output_path = waveform_root / (
+            f"{case_id}__{args.backward_mode.replace('-', '_')}.wav"
+        )
         sf.write(
             output_path,
             candidate.detach().cpu().numpy(),
@@ -405,7 +497,7 @@ def main() -> None:
             "sample_group": panel_row["sample_group"],
             "view": panel_row["view"],
             "condition": panel_row["condition"],
-            "candidate": PROJECTED_CANDIDATE_NAME,
+            "candidate": candidate_name,
             "optimized_component": "shimmer_db",
             "fixed_alpha": FIXED_ALPHA,
             "candidate_path": str(record["path"].resolve()),
@@ -452,16 +544,21 @@ def main() -> None:
 
     write_csv(args.output_dir / "cycle_projected_results.csv", rows)
     original_summary = aggregate_candidate(CANDIDATE_NAME, input_results)
-    projected_summary = aggregate_candidate(PROJECTED_CANDIDATE_NAME, rows)
+    projected_summary = aggregate_candidate(candidate_name, rows)
     backward_gates = {
         name: passed
         for name, passed in projected_summary["gates"].items()
         if name != "pulse_refresh_runtime"
     }
+    decision_family = (
+        "PULSE_LINEAR_BACKWARD"
+        if args.backward_mode == "pulse-linear"
+        else "CYCLE_PROJECTED_BACKWARD"
+    )
     decision = (
-        "PASS_SHIMMER_DB_CYCLE_PROJECTED_BACKWARD_DEV_SCREEN"
+        f"PASS_SHIMMER_DB_{decision_family}_DEV_SCREEN"
         if all(backward_gates.values())
-        else "NO_GO_SHIMMER_DB_CYCLE_PROJECTED_BACKWARD_DEV_SCREEN"
+        else f"NO_GO_SHIMMER_DB_{decision_family}_DEV_SCREEN"
     )
     report = {
         "schema_version": "avqi-route-c-shimmer-db-cycle-projected-backward-v1",
@@ -473,7 +570,9 @@ def main() -> None:
         "route_type": "hybrid_praat_assisted_straight_through_metric_branch",
         "forward_scalar_changed": False,
         "detached_topology_changed": False,
-        "backward_projection": "orthogonal_per_exact_pulse_cycle_multiplicative",
+        "backward_mode": args.backward_mode,
+        "candidate": candidate_name,
+        "backward_projection": backward_projection,
         "backward_projection_has_tunable_parameters": False,
         "fixed_alpha": FIXED_ALPHA,
         "source_commit": args.source_commit,
@@ -522,6 +621,8 @@ def main() -> None:
     receipt = {
         "schema_version": "avqi-route-c-shimmer-db-cycle-projected-receipt-v1",
         "decision": decision,
+        "backward_mode": args.backward_mode,
+        "candidate": candidate_name,
         "dev_only": True,
         "promotion_authorized": False,
         "source_commit": args.source_commit,

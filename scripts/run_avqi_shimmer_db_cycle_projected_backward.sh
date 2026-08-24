@@ -12,6 +12,11 @@ if [[ "$PANEL_SOURCE" != "v14" && "$PANEL_SOURCE" != "v15" ]]; then
   echo "Unsupported opened panel source: $PANEL_SOURCE" >&2
   exit 2
 fi
+BACKWARD_MODE="${BACKWARD_MODE:-cycle-constant}"
+if [[ "$BACKWARD_MODE" != "cycle-constant" && "$BACKWARD_MODE" != "pulse-linear" ]]; then
+  echo "Unsupported Shimmer backward mode: $BACKWARD_MODE" >&2
+  exit 2
+fi
 
 if [[ "$PANEL_SOURCE" == "v14" ]]; then
   INPUT_ROOT="${INPUT_ROOT:-$ROOT_DIR/runs/avqi_route_c_shimmer_db_candidate_c_fresh_panel_v14_20260824_01/outputs}"
@@ -25,7 +30,11 @@ fi
 
 PANEL_CONTRACT="${PANEL_CONTRACT:-$INPUT_ROOT/panel_contract.json}"
 FRESH_RESULTS="${FRESH_RESULTS:-$INPUT_ROOT/fresh_panel_results.csv}"
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_cycle_projected_backward_${PANEL_SOURCE}_20260824_01}"
+DEFAULT_RUN_ROOT="$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_cycle_projected_backward_${PANEL_SOURCE}_20260824_01"
+if [[ "$BACKWARD_MODE" == "pulse-linear" ]]; then
+  DEFAULT_RUN_ROOT="$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_pulse_linear_backward_${PANEL_SOURCE}_20260824_01"
+fi
+RUN_ROOT="${RUN_ROOT:-$DEFAULT_RUN_ROOT}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 PREDICTOR_CHECKPOINT="${PREDICTOR_CHECKPOINT:-/scratch/work/lil14/SEMambapp-Interspeech/checkpoints/avqi_route_c_shimmer_v6_screen_20260821_01/direct_direct_praat_hard_shimmer_pulse_path_v6_estimator.pt}"
@@ -75,7 +84,7 @@ verify_sha256 "$PANEL_CONTRACT" "$PANEL_CONTRACT_SHA256" "opened panel"
 verify_sha256 "$FRESH_RESULTS" "$FRESH_RESULTS_SHA256" "opened results"
 verify_sha256 "$PREDICTOR_CHECKPOINT" "$PREDICTOR_CHECKPOINT_SHA256" "predictor"
 
-export ROOT_DIR SOURCE_ROOT EVALUATOR PANEL_SOURCE INPUT_ROOT
+export ROOT_DIR SOURCE_ROOT EVALUATOR PANEL_SOURCE BACKWARD_MODE INPUT_ROOT
 export PANEL_CONTRACT PANEL_CONTRACT_SHA256 FRESH_RESULTS FRESH_RESULTS_SHA256
 export RUN_ROOT LOG_DIR OUTPUT_DIR PREDICTOR_CHECKPOINT
 export PREDICTOR_CHECKPOINT_SHA256 EXACT_PYTHON AVQI_CODE_ROOT
@@ -94,7 +103,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   fi
   sbatch \
     --parsable \
-    --job-name="avqi-shim-cycle-${PANEL_SOURCE}" \
+    --job-name="avqi-shim-back-${PANEL_SOURCE}" \
     --partition="$PARTITION" \
     --nodes=1 \
     --ntasks=1 \
@@ -128,7 +137,7 @@ export CXX="$(command -v g++)"
 export PYTHONPATH="$SOURCE_ROOT:$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 LIVE_LOG="$LOG_DIR/shimmer_db_cycle_projected_${SLURM_JOB_ID}.log"
-echo "event=start job=$SLURM_JOB_ID panel=$PANEL_SOURCE commit=$SOURCE_COMMIT time=$(date -Is)" | tee -a "$LIVE_LOG"
+echo "event=start job=$SLURM_JOB_ID panel=$PANEL_SOURCE backward=$BACKWARD_MODE commit=$SOURCE_COMMIT time=$(date -Is)" | tee -a "$LIVE_LOG"
 python "$EVALUATOR" \
   --panel-contract "$PANEL_CONTRACT" \
   --panel-contract-sha256 "$PANEL_CONTRACT_SHA256" \
@@ -142,6 +151,7 @@ python "$EVALUATOR" \
   --output-dir "$OUTPUT_DIR" \
   --source-commit "$SOURCE_COMMIT" \
   --slurm-job-id "$SLURM_JOB_ID" \
+  --backward-mode "$BACKWARD_MODE" \
   --device cuda \
   2>&1 | tee -a "$LIVE_LOG"
 echo "event=complete job=$SLURM_JOB_ID time=$(date -Is)" | tee -a "$LIVE_LOG"

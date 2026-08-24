@@ -6,8 +6,10 @@ import torch
 
 from scripts.evaluate_avqi_shimmer_db_cycle_projected_backward import (
     FIXED_ALPHA,
+    PULSE_LINEAR_CANDIDATE_NAME,
     PROJECTED_CANDIDATE_NAME,
     cycle_multiplicative_gradient_projection,
+    pulse_linear_multiplicative_gradient_projection,
 )
 
 
@@ -49,6 +51,9 @@ def test_cycle_projected_contract_keeps_alpha_and_discloses_route() -> None:
     assert PROJECTED_CANDIDATE_NAME == (
         "praat_current_output_topology_cycle_projected_backward_db_alpha_0p001"
     )
+    assert PULSE_LINEAR_CANDIDATE_NAME == (
+        "praat_current_output_topology_pulse_linear_backward_db_alpha_0p001"
+    )
     source = (
         REPO_ROOT
         / "scripts"
@@ -59,6 +64,37 @@ def test_cycle_projected_contract_keeps_alpha_and_discloses_route() -> None:
     assert '"backward_projection_has_tunable_parameters": False' in source
     assert '"generator_optimizer_steps": 0' in source
     assert '"NO_GO_AVQI_T2_TRAINING"' in source
+
+
+def test_pulse_linear_projection_is_finite_and_multiplicative() -> None:
+    waveform = torch.linspace(0.5, 2.0, 12)
+    gradient = torch.linspace(-2.0, 3.0, 12)
+    topology = {
+        "topology_preprocessing": "exact_avqi_view_metric_waveform",
+        "source_sample_count": 12,
+        "metric_sample_count": 12,
+        "metric_constant_prefix_samples": 0,
+        "metric_source_ranges": [[0, 12]],
+        "metric_source_range_count": 1,
+        "metric_mapped_sample_count": 12,
+        "metric_reconstruction_max_pcm16_error": 0,
+        "metric_reconstruction_differing_samples": 0,
+        "pulse_positions_samples": [1.5, 4.5, 7.5, 10.5],
+        "pulse_count": 4,
+    }
+
+    projected = pulse_linear_multiplicative_gradient_projection(
+        waveform,
+        gradient,
+        topology,
+    )
+
+    assert torch.isfinite(projected).all()
+    assert float(projected.norm()) > 0.0
+    assert torch.count_nonzero(projected[:2]) == 0
+    assert torch.count_nonzero(projected[11:]) == 0
+    supported_ratio = projected[2:11] / waveform[2:11]
+    assert torch.isfinite(supported_ratio).all()
 
 
 def test_cycle_projected_runner_is_hash_bound_and_dev_only() -> None:
