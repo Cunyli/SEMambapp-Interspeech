@@ -561,16 +561,19 @@ def summary_markdown(report: dict[str, Any]) -> str:
         "- Scientific promotion granted: `false`",
         "- Authoritative training decision: `NO_GO_AVQI_T2_TRAINING`",
         "",
-        "| Component | Calibration median norm | Frozen weight | Holdout "
-        "median norm | Holdout max weighted share | Holdout min cosine to joint |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Component | Target scale | Calibration median norm | Frozen weight | "
+        "Holdout median norm | Holdout max weighted share | "
+        "Holdout min cosine to joint |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for component in ROUTE_C_ACTIVE_COMPONENTS:
         calibration_norm = report["calibration"]["median_component_gradient_norms"][component]
         weight = report["calibration"]["frozen_inverse_gradient_weights"][component]
+        target_scale = report["contract"]["normalization"]["target_scale"][component]
         item = holdout["components"][component]
         lines.append(
-            f"| {component} | {calibration_norm:.6f} | {weight:.8f} | "
+            f"| {component} | {target_scale:.6f} | {calibration_norm:.6f} | "
+            f"{weight:.8f} | "
             f"{item['gradient_norm_median']:.6f} | "
             f"{item['weighted_norm_share_max']:.6f} | "
             f"{item['joint_cosine_min']:.6f} |"
@@ -715,6 +718,17 @@ def main() -> None:
                 "expanded_coefficients": list(
                     AVQI_V0301_EXPANDED_COEFFICIENTS
                 ),
+            },
+            "normalization": {
+                "source": "surrogate_train exact-component standard deviation",
+                "target_mean": {
+                    component: float(scorer.target_mean[index].detach().cpu())
+                    for index, component in enumerate(AVQI_COMPONENT_NAMES)
+                },
+                "target_scale": {
+                    component: float(scorer.target_scale[index].detach().cpu())
+                    for index, component in enumerate(AVQI_COMPONENT_NAMES)
+                },
             },
             "loss_target": (
                 "normalized bidirectional gap to same-speaker clean "

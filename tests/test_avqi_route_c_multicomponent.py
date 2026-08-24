@@ -338,3 +338,5 @@ def test_multicomponent_slurm_wrapper_preserves_training_boundary() -> None:
     assert "generator" not in source.lower()
     assert "--device cuda" in source
     assert "tests/test_avqi_route_c_multicomponent.py" in source
+    assert "tests/test_avqi_hnr_fresh_panel.py" in source
+    assert "tests/test_avqi_shimmer_fresh_panel.py" in source

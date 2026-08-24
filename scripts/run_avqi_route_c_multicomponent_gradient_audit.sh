@@ -122,6 +122,8 @@ python -m pytest \
   tests/test_avqi_route_c_multicomponent.py \
   tests/test_avqi_components.py \
   tests/test_direct_avqi_waveform_optimization.py \
+  tests/test_avqi_hnr_fresh_panel.py \
+  tests/test_avqi_shimmer_fresh_panel.py \
   tests/test_artifact_layout.py \
   -q 2>&1 | tee -a "$LIVE_LOG"
 python -m scripts.evaluate_avqi_route_c_multicomponent_gradients \
