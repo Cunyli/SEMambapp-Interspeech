@@ -238,14 +238,42 @@ def exact_zero_crossing_rates_aligned_frames(frames):
     rows = np.arange(values.shape[0], dtype=np.int64)
     first_crossings = crossings[rows, first_indices]
     last_crossings = crossings[rows, last_indices]
+    crossing_ordinals = np.cumsum(crossing_mask, axis=1) - 1
+    first_ordinals = crossing_ordinals[rows, first_indices]
+    last_ordinals = crossing_ordinals[rows, last_indices]
     crossing_distance = last_crossings - first_crossings
     rates = np.divide(
-        last_indices - first_indices,
+        last_ordinals - first_ordinals,
         crossing_distance,
         out=np.full(values.shape[0], np.nan, dtype=np.float64),
         where=(has_enough_crossings & has_last & (crossing_distance != 0.0)),
     )
     return rates
+
+
+def validate_vectorized_zero_crossing_regression():
+    sample_indices = np.arange(480, dtype=np.float64)
+    frames = np.stack(
+        [
+            np.sin(2.0 * np.pi * frequency * sample_indices / SAMPLE_RATE)
+            for frequency in (80.0, 120.0, 440.0, 1200.0, 3200.0)
+        ]
+    )
+    expected = np.asarray(
+        [
+            exact_zero_crossing_rate_values(
+                frame,
+                0.5 / SAMPLE_RATE,
+                1.0 / SAMPLE_RATE,
+            )
+            for frame in frames
+        ],
+        dtype=np.float64,
+    )
+    observed = exact_zero_crossing_rates_aligned_frames(frames)
+    equal = (expected == observed) | (np.isnan(expected) & np.isnan(observed))
+    if not np.all(equal):
+        raise ValueError("vectorized exact zero-crossing regression failed")
 
 
 def compress_source_indices(indices):
@@ -756,6 +784,7 @@ def score_components(path, view, step_versions):
     return {name: float(metrics[name]) for name in names}
 
 
+validate_vectorized_zero_crossing_regression()
 print(
     "AVQI_SHIMMER_RUNTIME_READY="
     + json.dumps(

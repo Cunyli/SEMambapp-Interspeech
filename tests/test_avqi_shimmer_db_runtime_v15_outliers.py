@@ -41,6 +41,7 @@ def test_runtime_v15_outlier_scope_is_strictly_frozen() -> None:
     assert 'elif input_loader == "soundfile_float32_exact_16khz_mono"' in (
         EXACT_WORKER
     )
+    assert "validate_vectorized_zero_crossing_regression()" in EXACT_WORKER
 
 
 def test_case_summary_uses_repeated_warm_maximum() -> None:
