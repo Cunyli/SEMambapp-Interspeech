@@ -975,8 +975,21 @@ def require_same_topology(
     candidate: dict[str, Any],
     label: str,
 ) -> None:
-    if topology_identity(reference) != topology_identity(candidate):
-        raise ValueError(f"detached topology changed across reuse audit: {label}")
+    reference_identity = topology_identity(reference)
+    candidate_identity = topology_identity(candidate)
+    if reference_identity != candidate_identity:
+        differing = {
+            key: {
+                "reference": reference_identity[key],
+                "candidate": candidate_identity[key],
+            }
+            for key in reference_identity
+            if reference_identity[key] != candidate_identity[key]
+        }
+        raise ValueError(
+            f"detached topology changed across reuse audit: {label}: "
+            + json.dumps(differing, sort_keys=True)
+        )
     if ranges_sha256(candidate["metric_source_ranges"]) != candidate[
         "source_ranges_sha256"
     ]:

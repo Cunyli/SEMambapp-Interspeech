@@ -23,6 +23,7 @@ from scripts.profile_avqi_shimmer_exact_topology_runtime import (
     require_same_topology,
     sha256_file,
     sha256_tree,
+    topology_identity,
     validate_hash,
     write_csv,
     write_json,
@@ -44,6 +45,26 @@ IMPLEMENTATION_CONFIGS = {
         "sounding_assembly_mode": "praat_extract_and_concatenate",
     },
     FASTPATH_IMPLEMENTATION: {
+        "frame_scan_mode": "numpy_exact_aligned_frames",
+        "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
+        "wav_roundtrip_mode": "praat_temp_wav",
+        "sounding_assembly_mode": "praat_extract_and_concatenate",
+    },
+}
+EXTRA_PROBE_CONFIGS = {
+    "probe_in_memory_pcm16_roundtrip": {
+        "frame_scan_mode": "numpy_exact_aligned_frames",
+        "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
+        "wav_roundtrip_mode": "soundfile_in_memory_pcm16",
+        "sounding_assembly_mode": "praat_extract_and_concatenate",
+    },
+    "probe_numpy_sounding_assembly": {
+        "frame_scan_mode": "numpy_exact_aligned_frames",
+        "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
+        "wav_roundtrip_mode": "praat_temp_wav",
+        "sounding_assembly_mode": "numpy_exact_interval_slices",
+    },
+    "probe_combined_roundtrip_and_sounding": {
         "frame_scan_mode": "numpy_exact_aligned_frames",
         "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
         "wav_roundtrip_mode": "soundfile_in_memory_pcm16",
@@ -160,6 +181,22 @@ def stage_summary(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     }
 
 
+def topology_identity_difference(
+    reference: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    reference_identity = topology_identity(reference)
+    candidate_identity = topology_identity(candidate)
+    return {
+        key: {
+            "reference": reference_identity[key],
+            "candidate": candidate_identity[key],
+        }
+        for key in reference_identity
+        if reference_identity[key] != candidate_identity[key]
+    }
+
+
 def case_summary(
     rows: list[dict[str, Any]],
     implementation: str,
@@ -227,6 +264,7 @@ def main() -> None:
     runtime_rows: list[dict[str, Any]] = []
     authority_rows: list[dict[str, Any]] = []
     fastpath_warmup_rows: list[dict[str, Any]] = []
+    extra_probe_rows: list[dict[str, Any]] = []
     exact_versions: dict[str, str] | None = None
     for case in cases:
         with ExactWorker(args.exact_python, args.avqi_code_root) as worker:
@@ -280,6 +318,28 @@ def main() -> None:
                     "role": "opened_dev_command_initialization_only",
                 }
             )
+            for probe_name, probe_config in EXTRA_PROBE_CONFIGS.items():
+                probe_response, probe_wall_ms = worker.request(
+                    {**base_payload, **probe_config}
+                )
+                identity_difference = topology_identity_difference(
+                    reference,
+                    probe_response,
+                )
+                extra_probe_rows.append(
+                    {
+                        "case_id": case["case_id"],
+                        "probe": probe_name,
+                        "config": probe_config,
+                        "topology_identity_equal": not identity_difference,
+                        "identity_difference": identity_difference,
+                        "internal_ms": float(
+                            probe_response["timing_ms"]["total_refresh"]
+                        ),
+                        "request_wall_ms": probe_wall_ms,
+                        "used_for_runtime_gate": False,
+                    }
+                )
             for implementation, config in IMPLEMENTATION_CONFIGS.items():
                 payload = {**base_payload, **config}
                 for repeat_index in range(1, args.warm_repeats + 1):
@@ -365,7 +425,7 @@ def main() -> None:
         }
     candidate_runtime = runtime_by_implementation[FASTPATH_IMPLEMENTATION]
     report = {
-        "schema_version": "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-v2",
+        "schema_version": "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-v3",
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
         "scope": "opened_panel_runtime_only_not_promotion",
@@ -389,6 +449,7 @@ def main() -> None:
             "one_disclosed_cold_refresh": True,
             "warm_repeats": args.warm_repeats,
             "implementation_configs": IMPLEMENTATION_CONFIGS,
+            "extra_probe_configs": EXTRA_PROBE_CONFIGS,
             "fastpath_command_warmup_per_worker": True,
             "production_warmup_must_not_use_panel_or_training_waveforms": True,
             "formal_refresh_gate_ms_unchanged": PULSE_REFRESH_GATE_MS,
@@ -408,6 +469,17 @@ def main() -> None:
             "candidate_development_450ms_margin_pass": candidate_runtime[
                 "development_450ms_margin_pass"
             ],
+        },
+        "extra_exact_equivalence_probes": {
+            "rows": extra_probe_rows,
+            "all_equal_by_probe": {
+                probe_name: all(
+                    row["topology_identity_equal"]
+                    for row in extra_probe_rows
+                    if row["probe"] == probe_name
+                )
+                for probe_name in EXTRA_PROBE_CONFIGS
+            },
         },
         "fastpath_topology_equivalence": {
             "all_repeated_calls_equal_frozen": True,
@@ -438,7 +510,7 @@ def main() -> None:
     write_json(report_path, report)
     receipt = {
         "schema_version": (
-            "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-receipt-v2"
+            "avqi-route-c-shimmer-db-runtime-v15-outlier-profile-receipt-v3"
         ),
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
@@ -447,6 +519,9 @@ def main() -> None:
         "panel_contract_sha256": panel_hash,
         "authority_parity_pass": report["authority_parity"]["all_pass"],
         "fastpath_topology_equivalence_pass": True,
+        "extra_probe_all_equal_by_probe": report[
+            "extra_exact_equivalence_probes"
+        ]["all_equal_by_probe"],
         "formal_500ms_pass_on_development_repeats": report["runtime"][
             "candidate_formal_500ms_pass_on_development_repeats"
         ],

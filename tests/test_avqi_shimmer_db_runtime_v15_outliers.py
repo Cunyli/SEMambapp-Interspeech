@@ -3,6 +3,7 @@ from __future__ import annotations
 from scripts.profile_avqi_shimmer_db_runtime_v15_outliers import (
     DEV_ENGINEERING_MARGIN_MS,
     DOMINANT_STAGE_FIELDS,
+    EXTRA_PROBE_CONFIGS,
     FASTPATH_IMPLEMENTATION,
     FROZEN_OUTLIER_CASE_IDS,
     IMPLEMENTATION_CONFIGS,
@@ -24,8 +25,13 @@ def test_runtime_v15_outlier_scope_is_strictly_frozen() -> None:
     assert IMPLEMENTATION_CONFIGS[FASTPATH_IMPLEMENTATION] == {
         "frame_scan_mode": "numpy_exact_aligned_frames",
         "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
-        "wav_roundtrip_mode": "soundfile_in_memory_pcm16",
-        "sounding_assembly_mode": "numpy_exact_interval_slices",
+        "wav_roundtrip_mode": "praat_temp_wav",
+        "sounding_assembly_mode": "praat_extract_and_concatenate",
+    }
+    assert set(EXTRA_PROBE_CONFIGS) == {
+        "probe_in_memory_pcm16_roundtrip",
+        "probe_numpy_sounding_assembly",
+        "probe_combined_roundtrip_and_sounding",
     }
     assert 'request.get(\n                    "input_loader"' in EXACT_WORKER
     assert 'elif input_loader == "soundfile_float32_exact_16khz_mono"' in (
