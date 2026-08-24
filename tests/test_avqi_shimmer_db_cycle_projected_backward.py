@@ -27,7 +27,7 @@ def test_cycle_projection_is_multiplicative_within_each_detached_cell() -> None:
         "metric_mapped_sample_count": 8,
         "metric_reconstruction_max_pcm16_error": 0,
         "metric_reconstruction_differing_samples": 0,
-        "pulse_positions_samples": [1.0, 3.0, 5.0, 7.0],
+        "pulse_positions_samples": [0.5, 2.5, 4.5, 6.5],
         "pulse_count": 4,
     }
 
