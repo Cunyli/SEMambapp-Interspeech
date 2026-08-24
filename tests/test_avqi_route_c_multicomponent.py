@@ -17,10 +17,16 @@ from model.avqi_components import (
 from model.avqi_route_c import (
     ROUTE_C_ACTIVE_COMPONENTS,
     ROUTE_C_COMPONENT_REGISTRY,
-    ROUTE_C_SOURCE_ARCHITECTURES,
+    ROUTE_C_FIVE_ACTIVE_COMPONENTS,
+    ROUTE_C_FIVE_SOURCE_ARCHITECTURES,
+    ROUTE_C_FIVE_SOURCE_COMPONENT_INDICES,
+    ROUTE_C_REGISTRY_SCHEMA_VERSION,
     ROUTE_C_SOURCE_COMPONENT_INDICES,
     active_bidirectional_gap_losses,
+    build_route_c_five_active_estimator,
     build_route_c_four_active_estimator,
+    five_active_bidirectional_gap_losses,
+    load_route_c_five_active_scorer,
     load_route_c_four_active_scorer,
     sha256_file,
 )
@@ -32,7 +38,7 @@ from scripts.evaluate_avqi_route_c_multicomponent_gradients import (
 )
 
 
-def test_route_c_registry_freezes_six_slots_and_four_active_components() -> None:
+def test_route_c_registry_freezes_six_slots_and_five_active_components() -> None:
     assert tuple(slot.name for slot in ROUTE_C_COMPONENT_REGISTRY) == (
         AVQI_COMPONENT_NAMES
     )
@@ -41,6 +47,11 @@ def test_route_c_registry_freezes_six_slots_and_four_active_components() -> None
         for slot in ROUTE_C_COMPONENT_REGISTRY
         if slot.active_in_four_component_scorer
     ) == ROUTE_C_ACTIVE_COMPONENTS
+    assert tuple(
+        slot.name
+        for slot in ROUTE_C_COMPONENT_REGISTRY
+        if slot.active_in_five_component_scorer
+    ) == ROUTE_C_FIVE_ACTIVE_COMPONENTS
     assert tuple(slot.avqi_coefficient for slot in ROUTE_C_COMPONENT_REGISTRY) == (
         AVQI_V0301_COEFFICIENTS
     )
@@ -57,9 +68,17 @@ def test_route_c_registry_freezes_six_slots_and_four_active_components() -> None
         slot for slot in ROUTE_C_COMPONENT_REGISTRY if slot.name == "slope"
     )
     assert not slope_slot.active_in_four_component_scorer
+    assert slope_slot.active_in_five_component_scorer
+    assert slope_slot.code_status == "integrated"
+    shimmer_db_slot = next(
+        slot for slot in ROUTE_C_COMPONENT_REGISTRY if slot.name == "shimmer_db"
+    )
+    assert not shimmer_db_slot.active_in_five_component_scorer
+    assert shimmer_db_slot.scientific_status == "unresolved"
+    assert ROUTE_C_REGISTRY_SCHEMA_VERSION == "avqi-route-c-component-registry-v2"
 
 
-def test_four_active_estimator_preserves_each_source_formula() -> None:
+def test_five_active_estimator_preserves_each_source_formula() -> None:
     torch.manual_seed(20260824)
     sample_rate = 16_000
     time = torch.arange(sample_rate // 2, dtype=torch.float32) / sample_rate
@@ -70,7 +89,8 @@ def test_four_active_estimator_preserves_each_source_formula() -> None:
         + 0.02 * torch.randn_like(time)
     )
     common = {"max_frames": 48, "cpps_max_frames": 96, "hnr_max_frames": 96}
-    combined = build_route_c_four_active_estimator(**common)
+    four_combined = build_route_c_four_active_estimator(**common)
+    combined = build_route_c_five_active_estimator(**common)
     cpps = PraatDifferentiableAVQIComponentEstimator(
         peak_mode="hard",
         cpps_mode="praat_view_input_v12",
@@ -92,6 +112,9 @@ def test_four_active_estimator_preserves_each_source_formula() -> None:
         **common,
     )
     combined_value = combined.raw_components(waveform, speaking_type="sv")[0]
+    four_combined_value = four_combined.raw_components(
+        waveform, speaking_type="sv"
+    )[0]
     cpps_value = cpps.raw_components(waveform, speaking_type="sv")[0]
     hnr_value = hnr.raw_components(waveform, speaking_type="sv")[0]
     shimmer_value = shimmer.raw_components(waveform, speaking_type="sv")[0]
@@ -101,6 +124,7 @@ def test_four_active_estimator_preserves_each_source_formula() -> None:
     assert torch.equal(combined_value[1], hnr_value[1])
     assert torch.equal(combined_value[2:4], shimmer_value[2:4])
     assert torch.equal(combined_value[4:], baseline_value[4:])
+    assert torch.equal(combined_value, four_combined_value)
     assert sum(parameter.numel() for parameter in combined.parameters()) == 0
 
     gradient_waveform = waveform.clone().requires_grad_()
@@ -109,21 +133,21 @@ def test_four_active_estimator_preserves_each_source_formula() -> None:
         speaking_type="sv",
     )
     target = prediction.detach().clone()
-    for offset, component in enumerate(ROUTE_C_ACTIVE_COMPONENTS):
+    for offset, component in enumerate(ROUTE_C_FIVE_ACTIVE_COMPONENTS):
         index = AVQI_COMPONENT_NAMES.index(component)
         target[0, index] += 1.0 if offset % 2 == 0 else -1.0
-    losses = active_bidirectional_gap_losses(
+    losses = five_active_bidirectional_gap_losses(
         prediction,
         target,
         torch.zeros(6),
         torch.ones(6),
     )[0]
     gradients = []
-    for offset in range(len(ROUTE_C_ACTIVE_COMPONENTS)):
+    for offset in range(len(ROUTE_C_FIVE_ACTIVE_COMPONENTS)):
         gradient = torch.autograd.grad(
             losses[offset],
             gradient_waveform,
-            retain_graph=offset < len(ROUTE_C_ACTIVE_COMPONENTS) - 1,
+            retain_graph=offset < len(ROUTE_C_FIVE_ACTIVE_COMPONENTS) - 1,
         )[0]
         assert torch.isfinite(gradient).all()
         assert 0.0 < float(torch.linalg.vector_norm(gradient)) <= 1e4
@@ -133,30 +157,38 @@ def test_four_active_estimator_preserves_each_source_formula() -> None:
     assert 0.0 < float(torch.linalg.vector_norm(joint_gradient)) <= 1e4
 
 
-def test_four_active_bidirectional_losses_move_toward_target_without_avqi_signs() -> None:
+def test_five_active_bidirectional_losses_move_toward_target_without_avqi_signs(
+) -> None:
     prediction = torch.tensor(
         [[2.0, -3.0, 4.0, 100.0, 200.0, -5.0]],
         requires_grad=True,
     )
     target = torch.zeros_like(prediction)
-    losses = active_bidirectional_gap_losses(
+    losses = five_active_bidirectional_gap_losses(
         prediction,
         target,
         torch.zeros(6),
         torch.ones(6),
     )
+    four_losses = active_bidirectional_gap_losses(
+        prediction,
+        target,
+        torch.zeros(6),
+        torch.ones(6),
+    )
+    assert four_losses.shape == (1, 4)
     losses.sum().backward()
     assert prediction.grad is not None
     active_indices = [
-        AVQI_COMPONENT_NAMES.index(name) for name in ROUTE_C_ACTIVE_COMPONENTS
+        AVQI_COMPONENT_NAMES.index(name) for name in ROUTE_C_FIVE_ACTIVE_COMPONENTS
     ]
     assert torch.equal(
         prediction.grad[0, active_indices].sign(),
         prediction.detach()[0, active_indices].sign(),
     )
     assert torch.equal(
-        prediction.grad[0, [3, 4]],
-        torch.zeros(2),
+        prediction.grad[0, [3]],
+        torch.zeros(1),
     )
     assert AVQI_V0301_COEFFICIENTS[0] < 0.0
     assert prediction.grad[0, 0] > 0.0
@@ -178,7 +210,7 @@ def _checkpoint(path: Path, key: str, offset: float) -> tuple[Path, str]:
             "calibration_scale": calibration_scale,
             "calibration_bias": calibration_bias,
             "components": AVQI_COMPONENT_NAMES,
-            "architecture": ROUTE_C_SOURCE_ARCHITECTURES[key],
+            "architecture": ROUTE_C_FIVE_SOURCE_ARCHITECTURES[key],
             "parameter_count": 0,
             "trainable_parameter_count": 0,
             "optimizer_steps": 0,
@@ -219,18 +251,50 @@ def test_four_active_scorer_composes_only_authorized_checkpoint_slots(
     assert sum(parameter.numel() for parameter in scorer.parameters()) == 0
 
 
+def test_five_active_scorer_uses_promoted_slope_checkpoint_slot(
+    tmp_path: Path,
+) -> None:
+    offsets = {
+        "cpps": 100.0,
+        "hnr": 200.0,
+        "shimmer_percent": 300.0,
+        "slope": 500.0,
+        "tilt": 400.0,
+    }
+    created = {
+        key: _checkpoint(tmp_path / f"five_{key}.pt", key, offset)
+        for key, offset in offsets.items()
+    }
+    bundle = load_route_c_five_active_scorer(
+        {key: value[0] for key, value in created.items()},
+        {key: value[1] for key, value in created.items()},
+        max_frames=32,
+        cpps_max_frames=64,
+        hnr_max_frames=64,
+    )
+    scorer = bundle.scorer
+    for key, indices in ROUTE_C_FIVE_SOURCE_COMPONENT_INDICES.items():
+        for index in indices:
+            assert scorer.estimator.alignment_scale[index] == index + 1 + offsets[key]
+            assert scorer.estimator.alignment_bias[index] == index + 11 + offsets[key]
+            assert scorer.calibrator.scale[index] == index + 21 + offsets[key]
+            assert scorer.calibrator.bias[index] == index + 31 + offsets[key]
+    assert bundle.source_metadata["slope"]["component_indices"] == [4]
+    assert sum(parameter.numel() for parameter in scorer.parameters()) == 0
+
+
 def test_inverse_gradient_weights_balance_calibration_and_report_conflict() -> None:
     records = []
     for multiplier in (1.0, 2.0):
         components = {
             name: {"gradient_norm": multiplier * (index + 1)}
-            for index, name in enumerate(ROUTE_C_ACTIVE_COMPONENTS)
+            for index, name in enumerate(ROUTE_C_FIVE_ACTIVE_COMPONENTS)
         }
         records.append({"components": components})
     medians, weights = frozen_inverse_gradient_weights(records)
     weighted = {
         component: medians[component] * weights[component]
-        for component in ROUTE_C_ACTIVE_COMPONENTS
+        for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS
     }
     assert max(weighted.values()) == min(weighted.values())
 
@@ -238,6 +302,7 @@ def test_inverse_gradient_weights_balance_calibration_and_report_conflict() -> N
         "cpps": torch.tensor([1.0, 0.0]),
         "hnr": torch.tensor([-1.0, 0.0]),
         "shimmer_percent": torch.tensor([0.0, 1.0]),
+        "slope": torch.tensor([0.0, -1.0]),
         "tilt": torch.tensor([0.0, 1.0]),
     }
     record = {
@@ -255,7 +320,7 @@ def test_inverse_gradient_weights_balance_calibration_and_report_conflict() -> N
         "cosine": -1.0,
         "direction_conflict": True,
     }
-    assert finalized["joint"]["maximum_component_norm_share"] == 0.25
+    assert finalized["joint"]["maximum_component_norm_share"] == 0.2
     assert MAX_WEIGHTED_COMPONENT_NORM_SHARE == 0.80
 
 
@@ -344,3 +409,20 @@ def test_multicomponent_slurm_wrapper_preserves_training_boundary() -> None:
     assert "tests/test_avqi_route_c_multicomponent.py" in source
     assert "tests/test_avqi_hnr_fresh_panel.py" in source
     assert "tests/test_avqi_shimmer_fresh_panel.py" in source
+    assert "tests/test_avqi_ltas_slope_fresh_panel.py" in source
+    assert "--slope-checkpoint" in source
+    assert "--evidence slope_report" in source
+    assert "--evidence slope_receipt" in source
+    assert "--evidence slope_final_panel_seal" in source
+    assert "--evidence slope_final_results" in source
+    assert (
+        "c4bc55d2074d93d7425a018d92aa00f38a402a1ea2b2394bc2b87ee5ca48ea2a"
+        in source
+    )
+    assert "--accepted-base-commit \"$ACCEPTED_BASE_COMMIT\"" in source
+    assert '"$RUNTIME_PYTHON" -m pytest' in source
+    assert (
+        '"$RUNTIME_PYTHON" -m '
+        "scripts.evaluate_avqi_route_c_multicomponent_gradients"
+    ) in source
+    assert "conda activate" not in source

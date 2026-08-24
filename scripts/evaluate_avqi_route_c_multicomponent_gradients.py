@@ -1,4 +1,4 @@
-"""Audit four-active Route C waveform gradients on non-final dev splits."""
+"""Audit five-active Route C waveform gradients on non-final dev splits."""
 
 from __future__ import annotations
 
@@ -25,10 +25,11 @@ from model.avqi_components import (
     AVQI_V0301_SCALE,
 )
 from model.avqi_route_c import (
-    ROUTE_C_ACTIVE_COMPONENTS,
-    ROUTE_C_FOUR_ACTIVE_ARCHITECTURE,
-    active_bidirectional_gap_losses,
-    load_route_c_four_active_scorer,
+    ROUTE_C_FIVE_ACTIVE_ARCHITECTURE,
+    ROUTE_C_FIVE_ACTIVE_COMPONENTS,
+    ROUTE_C_REGISTRY_SCHEMA_VERSION,
+    five_active_bidirectional_gap_losses,
+    load_route_c_five_active_scorer,
     route_c_registry_records,
     sha256_file,
 )
@@ -46,7 +47,7 @@ SELECTION_STRATA = (
 INPUT_GRADIENT_NORM_MAX = 1e4
 NONZERO_GRADIENT_NORM_MIN = 1e-10
 MAX_WEIGHTED_COMPONENT_NORM_SHARE = 0.80
-ACCEPTED_INTEGRATION_BASE = "2390ce0543d8c17c6e249160333855229c689434"
+ACCEPTED_INTEGRATION_BASE = "1ebdbfee4d667e201b0f0ecac6a9d46123417ac7"
 REQUIRED_EVIDENCE = {
     "cpps_report",
     "cpps_receipt",
@@ -54,6 +55,10 @@ REQUIRED_EVIDENCE = {
     "hnr_receipt",
     "shimmer_percent_report",
     "shimmer_percent_receipt",
+    "slope_report",
+    "slope_receipt",
+    "slope_final_panel_seal",
+    "slope_final_results",
     "tilt_report",
     "tilt_receipt",
 }
@@ -82,6 +87,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hnr-checkpoint-sha256", required=True)
     parser.add_argument("--shimmer-checkpoint", type=Path, required=True)
     parser.add_argument("--shimmer-checkpoint-sha256", required=True)
+    parser.add_argument("--slope-checkpoint", type=Path, required=True)
+    parser.add_argument("--slope-checkpoint-sha256", required=True)
     parser.add_argument("--tilt-checkpoint", type=Path, required=True)
     parser.add_argument("--tilt-checkpoint-sha256", required=True)
     parser.add_argument(
@@ -95,6 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--accepted-base-commit", default=ACCEPTED_INTEGRATION_BASE)
+    parser.add_argument("--pytest-log", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
@@ -313,7 +321,7 @@ def extract_case_gradients(
     waveform = load_fixed_segment(case).to(device).requires_grad_(True)
     raw_target = case.clean_target.to(device).unsqueeze(0)
     prediction = scorer(waveform.unsqueeze(0), case.view)
-    losses = active_bidirectional_gap_losses(
+    losses = five_active_bidirectional_gap_losses(
         prediction,
         raw_target,
         scorer.target_mean,
@@ -323,11 +331,11 @@ def extract_case_gradients(
     denormalized_prediction = scorer.denormalized_prediction(prediction)[0]
     gradients: dict[str, torch.Tensor] = {}
     components: dict[str, dict[str, Any]] = {}
-    for offset, component in enumerate(ROUTE_C_ACTIVE_COMPONENTS):
+    for offset, component in enumerate(ROUTE_C_FIVE_ACTIVE_COMPONENTS):
         gradient = torch.autograd.grad(
             losses[offset],
             waveform,
-            retain_graph=offset < len(ROUTE_C_ACTIVE_COMPONENTS) - 1,
+            retain_graph=offset < len(ROUTE_C_FIVE_ACTIVE_COMPONENTS) - 1,
             create_graph=False,
         )[0].detach().cpu()
         norm = float(torch.linalg.vector_norm(gradient))
@@ -377,7 +385,7 @@ def frozen_inverse_gradient_weights(
             record["components"][component]["gradient_norm"]
             for record in calibration_records
         )
-        for component in ROUTE_C_ACTIVE_COMPONENTS
+        for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS
     }
     if any(
         not math.isfinite(norm) or norm <= NONZERO_GRADIENT_NORM_MIN
@@ -387,7 +395,7 @@ def frozen_inverse_gradient_weights(
     minimum = min(median_norms.values())
     weights = {
         component: minimum / median_norms[component]
-        for component in ROUTE_C_ACTIVE_COMPONENTS
+        for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS
     }
     return median_norms, weights
 
@@ -396,7 +404,7 @@ def finalize_case(
     record: dict[str, Any],
     weights: dict[str, float],
 ) -> dict[str, Any]:
-    if set(weights) != set(ROUTE_C_ACTIVE_COMPONENTS):
+    if set(weights) != set(ROUTE_C_FIVE_ACTIVE_COMPONENTS):
         raise ValueError("joint gradient weights differ from active components")
     if any(
         not math.isfinite(weight) or weight <= 0.0 for weight in weights.values()
@@ -405,7 +413,7 @@ def finalize_case(
     gradients = record.pop("_gradients")
     weighted = {
         component: gradients[component] * weights[component]
-        for component in ROUTE_C_ACTIVE_COMPONENTS
+        for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS
     }
     weight_sum = sum(weights.values())
     joint = sum(weighted.values()) / weight_sum
@@ -418,11 +426,11 @@ def finalize_case(
     weighted_norm_sum = sum(weighted_norms.values())
     shares = {
         component: weighted_norms[component] / weighted_norm_sum
-        for component in ROUTE_C_ACTIVE_COMPONENTS
+        for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS
     }
     pairwise: dict[str, dict[str, Any]] = {}
-    for first_index, first in enumerate(ROUTE_C_ACTIVE_COMPONENTS):
-        for second in ROUTE_C_ACTIVE_COMPONENTS[first_index + 1 :]:
+    for first_index, first in enumerate(ROUTE_C_FIVE_ACTIVE_COMPONENTS):
+        for second in ROUTE_C_FIVE_ACTIVE_COMPONENTS[first_index + 1 :]:
             value = cosine(gradients[first], gradients[second])
             pairwise[f"{first}__{second}"] = {
                 "cosine": value,
@@ -433,7 +441,7 @@ def finalize_case(
             "cosine": cosine(gradients[component], joint),
             "opposed_to_joint": cosine(gradients[component], joint) < 0.0,
         }
-        for component in ROUTE_C_ACTIVE_COMPONENTS
+        for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS
     }
     maximum_share = max(shares.values())
     joint_gates = {
@@ -463,9 +471,12 @@ def aggregate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     if not records:
         raise ValueError("cannot aggregate an empty gradient audit")
     component_summary = {}
-    for component in ROUTE_C_ACTIVE_COMPONENTS:
+    for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS:
         norms = [row["components"][component]["gradient_norm"] for row in records]
-        shares = [row["joint"]["weighted_component_norm_shares"][component] for row in records]
+        shares = [
+            row["joint"]["weighted_component_norm_shares"][component]
+            for row in records
+        ]
         joint_cosines = [
             row["joint"]["component_to_joint_cosines"][component]["cosine"]
             for row in records
@@ -508,7 +519,7 @@ def aggregate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "all_component_gradients_pass": all(
             row["components"][component]["decision"] == "PASS"
             for row in records
-            for component in ROUTE_C_ACTIVE_COMPONENTS
+            for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS
         ),
         "all_joint_gradients_pass": all(
             row["joint"]["decision"] == "PASS" for row in records
@@ -541,12 +552,13 @@ def validate_evidence(
 def summary_markdown(report: dict[str, Any]) -> str:
     holdout = report["holdout"]
     lines = [
-        "# Route C four-active gradient interference audit",
+        "# Route C five-active gradient interference audit",
         "",
         f"- Decision: `{report['decision']}`",
         f"- Source commit: `{report['contract']['source']['head']}`",
-        f"- Active components: `{', '.join(ROUTE_C_ACTIVE_COMPONENTS)}`",
-        "- Objective: normalized bidirectional gap to the same-speaker clean pathological target",
+        f"- Active components: `{', '.join(ROUTE_C_FIVE_ACTIVE_COMPONENTS)}`",
+        "- Objective: normalized bidirectional gap to the same-speaker clean "
+        "pathological target",
         "- AVQI coefficient signs used for direction: `false`",
         "- Calibration / holdout cases: "
         f"`{report['selection']['cases_by_split']['surrogate_calibration']} / "
@@ -558,7 +570,7 @@ def summary_markdown(report: dict[str, Any]) -> str:
         f"{holdout['joint_gradient_norm_max']:.6f}`",
         "- Frozen final panel opened: `false`",
         "- Generator optimizer steps: `0`",
-        "- Scientific promotion granted: `false`",
+        "- Joint scientific promotion granted: `false`",
         "- Authoritative training decision: `NO_GO_AVQI_T2_TRAINING`",
         "",
         "| Component | Target scale | Calibration median norm | Frozen weight | "
@@ -566,8 +578,10 @@ def summary_markdown(report: dict[str, Any]) -> str:
         "Holdout min cosine to joint |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
-    for component in ROUTE_C_ACTIVE_COMPONENTS:
-        calibration_norm = report["calibration"]["median_component_gradient_norms"][component]
+    for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS:
+        calibration_norm = report["calibration"][
+            "median_component_gradient_norms"
+        ][component]
         weight = report["calibration"]["frozen_inverse_gradient_weights"][component]
         target_scale = report["contract"]["normalization"]["target_scale"][component]
         item = holdout["components"][component]
@@ -593,6 +607,9 @@ def main() -> None:
     args = parse_args()
     if args.output_dir.exists():
         raise ValueError(f"refusing to overwrite output directory: {args.output_dir}")
+    if not args.pytest_log.is_file():
+        raise ValueError(f"missing Slurm pytest log: {args.pytest_log}")
+    pytest_log_sha256 = sha256_file(args.pytest_log)
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError("CUDA audit requested but no GPU is visible")
     source = verify_source(
@@ -605,15 +622,17 @@ def main() -> None:
         "cpps": args.cpps_checkpoint,
         "hnr": args.hnr_checkpoint,
         "shimmer_percent": args.shimmer_checkpoint,
+        "slope": args.slope_checkpoint,
         "tilt": args.tilt_checkpoint,
     }
     checkpoint_hashes = {
         "cpps": args.cpps_checkpoint_sha256,
         "hnr": args.hnr_checkpoint_sha256,
         "shimmer_percent": args.shimmer_checkpoint_sha256,
+        "slope": args.slope_checkpoint_sha256,
         "tilt": args.tilt_checkpoint_sha256,
     }
-    bundle = load_route_c_four_active_scorer(
+    bundle = load_route_c_five_active_scorer(
         checkpoint_paths,
         checkpoint_hashes,
     )
@@ -654,22 +673,35 @@ def main() -> None:
     holdout_summary = aggregate_records(holdout_rows)
     weighted_calibration_medians = {
         component: median_norms[component] * weights[component]
-        for component in ROUTE_C_ACTIVE_COMPONENTS
+        for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS
     }
     calibration_balance_ratio = max(weighted_calibration_medians.values()) / min(
         weighted_calibration_medians.values()
     )
+    registry_records = route_c_registry_records()
+    registry_by_name = {slot["name"]: slot for slot in registry_records}
     gates = {
         "six_slot_order_matches_avqi_v0301": tuple(
-            slot["name"] for slot in route_c_registry_records()
+            slot["name"] for slot in registry_records
         )
         == AVQI_COMPONENT_NAMES,
-        "four_active_components_exact": tuple(
+        "five_active_components_exact": tuple(
             slot["name"]
-            for slot in route_c_registry_records()
-            if slot["active_in_four_component_scorer"]
+            for slot in registry_records
+            if slot["active_in_five_component_scorer"]
         )
-        == ROUTE_C_ACTIVE_COMPONENTS,
+        == ROUTE_C_FIVE_ACTIVE_COMPONENTS,
+        "five_active_components_scientifically_promoted": all(
+            registry_by_name[component]["scientific_status"]
+            == "fresh_speaker_panel_pass"
+            for component in ROUTE_C_FIVE_ACTIVE_COMPONENTS
+        ),
+        "shimmer_db_reserved_unresolved": (
+            registry_by_name["shimmer_db"]["scientific_status"] == "unresolved"
+            and not registry_by_name["shimmer_db"][
+                "active_in_five_component_scorer"
+            ]
+        ),
         "calibration_holdout_speaker_disjoint": selection["speaker_overlap"] == 0,
         "dev_only_no_final_panel": selection["final_panel_opened"] is False,
         "calibration_component_gradients_pass": calibration_summary[
@@ -696,21 +728,24 @@ def main() -> None:
         )
         == 0,
         "generator_optimizer_steps_zero": True,
+        "slurm_pytest_log_nonempty": args.pytest_log.stat().st_size > 0,
     }
     decision = (
-        "PASS_ROUTE_C_FOUR_ACTIVE_CODE_GRADIENT_AUDIT"
+        "PASS_ROUTE_C_FIVE_ACTIVE_CODE_GRADIENT_AUDIT"
         if all(gates.values())
-        else "NO_GO_ROUTE_C_FOUR_ACTIVE_GRADIENT_INTERFERENCE"
+        else "NO_GO_ROUTE_C_FIVE_ACTIVE_GRADIENT_INTERFERENCE"
     )
     report = {
-        "schema_version": "avqi_route_c_multicomponent_gradient_audit_v1",
+        "schema_version": "avqi_route_c_five_component_gradient_audit_v1",
         "decision": decision,
         "contract": {
             "source": source,
-            "architecture": ROUTE_C_FOUR_ACTIVE_ARCHITECTURE,
+            "architecture": ROUTE_C_FIVE_ACTIVE_ARCHITECTURE,
             "component_order": list(AVQI_COMPONENT_NAMES),
-            "active_components": list(ROUTE_C_ACTIVE_COMPONENTS),
-            "component_registry": route_c_registry_records(),
+            "active_components": list(ROUTE_C_FIVE_ACTIVE_COMPONENTS),
+            "inactive_slots": ["shimmer_db"],
+            "registry_schema_version": ROUTE_C_REGISTRY_SCHEMA_VERSION,
+            "component_registry": registry_records,
             "avqi_v0301": {
                 "intercept": AVQI_V0301_INTERCEPT,
                 "outer_scale": AVQI_V0301_SCALE,
@@ -741,12 +776,30 @@ def main() -> None:
             "final_output_highpass_applied": False,
             "waveform_mutation_performed": False,
             "full_band_pathology_guards_required_before_training": True,
+            "full_band_pathology_guards_evaluated_in_this_audit": False,
+            "scientific_safety_promotion_claimed": False,
+            "slice_status_semantics": {
+                "required_zero_rows": "FAIL",
+                "observational_zero_rows": "NOT_EVALUATED",
+                "observational_nonzero_rows": "OBSERVATIONAL",
+            },
+            "sealed_ltas_slope_audit_note": {
+                "historical_artifacts_rewritten": False,
+                "final_panel_seal": evidence["slope_final_panel_seal"],
+                "final_results_csv": evidence["slope_final_results"],
+                "legacy_zero_row_observational_display": "PASS",
+                "current_zero_row_observational_display": "NOT_EVALUATED",
+            },
         },
         "source_checkpoints": bundle.source_metadata,
         "source_evidence": evidence,
         "label_bank": {
             "path": str(args.label_bank.resolve()),
             "sha256": args.label_bank_sha256,
+        },
+        "test_evidence": {
+            "path": str(args.pytest_log.resolve()),
+            "sha256": pytest_log_sha256,
         },
         "selection": selection,
         "calibration": {
@@ -770,7 +823,7 @@ def main() -> None:
             ),
             "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         },
-        "scientific_promotion_granted": False,
+        "joint_scientific_promotion_granted": False,
         "combined_final_panel_opened": False,
         "generator_loaded": False,
         "generator_optimizer_steps": 0,
@@ -788,15 +841,20 @@ def main() -> None:
         "source_branch": source["branch"],
         "accepted_base_commit": source["accepted_base_commit"],
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
-        "active_components": list(ROUTE_C_ACTIVE_COMPONENTS),
-        "inactive_slots": ["shimmer_db", "slope"],
+        "active_components": list(ROUTE_C_FIVE_ACTIVE_COMPONENTS),
+        "inactive_slots": ["shimmer_db"],
         "calibration_cases": selection["cases_by_split"]["surrogate_calibration"],
         "holdout_cases": selection["cases_by_split"]["surrogate_holdout"],
         "artifact_sha256": {
             report_path.name: sha256_file(report_path),
             summary_path.name: sha256_file(summary_path),
+            args.pytest_log.name: pytest_log_sha256,
         },
-        "scientific_promotion_granted": False,
+        "sealed_ltas_slope_source_sha256": {
+            "final_panel_seal.json": evidence["slope_final_panel_seal"]["sha256"],
+            "final_results.csv": evidence["slope_final_results"]["sha256"],
+        },
+        "joint_scientific_promotion_granted": False,
         "combined_final_panel_opened": False,
         "generator_optimizer_steps": 0,
         "formal_generator_training_submitted": False,

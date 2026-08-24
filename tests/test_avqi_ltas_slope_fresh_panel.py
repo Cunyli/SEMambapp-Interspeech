@@ -137,6 +137,38 @@ def test_ltas_summary_requires_views_conditions_and_all_safety_gates() -> None:
         "condition=snr20",
         "condition=snr10",
     }
+    mild = summary["slices"]["severity=pathological_mild"]
+    severe = summary["slices"]["severity=pathological_severe"]
+    for observational in (mild, severe):
+        assert observational["required"] is False
+        assert observational["evaluation_status"] == "NOT_EVALUATED"
+        assert observational["decision"] == "NOT_EVALUATED"
+        assert observational["reference_gate_result"] is None
+    external = summary["slices"]["sample_group=pathological_external"]
+    assert external["required"] is False
+    assert external["evaluation_status"] == "EVALUATED"
+    assert external["decision"] == "OBSERVATIONAL"
+    assert external["reference_gate_result"] == "PASS"
+    assert summary["slice_summary_schema_version"] == (
+        "avqi-route-c-slice-summary-v2"
+    )
+
+
+def test_ltas_required_zero_row_slice_fails_instead_of_passing() -> None:
+    namespace = load_ltas_namespace()
+    rows = [
+        row for row in synthetic_ltas_rows(namespace) if row["view"] == "cs"
+    ]
+    summary = namespace["finalize_summary"](
+        namespace["summarize_rows"](rows, expected_rows=len(rows))
+    )
+
+    missing_sv = summary["required_slice_gate"]["slices"]["view=sv"]
+    assert missing_sv["required"] is True
+    assert missing_sv["evaluation_status"] == "NOT_EVALUATED"
+    assert missing_sv["decision"] == "FAIL"
+    assert summary["required_slice_gate"]["decision"] == "FAIL"
+    assert summary["decision"] == "FAIL"
 
 
 def test_ltas_summary_rejects_nonselected_component_regression() -> None:

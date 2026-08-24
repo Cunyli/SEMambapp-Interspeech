@@ -81,6 +81,7 @@ DISPLAY_NAME = "Shimmer percent"
 VERSION_LABEL = "shimmer_v6"
 PANEL_SCHEMA_VERSION = "avqi-route-c-shimmer-fresh-panel-v1"
 FINAL_SEAL_SCHEMA_VERSION = "avqi-route-c-shimmer-final-seal-v1"
+SLICE_SUMMARY_SCHEMA_VERSION = "avqi-route-c-slice-summary-v2"
 PASS_DECISION = "PASS_SHIMMER_FRESH_SPEAKER_PANEL"
 FAIL_DECISION = "FAIL_SHIMMER_FRESH_SPEAKER_PANEL"
 CALIBRATION_NO_GO_DECISION = "NO_GO_SHIMMER_CALIBRATION_FINAL_UNOPENED"
@@ -1193,17 +1194,25 @@ def summarize_slice(
             median_reduction is not None and median_reduction >= 0.0
         ),
     }
+    evaluated = len(rows) > 0
+    reference_gate_result = None
+    if evaluated:
+        reference_gate_result = "PASS" if all(gates.values()) else "FAIL"
+    if require_gate:
+        decision = "PASS" if reference_gate_result == "PASS" else "FAIL"
+    else:
+        decision = "OBSERVATIONAL" if evaluated else "NOT_EVALUATED"
     return {
+        "schema_version": SLICE_SUMMARY_SCHEMA_VERSION,
+        "required": require_gate,
+        "evaluation_status": "EVALUATED" if evaluated else "NOT_EVALUATED",
         "rows": len(rows),
         "material_rows": len(material),
         "improvement_fraction_material": improvement,
         "median_normalized_gap_reduction_material": median_reduction,
         "gates": gates,
-        "decision": (
-            "PASS"
-            if not require_gate or all(gates.values())
-            else "FAIL"
-        ),
+        "reference_gate_result": reference_gate_result,
+        "decision": decision,
     }
 
 
@@ -1331,6 +1340,7 @@ def summarize_rows(rows: list[dict[str, Any]], expected_rows: int) -> dict[str, 
     exact_summary_key = f"exact_{OPTIMIZED_COMPONENT}"
     proxy_summary_key = f"proxy_{OPTIMIZED_COMPONENT}"
     summary = {
+        "slice_summary_schema_version": SLICE_SUMMARY_SCHEMA_VERSION,
         "rows": len(rows),
         "expected_rows": expected_rows,
         "material_rows": len(material),
@@ -1388,12 +1398,27 @@ def choose_calibration_alpha(
 
 def finalize_summary(summary: dict[str, Any]) -> dict[str, Any]:
     required_slices = {
-        name: summary["slices"].get(name, {"decision": "FAIL"})
+        name: summary["slices"].get(
+            name,
+            {
+                "schema_version": SLICE_SUMMARY_SCHEMA_VERSION,
+                "required": True,
+                "evaluation_status": "NOT_EVALUATED",
+                "rows": 0,
+                "decision": "FAIL",
+            },
+        )
         for name in REQUIRED_FINAL_SLICES
     }
-    slice_gate = all(item["decision"] == "PASS" for item in required_slices.values())
+    slice_gate = all(
+        item.get("required") is True
+        and item.get("evaluation_status") == "EVALUATED"
+        and item.get("decision") == "PASS"
+        for item in required_slices.values()
+    )
     output = dict(summary)
     output["required_slice_gate"] = {
+        "schema_version": SLICE_SUMMARY_SCHEMA_VERSION,
         "slices": required_slices,
         "decision": "PASS" if slice_gate else "FAIL",
     }
