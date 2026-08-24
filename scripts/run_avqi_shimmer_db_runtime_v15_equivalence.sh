@@ -9,7 +9,7 @@ SOURCE_ROOT="${SOURCE_ROOT:-$ROOT_DIR}"
 AUDIT_SCRIPT="$SOURCE_ROOT/scripts/evaluate_avqi_shimmer_db_runtime_v15_equivalence.py"
 WORKER_SCRIPT="$SOURCE_ROOT/scripts/avqi_shimmer_exact_topology_worker.py"
 
-RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_runtime_v15_equivalence_20260824_01}"
+RUN_ROOT="${RUN_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_runtime_v15_equivalence_20260824_02_tmpfs_physical_core}"
 LOG_DIR="${LOG_DIR:-$RUN_ROOT/logs}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RUN_ROOT/outputs}"
 V14_ROOT="${V14_ROOT:-$SOURCE_ROOT/runs/avqi_route_c_shimmer_db_candidate_c_fresh_panel_v14_20260824_01/outputs}"
@@ -28,7 +28,7 @@ AVQI_CODE_TREE_SHA256="${AVQI_CODE_TREE_SHA256:-46987b3c447cb579aab4d34e87655938
 
 PARTITION="${PARTITION:-gpu-v100-32g}"
 GPU_TYPE="${GPU_TYPE:-v100}"
-CPUS_PER_TASK="${CPUS_PER_TASK:-4}"
+CPUS_PER_TASK="${CPUS_PER_TASK:-1}"
 MEMORY="${MEMORY:-24G}"
 TIME_LIMIT="${TIME_LIMIT:-00:30:00}"
 SOFTWARE_STACK_MODULE="${SOFTWARE_STACK_MODULE:-triton/2025.1-gcc}"
@@ -97,6 +97,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     --ntasks=1 \
     --gres="gpu:${GPU_TYPE}:1" \
     --cpus-per-task="$CPUS_PER_TASK" \
+    --hint=nomultithread \
     --mem="$MEMORY" \
     --time="$TIME_LIMIT" \
     --output="$LOG_DIR/slurm_%j.out" \
@@ -123,6 +124,10 @@ conda activate semambapp
 export CC="$(command -v gcc)"
 export CXX="$(command -v g++)"
 export PYTHONPATH="$SOURCE_ROOT:$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 
 LIVE_LOG="$LOG_DIR/shimmer_db_runtime_v15_equivalence_${SLURM_JOB_ID}.log"
 echo "event=start job=$SLURM_JOB_ID commit=$SOURCE_COMMIT time=$(date -Is)" | tee -a "$LIVE_LOG"

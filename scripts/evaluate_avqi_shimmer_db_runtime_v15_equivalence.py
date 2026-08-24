@@ -313,6 +313,15 @@ def require_step_equal(
 def summarize_runtime(rows: list[dict[str, Any]]) -> dict[str, Any]:
     internal = [float(row["internal_refresh_ms"]) for row in rows]
     wall = [float(row["request_wall_ms"]) for row in rows]
+    end_to_end = [float(row["end_to_end_refresh_ms"]) for row in rows]
+    formal_pass = (
+        max(internal) <= FORMAL_REFRESH_GATE_MS
+        and max(end_to_end) <= FORMAL_REFRESH_GATE_MS
+    )
+    development_pass = (
+        max(internal) <= DEV_ENGINEERING_MARGIN_MS
+        and max(end_to_end) <= DEV_ENGINEERING_MARGIN_MS
+    )
     return {
         "measurement_count": len(rows),
         "internal_refresh_ms": {
@@ -327,10 +336,14 @@ def summarize_runtime(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "median": median(wall),
             "maximum": max(wall),
         },
-        "formal_500ms_pass": max(internal) <= FORMAL_REFRESH_GATE_MS,
-        "development_450ms_margin_pass": (
-            max(internal) <= DEV_ENGINEERING_MARGIN_MS
-        ),
+        "end_to_end_refresh_ms": {
+            "minimum": min(end_to_end),
+            "median": median(end_to_end),
+            "maximum": max(end_to_end),
+            "includes_client_tmpfs_staging": True,
+        },
+        "formal_500ms_pass": formal_pass,
+        "development_450ms_margin_pass": development_pass,
     }
 
 
@@ -385,12 +398,17 @@ def main() -> None:
     optimized_root.mkdir(parents=True)
 
     items = [topology_item(row) for row in panel_rows]
+    base_waveforms = {
+        row["case_id"]: read_waveform(Path(row["base_path"])).numpy()
+        for row in panel_rows
+    }
     frozen_started = time.perf_counter()
     frozen_report = run_exact(items, args.exact_python, args.avqi_code_root)
     frozen_batch_wall_ms = 1000.0 * (time.perf_counter() - frozen_started)
     frozen_by_case = {row["case_id"]: row for row in frozen_report["rows"]}
 
     runtime_rows: list[dict[str, Any]] = []
+    path_runtime_rows: list[dict[str, Any]] = []
     optimized_by_case: dict[str, dict[str, Any]] = {}
     with ExactShimmerTopologyWorker(
         args.exact_python,
@@ -413,9 +431,39 @@ def main() -> None:
             start=1,
         ):
             frozen_topology = frozen_by_case[row["case_id"]]
+            path_refreshed, path_wall_ms = worker.refresh([item])
+            path_topology = path_refreshed[0]
+            require_exact_topology_equal(
+                frozen_topology,
+                path_topology,
+                f"{row['case_id']}:persistent-path-reference",
+            )
+            path_timing = path_topology["timing_ms"]
+            path_runtime_rows.append(
+                {
+                    "case_id": row["case_id"],
+                    "speaker_id": row["speaker_id"],
+                    "view": row["view"],
+                    "condition": row["condition"],
+                    "input_read_ms": path_timing["input_read"],
+                    "highpass_ms": path_timing["highpass"],
+                    "highpass_filter_compute_ms": path_timing[
+                        "highpass_filter_compute"
+                    ],
+                    "highpass_quantize_ms": path_timing["highpass_quantize"],
+                    "internal_refresh_ms": path_topology["pulse_runtime_ms"],
+                    "request_wall_ms": path_wall_ms,
+                }
+            )
             for repeat_index in range(1, args.warm_repeats + 1):
-                refreshed, wall_ms = worker.refresh([item])
+                refreshed, wall_ms, staging_rows = (
+                    worker.refresh_current_waveforms(
+                        [item],
+                        [base_waveforms[row["case_id"]]],
+                    )
+                )
                 optimized_topology = refreshed[0]
+                staging = staging_rows[0]
                 identity_hash = require_exact_topology_equal(
                     frozen_topology,
                     optimized_topology,
@@ -444,7 +492,12 @@ def main() -> None:
                             "metric_source_range_count"
                         ],
                         "input_read_ms": timing["input_read"],
+                        "client_tmpfs_staging_ms": staging["staging_ms"],
                         "highpass_ms": timing["highpass"],
+                        "highpass_filter_compute_ms": timing[
+                            "highpass_filter_compute"
+                        ],
+                        "highpass_quantize_ms": timing["highpass_quantize"],
                         "textgrid_ms": timing["textgrid"],
                         "source_selection_ms": timing["source_selection"],
                         "metric_gather_ms": timing["metric_gather"],
@@ -456,6 +509,9 @@ def main() -> None:
                             "pulse_runtime_ms"
                         ],
                         "request_wall_ms": wall_ms,
+                        "end_to_end_refresh_ms": (
+                            float(staging["staging_ms"]) + wall_ms
+                        ),
                     }
                 )
             print(
@@ -547,8 +603,13 @@ def main() -> None:
                 "refresh_wall_max_ms": max(
                     value["request_wall_ms"] for value in runtime_for_case
                 ),
+                "refresh_end_to_end_max_ms": max(
+                    value["end_to_end_refresh_ms"]
+                    for value in runtime_for_case
+                ),
                 "total_metric_step_overhead_max_ms": max(
-                    value["request_wall_ms"] for value in runtime_for_case
+                    value["end_to_end_refresh_ms"]
+                    for value in runtime_for_case
                 )
                 + optimized_signature["torch_step_ms"],
             }
@@ -574,8 +635,10 @@ def main() -> None:
     decision = PASS_DECISION if passed else FAIL_DECISION
 
     runtime_path = args.output_dir / "runtime_samples.csv"
+    path_runtime_path = args.output_dir / "path_reference_runtime_samples.csv"
     results_path = args.output_dir / "equivalence_results.csv"
     write_csv(runtime_path, runtime_rows)
+    write_csv(path_runtime_path, path_runtime_rows)
     write_csv(results_path, equivalence_rows)
     report = {
         "schema_version": "avqi-route-c-shimmer-db-runtime-v15-equivalence-v1",
@@ -593,6 +656,10 @@ def main() -> None:
         "metric_highpass_only": True,
         "emitted_waveform_full_band": True,
         "waveform_dependent_topology_cache": False,
+        "current_output_handoff": (
+            "hash_bound_client_tmpfs_raw_float32_per_waveform_step"
+        ),
+        "shared_or_dataset_filesystem_read_inside_timed_refresh": False,
         "current_output_topology_refresh_per_waveform_step": True,
         "clean_target_topology_drives_output": False,
         "dev_cases_are_ineligible_for_future_promotion_panel": True,
@@ -638,6 +705,7 @@ def main() -> None:
         "new_sealed_panel_authorized": passed,
         "artifacts": {
             "runtime_samples": runtime_path.name,
+            "path_reference_runtime_samples": path_runtime_path.name,
             "equivalence_results": results_path.name,
         },
     }
@@ -656,6 +724,7 @@ def main() -> None:
         "artifact_sha256": {
             report_path.name: sha256_file(report_path),
             runtime_path.name: sha256_file(runtime_path),
+            path_runtime_path.name: sha256_file(path_runtime_path),
             results_path.name: sha256_file(results_path),
         },
     }

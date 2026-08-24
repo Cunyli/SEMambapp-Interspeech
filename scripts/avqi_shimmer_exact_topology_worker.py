@@ -4,7 +4,9 @@
 The worker refreshes each current waveform's own exact AVQI metric topology.
 It caches no waveform-dependent ranges or pulses.  Persistent state is limited
 to the process, Praat command initialization, and two reusable Praat-generated
-WAV slots.  The emitted waveform is never high-passed by this worker.
+WAV slots.  A hash-bound client tmpfs slot may hand off the current output's
+float32 samples, but it is reread and revalidated for every refresh.  The
+emitted waveform is never high-passed by this worker.
 """
 
 from __future__ import annotations
@@ -411,6 +413,8 @@ class ExactTopologyEngine:
         waveform: np.ndarray,
         view: str,
         input_read_ms: float,
+        input_loader: str,
+        waveform_float32_sha256: str,
     ) -> dict[str, Any]:
         total_started = time.perf_counter()
         highpassed, highpass_timing = self.exact_metric_highpass(waveform)
@@ -468,7 +472,8 @@ class ExactTopologyEngine:
             "source_ranges_sha256": ranges_sha256(ranges),
             "pulse_positions_sha256": pulses_sha256(positions),
             "topology_preprocessing": "exact_avqi_view_metric_waveform",
-            "topology_input_loader": "soundfile_float32_exact_16khz_mono",
+            "topology_input_loader": input_loader,
+            "source_waveform_float32_sha256": waveform_float32_sha256,
             "metric_highpass": "exact_in_process_praat_stop_hann_0_34_0p1",
             "frame_scan_mode": "numpy_vectorized_exact_aligned_frames",
             "pulse_enumeration_mode": "praat_pointprocess_to_matrix",
@@ -483,9 +488,43 @@ class ExactTopologyEngine:
         waveform, sample_rate = sf.read(path, dtype="float32")
         if sample_rate != SAMPLE_RATE or waveform.ndim != 1 or waveform.size == 0:
             raise ValueError(f"exact topology input must be mono 16 kHz: {path}")
-        values = waveform.astype(np.float64)
+        float32_values = np.asarray(waveform, dtype="<f4")
+        values = float32_values.astype(np.float64)
         input_read_ms = 1000.0 * (time.perf_counter() - input_started)
-        return self.refresh_waveform(values, view, input_read_ms)
+        return self.refresh_waveform(
+            values,
+            view,
+            input_read_ms,
+            "soundfile_float32_exact_16khz_mono",
+            bytes_sha256(float32_values.tobytes()),
+        )
+
+    def refresh_raw_float32(
+        self,
+        path: Path,
+        sample_count: int,
+        expected_sha256: str,
+        view: str,
+    ) -> dict[str, Any]:
+        input_started = time.perf_counter()
+        payload = path.read_bytes()
+        observed_sha256 = bytes_sha256(payload)
+        if observed_sha256 != expected_sha256:
+            raise ValueError("current-output tmpfs float32 hash drift")
+        if len(payload) != sample_count * np.dtype("<f4").itemsize:
+            raise ValueError("current-output tmpfs float32 size drift")
+        float32_values = np.frombuffer(payload, dtype="<f4")
+        if float32_values.size == 0 or not np.isfinite(float32_values).all():
+            raise ValueError("invalid current-output tmpfs float32 waveform")
+        values = float32_values.astype(np.float64)
+        input_read_ms = 1000.0 * (time.perf_counter() - input_started)
+        return self.refresh_waveform(
+            values,
+            view,
+            input_read_ms,
+            "client_tmpfs_raw_float32_current_output",
+            observed_sha256,
+        )
 
     def warmup(self) -> dict[str, Any]:
         sample_indices = np.arange(4 * SAMPLE_RATE, dtype=np.float64)
@@ -502,7 +541,14 @@ class ExactTopologyEngine:
         started = time.perf_counter()
         rows = []
         for view in ("cs", "sv"):
-            topology = self.refresh_waveform(waveform, view, 0.0)
+            float32_waveform = waveform.astype("<f4")
+            topology = self.refresh_waveform(
+                float32_waveform.astype(np.float64),
+                view,
+                0.0,
+                "synthetic_in_memory_float32",
+                bytes_sha256(float32_waveform.tobytes()),
+            )
             rows.append(
                 {
                     "view": view,
@@ -541,6 +587,11 @@ def main() -> None:
                 "praat_version": parselmouth.PRAAT_VERSION,
                 "avqi_code_tree_sha256": actual_tree_hash,
                 "runtime_temp_backend": engine.runtime_temp_backend,
+                "cpu_affinity": (
+                    sorted(os.sched_getaffinity(0))
+                    if hasattr(os, "sched_getaffinity")
+                    else []
+                ),
             },
             sort_keys=True,
         ),
@@ -559,10 +610,24 @@ def main() -> None:
                     role = str(item.get("role", ""))
                     if "target" in role.lower():
                         raise ValueError("clean target topology is forbidden")
-                    topology = engine.refresh_path(
-                        Path(item["path"]),
-                        str(item["view"]),
-                    )
+                    source_path = Path(str(item.get("path", "")))
+                    if any(
+                        "target_clean" in part.lower()
+                        for part in source_path.parts
+                    ):
+                        raise ValueError("clean target topology path is forbidden")
+                    if "raw_float32_path" in item:
+                        topology = engine.refresh_raw_float32(
+                            Path(item["raw_float32_path"]),
+                            int(item["raw_float32_sample_count"]),
+                            str(item["raw_float32_sha256"]),
+                            str(item["view"]),
+                        )
+                    else:
+                        topology = engine.refresh_path(
+                            Path(item["path"]),
+                            str(item["view"]),
+                        )
                     rows.append(
                         {
                             "id": item["id"],

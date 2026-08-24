@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,7 @@ from scripts.evaluate_avqi_shimmer_db_runtime_v15_equivalence import (
     DEV_ENGINEERING_MARGIN_MS,
     FORMAL_REFRESH_GATE_MS,
     PASS_DECISION,
+    summarize_runtime,
 )
 from scripts.evaluate_avqi_shimmer_hybrid_topology import FIXED_ALPHA
 
@@ -70,3 +72,37 @@ def test_exact_topology_equality_fails_without_metric_parity() -> None:
     candidate["metric_reconstruction_differing_samples"] = 1
     with pytest.raises(ValueError, match="lacks parity"):
         require_exact_topology_equal(topology(), candidate, "parity")
+
+
+def test_v15_runtime_gate_includes_tmpfs_staging_wall_time() -> None:
+    rows = [
+        {
+            "internal_refresh_ms": 430.0,
+            "request_wall_ms": 435.0,
+            "end_to_end_refresh_ms": 440.0,
+        },
+        {
+            "internal_refresh_ms": 445.0,
+            "request_wall_ms": 448.0,
+            "end_to_end_refresh_ms": 449.0,
+        },
+    ]
+    summary = summarize_runtime(rows)
+    assert summary["formal_500ms_pass"] is True
+    assert summary["development_450ms_margin_pass"] is True
+
+    rows[-1]["end_to_end_refresh_ms"] = 501.0
+    summary = summarize_runtime(rows)
+    assert summary["formal_500ms_pass"] is False
+    assert summary["development_450ms_margin_pass"] is False
+
+
+def test_worker_has_hash_bound_current_output_tmpfs_loader() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "avqi_shimmer_exact_topology_worker.py"
+    ).read_text(encoding="utf-8")
+    assert "client_tmpfs_raw_float32_current_output" in source
+    assert "current-output tmpfs float32 hash drift" in source
+    assert 'call(sound, "Filter (stop Hann band)", 0, 34, 0.1)' in source

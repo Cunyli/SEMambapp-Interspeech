@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -151,6 +152,15 @@ class ExactShimmerTopologyWorker:
             raise FileNotFoundError(
                 f"missing exact AVQI code root: {avqi_code_root}"
             )
+        tmpfs_root = Path("/dev/shm")
+        staging_root = str(tmpfs_root) if tmpfs_root.is_dir() else None
+        self.staging_directory = tempfile.TemporaryDirectory(
+            prefix="avqi-shimmer-client-",
+            dir=staging_root,
+        )
+        self.staging_backend = (
+            "tmpfs_dev_shm" if staging_root is not None else "system_temp"
+        )
         started = time.perf_counter()
         self.process = subprocess.Popen(
             [
@@ -234,6 +244,15 @@ class ExactShimmerTopologyWorker:
         self,
         items: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], float]:
+        self._validate_current_output_items(items)
+        response, wall_ms = self.request({"op": "refresh", "items": items})
+        rows = self._validate_rows(response, items)
+        return rows, wall_ms
+
+    def _validate_current_output_items(
+        self,
+        items: list[dict[str, Any]],
+    ) -> None:
         if not items:
             raise ValueError("exact topology refresh requires at least one item")
         ids = [str(item.get("id", "")) for item in items]
@@ -256,7 +275,12 @@ class ExactShimmerTopologyWorker:
         if len(set(refresh_keys)) != len(refresh_keys):
             raise ValueError("duplicate current-waveform refresh in one request")
 
-        response, wall_ms = self.request({"op": "refresh", "items": items})
+    def _validate_rows(
+        self,
+        response: dict[str, Any],
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        ids = [str(item["id"]) for item in items]
         rows = response.get("rows")
         if not isinstance(rows, list) or len(rows) != len(items):
             raise ValueError("exact topology worker row count drift")
@@ -273,12 +297,68 @@ class ExactShimmerTopologyWorker:
                 raise ValueError(
                     f"exact topology unavailable: {row.get('case_id')}"
                 )
-        return rows, wall_ms
+        return rows
+
+    def refresh_current_waveforms(
+        self,
+        items: list[dict[str, Any]],
+        waveforms: list[np.ndarray],
+    ) -> tuple[list[dict[str, Any]], float, list[dict[str, Any]]]:
+        """Refresh current in-memory waveforms through hash-bound tmpfs slots."""
+        self._validate_current_output_items(items)
+        if len(waveforms) != len(items):
+            raise ValueError("current waveform/item count drift")
+        staged_items: list[dict[str, Any]] = []
+        staging_rows: list[dict[str, Any]] = []
+        for index, (item, waveform) in enumerate(
+            zip(items, waveforms, strict=True)
+        ):
+            started = time.perf_counter()
+            values = np.ascontiguousarray(waveform, dtype="<f4").reshape(-1)
+            if values.size == 0 or not np.isfinite(values).all():
+                raise ValueError("invalid in-memory current-output waveform")
+            payload = values.tobytes()
+            payload_hash = hashlib.sha256(payload).hexdigest()
+            slot = Path(self.staging_directory.name) / f"current_{index}.f32"
+            slot.write_bytes(payload)
+            staging_ms = 1000.0 * (time.perf_counter() - started)
+            staged_items.append(
+                {
+                    **item,
+                    "raw_float32_path": str(slot),
+                    "raw_float32_sample_count": int(values.size),
+                    "raw_float32_sha256": payload_hash,
+                }
+            )
+            staging_rows.append(
+                {
+                    "id": item["id"],
+                    "sample_count": int(values.size),
+                    "raw_float32_sha256": payload_hash,
+                    "staging_ms": staging_ms,
+                    "staging_backend": self.staging_backend,
+                }
+            )
+        response, wall_ms = self.request(
+            {"op": "refresh", "items": staged_items}
+        )
+        rows = self._validate_rows(response, items)
+        for row, staging in zip(rows, staging_rows, strict=True):
+            if row.get("topology_input_loader") != (
+                "client_tmpfs_raw_float32_current_output"
+            ):
+                raise ValueError("tmpfs current-output loader contract drift")
+            if row.get("source_waveform_float32_sha256") != staging[
+                "raw_float32_sha256"
+            ]:
+                raise ValueError("tmpfs current-output waveform hash drift")
+        return rows, wall_ms, staging_rows
 
     def close(self) -> None:
         if self.process.poll() is None:
             self.request({"op": "quit"})
         self.process.wait(timeout=30)
+        self.staging_directory.cleanup()
 
     def __enter__(self) -> "ExactShimmerTopologyWorker":
         return self
