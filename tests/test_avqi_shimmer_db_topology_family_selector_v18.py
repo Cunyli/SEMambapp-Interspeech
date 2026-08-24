@@ -23,6 +23,7 @@ from scripts.evaluate_avqi_shimmer_db_topology_family_selector_v18 import (
     plan_equivalence,
     select_candidate_d,
     selector_contract,
+    synthetic_v18_warmup,
 )
 from scripts.evaluate_avqi_shimmer_hybrid_topology import (
     normalized_gradient_step,
@@ -149,6 +150,14 @@ def test_candidate_d_routing_fails_closed_on_schema_or_certificate() -> None:
     certificates["candidate_exact_shimmer_db"] = 0.0
     with pytest.raises(ValueError, match="routing contract drift"):
         select_candidate_d(certificates)
+
+
+def test_v18_warmup_is_synthetic_and_finite() -> None:
+    report = synthetic_v18_warmup(torch.device("cpu"))
+    assert report["synthetic_only"] is True
+    assert report["panel_or_training_waveform_used"] is False
+    assert report["projected_gradient_valid"] is True
+    assert report["candidate_finite"] is True
 
 
 def test_selector_seal_precedes_exact_scoring() -> None:

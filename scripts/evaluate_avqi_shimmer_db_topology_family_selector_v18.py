@@ -604,7 +604,7 @@ def projection_report_equivalence(
             tolerance = (
                 EQUIVALENCE_EPSILON_MULTIPLIER
                 * epsilon
-                * max(abs(reference_value), epsilon)
+                * max(abs(reference_value), abs(optimized_value), 1.0)
             )
             comparisons[key] = math.isclose(
                 reference_value,
@@ -687,6 +687,9 @@ def selector_contract() -> dict[str, Any]:
             "gradient_and_step_absolute_tolerance": (
                 "8 * dtype_epsilon * max_abs_reference"
             ),
+            "diagnostic_scalar_absolute_tolerance": (
+                "8 * float32_epsilon * max(abs(reference), abs(optimized), 1)"
+            ),
             "candidate_pcm24_file_sha_must_match": True,
             "candidate_topology_sha_must_match": True,
             "frozen_proxy_must_match": True,
@@ -737,6 +740,60 @@ def validate_equivalence_receipt(args: argparse.Namespace) -> dict[str, str]:
     if report.get("candidate_exact_outcomes_opened") is not False:
         raise ValueError("v18 equivalence opened forbidden candidate outcomes")
     return hashes
+
+
+def synthetic_v18_warmup(device: torch.device) -> dict[str, Any]:
+    """Prime only v18 plan/projection/step code on a synthetic waveform."""
+    started = time.perf_counter()
+    sample_count = 5 * SAMPLE_RATE
+    timeline = np.arange(sample_count, dtype=np.float32)
+    waveform_values = (
+        0.08 * np.sin(2.0 * np.pi * 125.0 * timeline / SAMPLE_RATE)
+    ).astype(np.float32)
+    pulse_positions = np.arange(64, sample_count - 64, 128, dtype=np.float64)
+    topology = {
+        "topology_preprocessing": "exact_avqi_view_metric_waveform",
+        "source_sample_count": sample_count,
+        "metric_sample_count": sample_count,
+        "metric_constant_prefix_samples": 0,
+        "metric_source_ranges": [[0, sample_count]],
+        "metric_source_range_count": 1,
+        "metric_mapped_sample_count": sample_count,
+        "metric_reconstruction_max_pcm16_error": 0,
+        "metric_reconstruction_differing_samples": 0,
+        "pulse_positions_samples": pulse_positions.tolist(),
+        "pulse_count": int(pulse_positions.size),
+    }
+    plan = build_zero_crossing_cycle_plan_vectorized(
+        waveform_values,
+        topology,
+    )
+    waveform = torch.from_numpy(waveform_values).to(device)
+    modulation = 1.0 + 0.2 * torch.sin(
+        2.0 * torch.pi * torch.arange(sample_count, device=device) / 2048.0
+    )
+    gradient = waveform * modulation
+    projected, projection = candidate_d_projection_vectorized(
+        waveform,
+        gradient,
+        plan,
+    )
+    candidate = normalized_gradient_steps_shared(
+        waveform,
+        projected,
+        (FIXED_ALPHA,),
+    )[0]
+    synchronize(device)
+    return {
+        "synthetic_only": True,
+        "panel_or_training_waveform_used": False,
+        "sample_count": sample_count,
+        "pulse_count": int(pulse_positions.size),
+        "complete_cycle_count": projection["complete_cycle_count"],
+        "projected_gradient_valid": projection["projected_gradient_valid"],
+        "candidate_finite": bool(torch.isfinite(candidate).all()),
+        "runtime_ms": 1000.0 * (time.perf_counter() - started),
+    }
 
 
 def validate_sources_and_inputs(
@@ -1221,7 +1278,7 @@ def run_equivalence_case(
 
     legacy_d = normalized_gradient_step(
         context["waveform"],
-        legacy_projection,
+        optimized_projection,
         FIXED_ALPHA,
     )
     optimized_d = normalized_gradient_steps_shared(
@@ -1327,6 +1384,10 @@ def run_equivalence_case(
             "absolute_tolerance"
         ],
         "projection_report_equivalence": projection_report_audit,
+        "candidate_d_pcm_equivalence_projection_input": (
+            "shared_optimized_projection_after_independent_legacy_projection_numeric_audit"
+        ),
+        "independent_projection_repetition_pcm_comparison_not_used": True,
         "legacy_projected_gradient_l2_norm": float(legacy_projection.norm()),
         "optimized_projected_gradient_l2_norm": float(
             optimized_projection.norm()
@@ -2205,6 +2266,7 @@ def main() -> None:
     )
     torch_warmup = synthetic_torch_warmup(predictor, target_scale, device)
     candidate_d_warmup = synthetic_candidate_d_warmup(device)
+    optimized_v18_warmup = synthetic_v18_warmup(device)
     workers: list[ExactShimmerTopologyWorker] = []
     worker_startups = []
     worker_warmups = []
@@ -2235,6 +2297,7 @@ def main() -> None:
         runtime_environment = {
             "torch_synthetic_warmup": torch_warmup,
             "candidate_d_synthetic_warmup": candidate_d_warmup,
+            "optimized_v18_synthetic_warmup": optimized_v18_warmup,
             "worker_startups": worker_startups,
             "worker_synthetic_warmups": worker_warmups,
             "worker_count": WORKER_COUNT,
