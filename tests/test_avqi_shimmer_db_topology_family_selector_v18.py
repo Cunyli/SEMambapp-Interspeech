@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,9 @@ from scripts.evaluate_avqi_shimmer_db_topology_family_selector_v18 import (
     TRUST_REGION_CANDIDATE_NAME,
     build_zero_crossing_cycle_plan_vectorized,
     candidate_d_projection_vectorized,
+    materialize_candidate_pcm24,
     normalized_gradient_steps_shared,
+    pcm24_codes,
     plan_equivalence,
     projection_report_equivalence,
     select_candidate_d,
@@ -160,6 +163,63 @@ def test_projection_report_equivalence_records_numeric_audit_details() -> None:
     assert details["absolute_difference"] == pytest.approx(1e-7)
     assert details["absolute_tolerance"] > details["absolute_difference"]
     assert audit["all_equivalent"] is True
+
+
+def test_parallel_pcm24_materialization_is_byte_equivalent(tmp_path: Path) -> None:
+    sample_count = 4096
+    timeline = np.arange(sample_count, dtype=np.float32)
+    base = (0.05 * np.sin(2.0 * np.pi * timeline / 127.0)).astype(np.float32)
+    candidates = [
+        (base + scale * np.cos(2.0 * np.pi * timeline / 61.0)).astype(
+            np.float32
+        )
+        for scale in (1e-4, 5e-5, 2.5e-5, 1.25e-5)
+    ]
+    context = {
+        "base_values": base,
+        "base_codes": pcm24_codes(base),
+        "base_sha256": "not-a-candidate-hash",
+    }
+    sequential = [
+        materialize_candidate_pcm24(
+            context,
+            values,
+            tmp_path / f"sequential_{index}.wav",
+            f"candidate_{index}",
+        )[0]
+        for index, values in enumerate(candidates)
+    ]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(
+                materialize_candidate_pcm24,
+                context,
+                values,
+                tmp_path / f"parallel_{index}.wav",
+                f"candidate_{index}",
+            )
+            for index, values in enumerate(candidates)
+        ]
+        parallel = [future.result()[0] for future in futures]
+    comparable_keys = (
+        "attempt_id",
+        "candidate_sha256",
+        "residual_rms_db",
+        "cosine_similarity",
+        "clip_fraction",
+        "finite_safety_pass",
+        "pcm24_sha_differs_from_base",
+        "pcm24_changed_samples",
+        "pcm24_changed_fraction",
+        "pcm24_residual_rms_lsb",
+        "pcm24_effective_step_pass",
+    )
+    for reference, optimized in zip(sequential, parallel, strict=True):
+        assert np.array_equal(
+            reference["stored_waveform"],
+            optimized["stored_waveform"],
+        )
+        assert all(reference[key] == optimized[key] for key in comparable_keys)
 
 
 def test_candidate_d_routing_fails_closed_on_schema_or_certificate() -> None:

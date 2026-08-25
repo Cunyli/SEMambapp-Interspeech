@@ -945,6 +945,42 @@ def prepare_case_context(
     }
 
 
+def materialize_candidate_pcm24(
+    context: dict[str, Any],
+    values: np.ndarray,
+    path: Path,
+    attempt_id: str,
+) -> tuple[dict[str, Any], float, float]:
+    write_started = time.perf_counter()
+    sf.write(path, values, SAMPLE_RATE, subtype="PCM_24")
+    write_ms = 1000.0 * (time.perf_counter() - write_started)
+    read_started = time.perf_counter()
+    stored, sample_rate = sf.read(path, dtype="float32", always_2d=False)
+    if (
+        sample_rate != SAMPLE_RATE
+        or stored.ndim != 1
+        or stored.shape != context["base_values"].shape
+    ):
+        raise ValueError("v18 stored PCM24 waveform shape drift")
+    stored = np.asarray(stored, dtype=np.float32)
+    candidate_sha256 = sha256_file(path)
+    record = {
+        "attempt_id": attempt_id,
+        "candidate_path": path,
+        "candidate_sha256": candidate_sha256,
+        "stored_waveform": stored,
+        **finite_safety(context["base_values"], stored),
+        **pcm24_metrics_from_loaded(
+            context["base_codes"],
+            context["base_sha256"],
+            stored,
+            candidate_sha256,
+        ),
+    }
+    read_safety_pcm_ms = 1000.0 * (time.perf_counter() - read_started)
+    return record, write_ms, read_safety_pcm_ms
+
+
 def write_candidate_batch(
     context: dict[str, Any],
     candidates: list[torch.Tensor],
@@ -952,49 +988,43 @@ def write_candidate_batch(
     attempt_ids: list[str],
     predictor: torch.nn.Module,
     device: torch.device,
+    executor: ThreadPoolExecutor,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     if not (len(candidates) == len(paths) == len(attempt_ids)):
         raise ValueError("v18 candidate batch cardinality drift")
     transfer_started = time.perf_counter()
     candidate_batch = torch.stack(candidates).detach().cpu().numpy()
     transfer_ms = 1000.0 * (time.perf_counter() - transfer_started)
-    records: list[dict[str, Any]] = []
-    write_ms = 0.0
-    read_safety_pcm_ms = 0.0
-    for values, path, attempt_id in zip(
-        candidate_batch,
-        paths,
-        attempt_ids,
-        strict=True,
-    ):
-        started = time.perf_counter()
-        sf.write(path, values, SAMPLE_RATE, subtype="PCM_24")
-        write_ms += 1000.0 * (time.perf_counter() - started)
-        started = time.perf_counter()
-        stored, sample_rate = sf.read(path, dtype="float32", always_2d=False)
-        if (
-            sample_rate != SAMPLE_RATE
-            or stored.ndim != 1
-            or stored.shape != context["base_values"].shape
-        ):
-            raise ValueError("v18 stored PCM24 waveform shape drift")
-        stored = np.asarray(stored, dtype=np.float32)
-        candidate_sha256 = sha256_file(path)
-        record = {
-            "attempt_id": attempt_id,
-            "candidate_path": path,
-            "candidate_sha256": candidate_sha256,
-            "stored_waveform": stored,
-            **finite_safety(context["base_values"], stored),
-            **pcm24_metrics_from_loaded(
-                context["base_codes"],
-                context["base_sha256"],
-                stored,
-                candidate_sha256,
-            ),
-        }
-        records.append(record)
-        read_safety_pcm_ms += 1000.0 * (time.perf_counter() - started)
+    io_started = time.perf_counter()
+    inputs = list(zip(candidate_batch, paths, attempt_ids, strict=True))
+    if len(inputs) > 1:
+        futures = [
+            executor.submit(
+                materialize_candidate_pcm24,
+                context,
+                values,
+                path,
+                attempt_id,
+            )
+            for values, path, attempt_id in inputs
+        ]
+        materialized = [future.result() for future in futures]
+        io_mode = "persistent_thread_pool"
+    else:
+        materialized = [
+            materialize_candidate_pcm24(
+                context,
+                values,
+                path,
+                attempt_id,
+            )
+            for values, path, attempt_id in inputs
+        ]
+        io_mode = "direct_single_candidate"
+    io_wall_ms = 1000.0 * (time.perf_counter() - io_started)
+    records = [row[0] for row in materialized]
+    write_ms = sum(row[1] for row in materialized)
+    read_safety_pcm_ms = sum(row[2] for row in materialized)
 
     proxy_started = time.perf_counter()
     proxy_tensors = []
@@ -1038,6 +1068,8 @@ def write_candidate_batch(
     proxy_ms = 1000.0 * (time.perf_counter() - proxy_started)
     return records, {
         "candidate_gpu_to_cpu_batch_ms": transfer_ms,
+        "candidate_pcm24_io_mode": io_mode,
+        "candidate_pcm24_io_concurrent_wall_ms": io_wall_ms,
         "candidate_pcm24_write_total_ms": write_ms,
         "candidate_read_safety_pcm_total_ms": read_safety_pcm_ms,
         "candidate_frozen_proxy_batch_ms": proxy_ms,
@@ -1387,6 +1419,7 @@ def run_equivalence_case(
         attempt_ids,
         predictor,
         device,
+        executor,
     )
     refresh_runtime = refresh_candidate_records(
         context,
@@ -1508,6 +1541,7 @@ def evaluate_selector_case(
         ["candidate_d"],
         predictor,
         device,
+        executor,
     )
     d_refresh_runtime = refresh_candidate_records(
         context,
@@ -1571,6 +1605,7 @@ def evaluate_selector_case(
             [f"candidate_c_bt{index}" for index in range(len(ALPHA_LADDER))],
             predictor,
             device,
+            executor,
         )
         c_refresh_runtime = refresh_candidate_records(
             context,
