@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -472,3 +475,47 @@ def test_preflight_source_contains_no_panel_execution_path() -> None:
     ):
         assert forbidden not in source
     assert "raise SystemExit(2)" in source
+
+
+def test_preflight_direct_cli_requirements_only_without_pythonpath() -> None:
+    root = Path(readiness.__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(readiness.__file__).resolve()),
+            "--requirements-only",
+        ],
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["decision"] == "NO_GO_SIX_JOINT_PANEL_EXECUTION"
+    assert report["execution_authorized"] is False
+    assert report["generator_optimizer_steps"] == 0
+
+
+def test_preflight_direct_cli_execution_mode_fails_closed() -> None:
+    root = Path(readiness.__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [sys.executable, str(Path(readiness.__file__).resolve())],
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["decision"] == "NO_GO_SIX_JOINT_PANEL_EXECUTION"
+    assert report["execution_authorized"] is False
+    assert report["generator_optimizer_steps"] == 0

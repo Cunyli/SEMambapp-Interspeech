@@ -12,7 +12,25 @@ import json
 import math
 from pathlib import Path
 import subprocess
+import sys
 from typing import Any, Mapping
+
+
+# Direct-path execution cannot import the project package until it re-enters
+# through the supported module path. This narrow re-entry precedes local imports.
+if __name__ == "__main__" and __package__ in {None, ""}:
+    project_root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.audit_avqi_route_c_six_joint_panel_readiness",
+            *sys.argv[1:],
+        ],
+        cwd=project_root,
+        check=False,
+    )
+    raise SystemExit(completed.returncode)
 
 from model.avqi_route_c import (
     ROUTE_C_FIVE_ACTIVE_COMPONENTS,
@@ -110,7 +128,7 @@ SIX_GRADIENT_SOURCE_EVIDENCE_KEYS = (
     "v19_runtime_evidence_manifest",
 )
 MISSING_CODE_STAGES = (
-    "six-component topology-aware gradient audit evaluator/runner",
+    "scientifically frozen six-component gradient decision evaluator/runner",
     "joint waveform preparation and immutable sealing runner",
     "post-seal exact-Praat six-component evaluator/decision runner",
 )
@@ -152,8 +170,10 @@ SOURCE_REQUIREMENT_MATRIX = (
     },
     {
         "requirement": "six-component gradient evaluator/runner",
-        "current_evidence": None,
-        "status": "missing",
+        "current_evidence": (
+            "scripts.evaluate_avqi_route_c_six_component_gradients"
+        ),
+        "status": "present_dev_only_measurement_scientific_decision_pending",
     },
     {
         "requirement": "two-stage sealed joint waveform evaluator/runner",
