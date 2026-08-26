@@ -8,6 +8,7 @@ candidate waveforms, open a fresh panel, invoke Praat, or authorize training.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -59,12 +60,133 @@ from scripts.decide_avqi_route_c_six_component_gradients import (
 )
 
 
-READINESS_SCHEMA_VERSION = "avqi-route-c-six-joint-panel-readiness-v1"
-DRAFT_SPLIT_SEAL_SCHEMA_VERSION = "draft-avqi-route-c-six-joint-split-seal-v1"
+READINESS_SCHEMA_VERSION = "avqi-route-c-six-joint-panel-readiness-v2"
+FROZEN_SCIENTIFIC_CONTRACT_SCHEMA_VERSION = (
+    "avqi-route-c-six-joint-scientific-contract-v1"
+)
+FROZEN_SPLIT_SEAL_SCHEMA_VERSION = "avqi-route-c-six-joint-split-seal-v1"
 SHIMMER_DB_REQUIRED_STATUS = "fresh_speaker_panel_pass"
+SOURCE_DATASET = "SVD"
+SVD_SV_METADATA_SHA256 = (
+    "36d8a725a209578744a862e63b5990d348e3d17d066a0247cdcd2e657c7ffc03"
+)
+SVD_CS_METADATA_SHA256 = (
+    "465c15e46c9c9e325c14e5672abead050bbfd9a4bba75d0ace46bf5d58884966"
+)
+SVD_SPEAKER_SELECTION_SALT = "avqi-route-c-six-joint-svd-v1-20260826"
+SVD_HEALTH_STATUS_MAPPING = (("1", "patient"), ("0", "healthy"))
+SVD_MINIMUM_RAW_MONO_SECONDS = (("sv", 1.0), ("cs", 3.0))
+GAP_SIMULATION_INVENTORY_SHA256 = (
+    "859a9e058f4f44c8e15d4b37d992cefa4d1501d1127a374d7e8cb1403c020384"
+)
+GAP_RIR_SOURCE_NAME = "v1_arni_rir"
+GAP_RIR_MANIFEST_SHA256 = (
+    "2bac3a563292a5a0a1377e3e98d29b6cfb8808d81f2e53ec1cbbafb08642d9da"
+)
+GAP_NOISE_SOURCE_NAME = "v1_dns5_noise"
+GAP_NOISE_MANIFEST_SHA256 = (
+    "c6f9441cdd76f50b4eb7f4fa5b83b994a509d3a925d7ae9b887059af31794d65"
+)
+GAP_RECIPE_ASSIGNMENT_SALT = "avqi-route-c-six-joint-recipes-v1-20260826"
 REQUIRED_SPLITS = ("calibration", "final")
 REQUIRED_VIEWS = ("cs", "sv")
 REQUIRED_CONDITIONS = ("clean", "rir_only", "snr20", "snr10")
+DEGRADED_EFFICACY_CONDITIONS = ("rir_only", "snr20", "snr10")
+REQUIRED_LABELS = ("patient", "healthy")
+PATIENT_SPEAKERS_PER_SPLIT = 3
+HEALTHY_SPEAKERS_PER_SPLIT = 3
+SPEAKERS_PER_SPLIT = PATIENT_SPEAKERS_PER_SPLIT + HEALTHY_SPEAKERS_PER_SPLIT
+ROWS_PER_SPEAKER = len(REQUIRED_CONDITIONS) * len(REQUIRED_VIEWS)
+ROWS_PER_SPLIT = SPEAKERS_PER_SPLIT * ROWS_PER_SPEAKER
+EXPECTED_TOTAL_SPEAKERS = len(REQUIRED_SPLITS) * SPEAKERS_PER_SPLIT
+EXPECTED_TOTAL_ROWS = len(REQUIRED_SPLITS) * ROWS_PER_SPLIT
+PATIENT_DEGRADED_EFFICACY_ROWS_PER_SPLIT = (
+    PATIENT_SPEAKERS_PER_SPLIT
+    * len(DEGRADED_EFFICACY_CONDITIONS)
+    * len(REQUIRED_VIEWS)
+)
+PATIENT_CLEAN_CONTROL_ROWS_PER_SPLIT = (
+    PATIENT_SPEAKERS_PER_SPLIT * len(REQUIRED_VIEWS)
+)
+HEALTHY_GUARDRAIL_ROWS_PER_SPLIT = HEALTHY_SPEAKERS_PER_SPLIT * ROWS_PER_SPEAKER
+SOURCE_GENDER_ALLOCATION = (
+    ("calibration", "patient", 2, 1),
+    ("calibration", "healthy", 1, 2),
+    ("final", "patient", 1, 2),
+    ("final", "healthy", 2, 1),
+)
+PATHOLOGICAL_ROLE = (
+    "degraded_efficacy_same_speaker_same_view_clean_pathological_target"
+)
+CLEAN_PATHOLOGICAL_ROLE = (
+    "clean_no_overprocessing_same_speaker_same_view_clean_pathological_target"
+)
+HEALTHY_ROLE = "guardrail_only_no_target_no_loss_no_step"
+FORBIDDEN_PANEL_ROW_FIELDS = frozenset(
+    {
+        "avqi",
+        "clinical_severity",
+        "component_values",
+        "exact_avqi",
+        "exact_components",
+        "sample_group",
+        "severity",
+    }
+)
+GLOBAL_ALPHA_GRID = (
+    0.0,
+    1e-6,
+    3e-6,
+    1e-5,
+    3e-5,
+    1e-4,
+    3e-4,
+    1e-3,
+    3e-3,
+)
+ALPHA_REQUIRED_GATE_FAMILIES = (
+    "all_six_components",
+    "equal_weight_joint",
+    "all_required_efficacy_slices",
+    "waveform_safety",
+    "full_band_pathology",
+    "denoising",
+)
+ALPHA_SELECTION_OBJECTIVE = (
+    "maximize_equal_weight_joint_exact_median_normalized_gap_reduction"
+)
+ALPHA_SELECTION_TIE_BREAK = "smaller_alpha"
+NORMALIZATION_SOURCE = "passed_six_gradient_raw_measurement_report"
+NORMALIZATION_TARGET_MEAN_FIELD = "normalization.target_mean"
+NORMALIZATION_TARGET_SCALE_FIELD = "normalization.target_scale"
+MATERIAL_NORMALIZED_BEFORE_GAP_THRESHOLD = 0.02
+MATERIAL_COVERAGE_FRACTION_MIN = 0.80
+MATERIAL_CASES_ABSOLUTE_MIN = 5
+MATERIAL_CASES_PER_18_MIN = 15
+EXACT_IMPROVEMENT_FRACTION_MIN = 0.80
+MEDIAN_NORMALIZED_GAP_REDUCTION_MIN = 0.02
+REQUIRED_SLICE_IMPROVEMENT_FRACTION_EXCLUSIVE_MIN = 0.50
+REQUIRED_SLICE_MEDIAN_NORMALIZED_REDUCTION_MIN = 0.0
+REQUIRED_EFFICACY_SLICES = tuple(
+    f"condition={condition}&view={view}"
+    for condition in DEGRADED_EFFICACY_CONDITIONS
+    for view in REQUIRED_VIEWS
+)
+SAFETY_RESIDUAL_RMS_DB_MAX = -50.0
+SAFETY_COSINE_SIMILARITY_MIN = 0.99999
+SAFETY_CLIP_FRACTION_MAX = 0.0
+LOW_FREQUENCY_BANDS_HZ = ((20.0, 80.0), (80.0, 300.0))
+AIRFLOW_PROXY_FREQUENCY_RANGE_HZ = (500.0, 4_000.0)
+LOW_ENERGY_QUANTILE = 0.25
+PATHOLOGY_DB_MEDIAN_GAP_INCREASE_MAX = 0.50
+PATHOLOGY_DB_WORST_GAP_INCREASE_MAX = 1.50
+AIRFLOW_FLATNESS_MEDIAN_GAP_INCREASE_MAX = 0.05
+AIRFLOW_FLATNESS_WORST_GAP_INCREASE_MAX = 0.10
+PAUSE_F1_MEDIAN_DECREASE_MAX = 0.05
+PAUSE_F1_WORST_DECREASE_MAX = 0.15
+GUARDRAIL_PASS_FRACTION_MIN = 2.0 / 3.0
+DENOISING_MEDIAN_CHANGE_MIN_DB = -0.10
+DENOISING_WORST_CHANGE_MIN_DB = -0.50
 REQUIRED_GUARDRAILS = (
     "full_band_low_frequency",
     "pause",
@@ -117,6 +239,12 @@ REQUIRED_ARTIFACT_KEYS = (
     "six_gradient_receipt",
     "fresh_panel_split_seal",
     "fresh_speaker_source_manifest",
+    "svd_sv_metadata",
+    "svd_cs_metadata",
+    "gap_simulation_inventory",
+    "gap_v1_arni_rir_manifest",
+    "gap_v1_dns5_noise_manifest",
+    "joint_recipe_assignment_manifest",
     "prior_panel_speaker_ledger",
     "joint_gate_contract",
     "target_value_protocol_contract",
@@ -144,21 +272,35 @@ MISSING_CODE_STAGES = (
     "joint waveform preparation and immutable sealing runner",
     "post-seal exact-Praat six-component evaluator/decision runner",
 )
-UNFROZEN_SCIENTIFIC_CONTRACTS = (
-    "Shimmer dB fresh-promotion evidence schema and decision",
-    "fresh speaker source-manifest schema",
-    "fresh panel split-seal schema",
-    "clean pathological target-bank schema",
-    "six-component joint waveform/exact gate contract",
+UNFROZEN_SCIENTIFIC_CONTRACTS: tuple[str, ...] = ()
+UNBOUND_EXECUTION_INPUTS = (
+    "reviewed Shimmer dB fresh-promotion evidence",
+    "reviewed six-component gradient PASS evidence",
+    "SVD metadata-only prior-ledger-disjoint speaker selection",
+    "reviewed GAP simulation inventory, RIR manifest, and noise manifest",
+    "post-split unique recipe assignment manifest",
+    "fresh SVD speaker source manifest",
+    "fresh panel split seal",
+    "same-speaker same-view clean pathological six-component target bank",
 )
-DRAFT_PANEL_DATA_REQUIREMENTS = (
-    "each speaker has clean/RIR/SNR x CS/SV rows",
+FROZEN_PANEL_DATA_REQUIREMENTS = (
+    "source dataset is SVD with frozen SV/CS metadata hashes",
+    "selection is metadata-only, result-blind, and prior-ledger-disjoint",
+    "prior-ledger exclusion precedes salted hash ranking",
+    "one minimum numeric eligible paired CS/SV session is retained per speaker",
+    "selection does not read exact AVQI or component values",
+    "diagnosis may be recorded but is not a selection input",
+    "selection does not create or infer mild/severe labels",
+    "each speaker has clean/RIR/SNR20/SNR10 x CS/SV rows",
     "calibration and final speakers are disjoint",
-    "each split contains pathological and healthy speakers",
-    "pathological rows alone use same-speaker clean pathological targets",
-    "healthy rows are guardrail-only and never optimization targets",
+    "each split has exactly three patient and three healthy speakers",
+    "patient degraded rows alone enter the efficacy denominator",
+    "patient clean rows are no-overprocessing controls",
+    "healthy rows have no target, loss, or waveform step",
+    "GAP simulation source inventory, RIR, and noise manifests are hash-frozen",
+    "speaker splitting precedes salted unique recipe assignment",
     "source manifest binds every selected case and waveform hash",
-    "target bank covers every pathological case and all six exact columns",
+    "target bank covers every patient case and all six exact columns",
     "selected speakers do not overlap the prior-panel ledger",
 )
 SOURCE_REQUIREMENT_MATRIX = (
@@ -177,7 +319,7 @@ SOURCE_REQUIREMENT_MATRIX = (
     {
         "requirement": "same-speaker normalized bidirectional six-slot loss",
         "current_evidence": "model.avqi_route_c.six_active_bidirectional_gap_losses",
-        "status": "present",
+        "status": "present_contract_frozen_actual_target_bank_required",
     },
     {
         "requirement": "six-component gradient evaluator/runner",
@@ -201,16 +343,27 @@ SOURCE_REQUIREMENT_MATRIX = (
     },
     {
         "requirement": "fresh-panel source/split/target schemas",
-        "current_evidence": "draft structural validators only",
-        "status": "unfrozen_scientific_contract_blocker",
+        "current_evidence": (
+            "frozen salted SVD 12-speaker/96-row contract and structural "
+            "validators"
+        ),
+        "status": "frozen_contract_actual_manifests_required",
+    },
+    {
+        "requirement": "GAP simulation source and recipe assignment contract",
+        "current_evidence": (
+            "frozen inventory/RIR/noise hashes, post-split recipe salt, and "
+            "condition semantics"
+        ),
+        "status": "frozen_contract_actual_manifests_and_assignment_required",
     },
     {
         "requirement": "joint waveform/exact gate thresholds",
         "current_evidence": (
-            "six-component code-gradient thresholds frozen separately from "
-            "future waveform/exact gates"
+            "frozen result-independent six-component exact, slice, safety, "
+            "pathology, and denoising gates"
         ),
-        "status": "downstream_scientific_contract_blocker",
+        "status": "frozen_contract_missing_evaluator_runner",
     },
 )
 
@@ -230,6 +383,14 @@ def _is_sha256(value: Any) -> bool:
         and value != "0" * 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def frozen_svd_speaker_rank(speaker_id: str, session_id: str) -> str:
+    """Return the preregistered result-blind rank for one eligible SVD speaker."""
+    if not speaker_id or not session_id.isdecimal():
+        raise ValueError("SVD speaker rank requires a numeric session ID")
+    payload = f"{SVD_SPEAKER_SELECTION_SALT}:{speaker_id}:{session_id}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _require_optimizer_zero(value: Mapping[str, Any], label: str) -> None:
@@ -268,6 +429,330 @@ def _finite_mapping(
     return parsed
 
 
+def frozen_scientific_contract() -> dict[str, Any]:
+    """Return the result-independent six-joint contract frozen before execution."""
+    gender_allocation: dict[str, dict[str, dict[str, int]]] = {
+        split: {} for split in REQUIRED_SPLITS
+    }
+    for split, label, female, male in SOURCE_GENDER_ALLOCATION:
+        gender_allocation[split][label] = {"female": female, "male": male}
+    return {
+        "schema_version": FROZEN_SCIENTIFIC_CONTRACT_SCHEMA_VERSION,
+        "frozen_before_source_selection": True,
+        "source": {
+            "dataset": SOURCE_DATASET,
+            "metadata_sha256": {
+                "sv": SVD_SV_METADATA_SHA256,
+                "cs": SVD_CS_METADATA_SHA256,
+            },
+            "selection_mode": "metadata_only_result_blind",
+            "health_status_mapping": dict(SVD_HEALTH_STATUS_MAPPING),
+            "allowed_selection_fields": [
+                "health_status",
+                "speaker_id",
+                "session_id",
+                "gender",
+                "paired_cs_sv",
+                "audio_integrity",
+                "prior_panel_ledger",
+            ],
+            "record_only_fields": ["diagnosis"],
+            "forbidden_selection_inputs": [
+                "diagnosis",
+                "avqi",
+                "exact_avqi",
+                "component_values",
+                "exact_component_values",
+                "surrogate_component_values",
+                "clinical_severity",
+                "mild_severe",
+            ],
+            "paired_cs_sv_same_session_required": True,
+            "minimum_raw_mono_duration_seconds": dict(
+                SVD_MINIMUM_RAW_MONO_SECONDS
+            ),
+            "eligible_session_per_speaker": "minimum_numeric_session_id",
+            "speaker_selection_salt": SVD_SPEAKER_SELECTION_SALT,
+            "selection_operation_order": [
+                "map_health_status",
+                "pair_cs_sv_by_same_session",
+                "filter_raw_mono_minimum_duration",
+                "retain_minimum_numeric_eligible_session_per_speaker",
+                "exclude_prior_ledger_speakers",
+                "bucket_by_health_status_and_gender",
+                "rank_by_salted_sha256",
+                "allocate_calibration_then_final_by_frozen_gender_quota",
+            ],
+            "ranking": {
+                "bucket_fields": ["health_status", "gender"],
+                "digest": "SHA256(salt:speaker_id:session_id)",
+                "order": "ascending_hex_digest",
+                "collision_tie_break": ["speaker_id", "session_id"],
+                "split_allocation_order": list(REQUIRED_SPLITS),
+                "quota_source": "source.gender_allocation",
+            },
+            "prior_ledger_exclusion_stage": "before_hash_ranking",
+            "prior_panel_speaker_overlap": 0,
+            "mild_severe_labels_created": False,
+            "selection_performed_at_contract_freeze": False,
+            "gender_allocation": gender_allocation,
+        },
+        "panel": {
+            "splits": list(REQUIRED_SPLITS),
+            "conditions": list(REQUIRED_CONDITIONS),
+            "views": list(REQUIRED_VIEWS),
+            "patient_speakers_per_split": PATIENT_SPEAKERS_PER_SPLIT,
+            "healthy_speakers_per_split": HEALTHY_SPEAKERS_PER_SPLIT,
+            "speakers_per_split": SPEAKERS_PER_SPLIT,
+            "rows_per_speaker": ROWS_PER_SPEAKER,
+            "rows_per_split": ROWS_PER_SPLIT,
+            "total_speakers": EXPECTED_TOTAL_SPEAKERS,
+            "total_rows": EXPECTED_TOTAL_ROWS,
+            "patient_degraded_efficacy_rows_per_split": (
+                PATIENT_DEGRADED_EFFICACY_ROWS_PER_SPLIT
+            ),
+            "patient_clean_control_rows_per_split": (
+                PATIENT_CLEAN_CONTROL_ROWS_PER_SPLIT
+            ),
+            "healthy_guardrail_rows_per_split": (
+                HEALTHY_GUARDRAIL_ROWS_PER_SPLIT
+            ),
+        },
+        "simulation": {
+            "source_inventory_sha256": GAP_SIMULATION_INVENTORY_SHA256,
+            "rir_source": {
+                "name": GAP_RIR_SOURCE_NAME,
+                "manifest_sha256": GAP_RIR_MANIFEST_SHA256,
+            },
+            "noise_source": {
+                "name": GAP_NOISE_SOURCE_NAME,
+                "manifest_sha256": GAP_NOISE_MANIFEST_SHA256,
+            },
+            "speaker_split_before_recipe_assignment": True,
+            "recipe_assignment_salt": GAP_RECIPE_ASSIGNMENT_SALT,
+            "recipe_uid_required_for_every_row": True,
+            "recipe_uid_unique_per_row": True,
+            "recipe_uid_reused_across_splits": False,
+            "condition_recipes": {
+                "clean": {
+                    "rir": False,
+                    "noise": False,
+                    "target_snr_db": None,
+                },
+                "rir_only": {
+                    "rir": True,
+                    "noise": False,
+                    "target_snr_db": None,
+                },
+                "snr20": {
+                    "rir": True,
+                    "noise": True,
+                    "target_snr_db": 20.0,
+                },
+                "snr10": {
+                    "rir": True,
+                    "noise": True,
+                    "target_snr_db": 10.0,
+                },
+            },
+            "actual_recipes_selected_at_contract_freeze": False,
+        },
+        "two_stage_opening": {
+            "calibration_selection_sealed_before_final_open": True,
+            "calibration_and_final_speakers_disjoint": True,
+            "calibration_may_select": ["one_global_alpha"],
+            "final_may_select_or_tune": [],
+            "alpha_selection_receipt_sealed_before_final_exact_open": True,
+            "final_waveforms_sealed_before_final_exact_open": True,
+            "final_exact_outcomes_opened_at_contract_freeze": False,
+        },
+        "waveform_step": {
+            "steps": 1,
+            "global_alpha": True,
+            "gradient_normalization": "waveform_rms_normalized",
+            "alpha_grid": list(GLOBAL_ALPHA_GRID),
+            "zero_alpha_role": "negative_control_only",
+            "zero_alpha_selectable": False,
+            "nonzero_alpha_required_gate_families": list(
+                ALPHA_REQUIRED_GATE_FAMILIES
+            ),
+            "nonzero_alpha_gate_split": "calibration",
+            "selection_objective": ALPHA_SELECTION_OBJECTIVE,
+            "selection_tie_break": ALPHA_SELECTION_TIE_BREAK,
+            "selection_split": "calibration",
+            "final_tuning_permitted": False,
+        },
+        "optimization_weights": {
+            "only_allowed_source": "passed_six_gradient_report",
+            "source_report_decision": SIX_GRADIENT_PASS_DECISION,
+            "source_report_and_receipt_hash_bound": True,
+            "source_field": (
+                "measurement_summary.calibration_inverse_gradient_weights"
+            ),
+            "calibration_only": True,
+            "used_for": "waveform_gradient_generation_only",
+            "used_for_exact_joint_decision": False,
+            "held_fixed_for_final": True,
+            "final_reestimation_permitted": False,
+        },
+        "normalization": {
+            "only_allowed_source": NORMALIZATION_SOURCE,
+            "source_bound_by_passed_six_gradient_decision": True,
+            "target_mean_field": NORMALIZATION_TARGET_MEAN_FIELD,
+            "target_scale_field": NORMALIZATION_TARGET_SCALE_FIELD,
+            "component_order": list(ROUTE_C_SIX_ACTIVE_COMPONENTS),
+            "target_scales_finite_and_positive": True,
+            "joint_panel_refit_permitted": False,
+            "joint_panel_rows_used_to_fit_mean_or_scale": False,
+        },
+        "target_and_aggregate": {
+            "component_order": list(ROUTE_C_SIX_ACTIVE_COMPONENTS),
+            "patient_target": (
+                "exact same-speaker same-view clean pathological target"
+            ),
+            "patient_degraded_enters_efficacy_denominator": True,
+            "patient_clean_role": "no-overprocessing control",
+            "patient_clean_enters_degraded_efficacy_denominator": False,
+            "healthy_target": None,
+            "healthy_loss_enabled": False,
+            "healthy_waveform_step_enabled": False,
+            "healthy_enters_degraded_efficacy_denominator": False,
+            "healthy_control_role": (
+                "routing/source/topology/coverage control only"
+            ),
+            "optimized_healthy_safety_claimed": False,
+            "joint_aggregate": (
+                "equal-weight mean of six normalized exact component gaps"
+            ),
+            "avqi_scalar_coefficient_used_for_direction": False,
+            "avqi_scalar_coefficient_used_for_aggregate": False,
+            "exact_praat_is_final_judge": True,
+            "avqi_preprocessing_is_metric_only": True,
+            "emitted_waveform_highpass": False,
+        },
+        "efficacy_gates": {
+            "scope": "patient degraded rows only",
+            "material_normalized_before_gap": {
+                "comparison": ">",
+                "value": MATERIAL_NORMALIZED_BEFORE_GAP_THRESHOLD,
+            },
+            "material_coverage_fraction": {
+                "comparison": ">=",
+                "value": MATERIAL_COVERAGE_FRACTION_MIN,
+            },
+            "material_cases_absolute": {
+                "comparison": ">=",
+                "value": MATERIAL_CASES_ABSOLUTE_MIN,
+            },
+            "material_cases_per_18": {
+                "comparison": ">=",
+                "value": MATERIAL_CASES_PER_18_MIN,
+            },
+            "exact_improvement_fraction": {
+                "comparison": ">=",
+                "value": EXACT_IMPROVEMENT_FRACTION_MIN,
+            },
+            "median_normalized_gap_reduction": {
+                "comparison": ">=",
+                "value": MEDIAN_NORMALIZED_GAP_REDUCTION_MIN,
+            },
+            "applies_to_each_component_and_joint": True,
+        },
+        "required_efficacy_slices": {
+            "keys": list(REQUIRED_EFFICACY_SLICES),
+            "expected_rows_per_slice": PATIENT_SPEAKERS_PER_SPLIT,
+            "zero_coverage_decision": "FAIL",
+            "material_case_present": True,
+            "applies_to_each_component_and_joint": True,
+            "improvement_fraction": {
+                "comparison": ">",
+                "value": REQUIRED_SLICE_IMPROVEMENT_FRACTION_EXCLUSIVE_MIN,
+            },
+            "median_normalized_gap_reduction": {
+                "comparison": ">=",
+                "value": REQUIRED_SLICE_MEDIAN_NORMALIZED_REDUCTION_MIN,
+            },
+            "additional_reports": ["view", "condition", "patient_vs_healthy"],
+        },
+        "safety_gates": {
+            "residual_rms_db": {
+                "comparison": "<=",
+                "value": SAFETY_RESIDUAL_RMS_DB_MAX,
+            },
+            "cosine_similarity": {
+                "comparison": ">=",
+                "value": SAFETY_COSINE_SIMILARITY_MIN,
+            },
+            "clip_fraction": {
+                "comparison": "=",
+                "value": SAFETY_CLIP_FRACTION_MAX,
+            },
+        },
+        "full_band_pathology_denoising_gates": {
+            "scope": {
+                "patient_degraded": "efficacy and guardrails",
+                "patient_clean": "no-overprocessing control only",
+                "healthy": "routing/source/topology/coverage control only",
+            },
+            "reference_by_role": {
+                "patient_degraded": (
+                    "same-speaker clean pathological CS or SV waveform"
+                ),
+                "patient_clean": (
+                    "same-speaker clean pathological CS or SV waveform"
+                ),
+                "healthy": None,
+            },
+            "healthy_candidate_contract": "candidate_sha256_equals_base_sha256",
+            "healthy_pathological_reference_applied": False,
+            "alignment": (
+                "tail crop to shortest waveform only; no shift, filter, "
+                "resample, or metric-branch high-pass"
+            ),
+            "low_frequency_bands_hz": [
+                list(band) for band in LOW_FREQUENCY_BANDS_HZ
+            ],
+            "airflow_proxy_frequency_range_hz": list(
+                AIRFLOW_PROXY_FREQUENCY_RANGE_HZ
+            ),
+            "low_energy_quantile": LOW_ENERGY_QUANTILE,
+            "pathology_db_median_gap_increase_max": (
+                PATHOLOGY_DB_MEDIAN_GAP_INCREASE_MAX
+            ),
+            "pathology_db_worst_gap_increase_max": (
+                PATHOLOGY_DB_WORST_GAP_INCREASE_MAX
+            ),
+            "airflow_flatness_median_gap_increase_max": (
+                AIRFLOW_FLATNESS_MEDIAN_GAP_INCREASE_MAX
+            ),
+            "airflow_flatness_worst_gap_increase_max": (
+                AIRFLOW_FLATNESS_WORST_GAP_INCREASE_MAX
+            ),
+            "pause_f1_median_decrease_max": PAUSE_F1_MEDIAN_DECREASE_MAX,
+            "pause_f1_worst_decrease_max": PAUSE_F1_WORST_DECREASE_MAX,
+            "guardrail_pass_fraction_min": GUARDRAIL_PASS_FRACTION_MIN,
+            "denoising_median_change_min_db": DENOISING_MEDIAN_CHANGE_MIN_DB,
+            "denoising_worst_change_min_db": DENOISING_WORST_CHANGE_MIN_DB,
+            "denoising_metrics": ["snr", "si_sdr"],
+            "airflow_proxy_limit": (
+                "low-energy band energy and spectral flatness are signal "
+                "proxies, not clinical airflow labels"
+            ),
+        },
+        "execution_prerequisites": {
+            "shimmer_db_fresh_scientific_status": SHIMMER_DB_REQUIRED_STATUS,
+            "six_gradient_decision": SIX_GRADIENT_PASS_DECISION,
+        },
+        "boundaries": {
+            "generator_optimizer_steps": 0,
+            "joint_scientific_promotion_granted": False,
+            "joint_panel_authorized": False,
+            "healthy_no_step_does_not_establish_optimized_healthy_safety": True,
+            "authoritative_training_decision": TRAINING_NO_GO,
+        },
+    }
+
+
 def readiness_requirements() -> dict[str, Any]:
     """Describe current blockers without reading any future panel artifact."""
     registry = route_c_six_registry_records()
@@ -282,12 +767,18 @@ def readiness_requirements() -> dict[str, Any]:
         "required_views": list(REQUIRED_VIEWS),
         "required_conditions": list(REQUIRED_CONDITIONS),
         "required_guardrails": list(REQUIRED_GUARDRAILS),
+        "scientific_contract_frozen": True,
+        "frozen_scientific_contract": frozen_scientific_contract(),
         "current_shimmer_db_scientific_status": shimmer["scientific_status"],
         "required_shimmer_db_scientific_status": SHIMMER_DB_REQUIRED_STATUS,
         "missing_code_stages": list(MISSING_CODE_STAGES),
         "unfrozen_scientific_contracts": list(UNFROZEN_SCIENTIFIC_CONTRACTS),
-        "draft_panel_data_requirements": list(DRAFT_PANEL_DATA_REQUIREMENTS),
+        "unbound_execution_inputs": list(UNBOUND_EXECUTION_INPUTS),
+        "frozen_panel_data_requirements": list(FROZEN_PANEL_DATA_REQUIREMENTS),
+        "actual_manifests_bound": False,
         "execution_authorized": False,
+        "joint_scientific_promotion_granted": False,
+        "joint_panel_authorized": False,
         "candidate_exact_outcomes_opened": False,
         "fresh_panel_opened": False,
         "generator_optimizer_steps": 0,
@@ -299,6 +790,10 @@ def current_blockers() -> list[str]:
     requirements = readiness_requirements()
     blockers = list(requirements["missing_code_stages"])
     blockers.extend(requirements["unfrozen_scientific_contracts"])
+    blockers.extend(
+        f"actual six-joint input remains unbound: {value}"
+        for value in requirements["unbound_execution_inputs"]
+    )
     if requirements["current_shimmer_db_scientific_status"] == (
         ROUTE_C_SIX_SCIENTIFIC_STATUS
     ):
@@ -602,10 +1097,9 @@ def _validate_six_gradient(
     return weights
 
 
-PATHOLOGICAL_ROLE = "same_speaker_clean_pathological_target"
-HEALTHY_ROLE = "guardrail_only_no_optimization_target"
 PANEL_ROW_FIELDS = {
     "case_id",
+    "dataset",
     "speaker_id",
     "split",
     "view",
@@ -626,16 +1120,29 @@ def _validate_panel_rows(
         for row in rows
     ):
         raise ValueError(f"{label} row fields differ")
+    if any(FORBIDDEN_PANEL_ROW_FIELDS & set(row) for row in rows):
+        raise ValueError(f"{label} contains forbidden result-derived row fields")
     rows_by_case = {str(row["case_id"]): row for row in rows}
     if len(rows_by_case) != len(rows) or "" in rows_by_case:
         raise ValueError(f"{label} case IDs are not unique")
-    role_by_label = {"patient": PATHOLOGICAL_ROLE, "healthy": HEALTHY_ROLE}
+    if len(rows_by_case) != EXPECTED_TOTAL_ROWS:
+        raise ValueError(f"{label} row count differs")
     for row in rows:
+        expected_role = None
+        if row["label"] == "patient":
+            expected_role = (
+                CLEAN_PATHOLOGICAL_ROLE
+                if row["condition"] == "clean"
+                else PATHOLOGICAL_ROLE
+            )
+        elif row["label"] == "healthy":
+            expected_role = HEALTHY_ROLE
         if (
-            row["split"] not in REQUIRED_SPLITS
+            row["dataset"] != SOURCE_DATASET
+            or row["split"] not in REQUIRED_SPLITS
             or row["view"] not in REQUIRED_VIEWS
             or row["condition"] not in REQUIRED_CONDITIONS
-            or role_by_label.get(row["label"]) != row["optimization_role"]
+            or expected_role != row["optimization_role"]
         ):
             raise ValueError(f"{label} row semantics differ")
 
@@ -647,6 +1154,8 @@ def _validate_panel_rows(
     speakers = {str(row["speaker_id"]) for row in rows}
     if "" in speakers:
         raise ValueError(f"{label} has an empty speaker ID")
+    if len(speakers) != EXPECTED_TOTAL_SPEAKERS:
+        raise ValueError(f"{label} speaker count differs")
     for speaker in speakers:
         speaker_rows = [row for row in rows if row["speaker_id"] == speaker]
         if (
@@ -664,9 +1173,44 @@ def _validate_panel_rows(
     if speakers_by_split["calibration"] & speakers_by_split["final"]:
         raise ValueError(f"{label} calibration/final speakers overlap")
     for split in REQUIRED_SPLITS:
-        split_labels = {row["label"] for row in rows if row["split"] == split}
-        if split_labels != {"patient", "healthy"}:
-            raise ValueError(f"{label} {split} strata differ")
+        split_rows = [row for row in rows if row["split"] == split]
+        split_speakers = speakers_by_split[split]
+        if (
+            len(split_rows) != ROWS_PER_SPLIT
+            or len(split_speakers) != SPEAKERS_PER_SPLIT
+        ):
+            raise ValueError(f"{label} {split} split counts differ")
+        speakers_by_label = {
+            value: {
+                str(row["speaker_id"])
+                for row in split_rows
+                if row["label"] == value
+            }
+            for value in REQUIRED_LABELS
+        }
+        if (
+            len(speakers_by_label["patient"]) != PATIENT_SPEAKERS_PER_SPLIT
+            or len(speakers_by_label["healthy"]) != HEALTHY_SPEAKERS_PER_SPLIT
+            or set().union(*speakers_by_label.values()) != split_speakers
+        ):
+            raise ValueError(f"{label} {split} label counts differ")
+        patient_rows = [row for row in split_rows if row["label"] == "patient"]
+        healthy_rows = [row for row in split_rows if row["label"] == "healthy"]
+        patient_clean = [
+            row for row in patient_rows if row["condition"] == "clean"
+        ]
+        patient_degraded = [
+            row
+            for row in patient_rows
+            if row["condition"] in DEGRADED_EFFICACY_CONDITIONS
+        ]
+        if (
+            len(patient_degraded)
+            != PATIENT_DEGRADED_EFFICACY_ROWS_PER_SPLIT
+            or len(patient_clean) != PATIENT_CLEAN_CONTROL_ROWS_PER_SPLIT
+            or len(healthy_rows) != HEALTHY_GUARDRAIL_ROWS_PER_SPLIT
+        ):
+            raise ValueError(f"{label} {split} row-role counts differ")
     return rows_by_case, {
         split: sorted(values) for split, values in speakers_by_split.items()
     }
@@ -680,14 +1224,63 @@ def _validate_split_seal(
     ledger_sha256: str,
     source_sha256: str,
 ) -> dict[str, list[str]]:
-    if seal.get("schema_version") != DRAFT_SPLIT_SEAL_SCHEMA_VERSION:
-        raise ValueError("six-joint draft split-seal schema differs")
+    if seal.get("schema_version") != FROZEN_SPLIT_SEAL_SCHEMA_VERSION:
+        raise ValueError("six-joint frozen split-seal schema differs")
     required_values = {
+        "scientific_contract_schema_version": (
+            FROZEN_SCIENTIFIC_CONTRACT_SCHEMA_VERSION
+        ),
+        "source_dataset": SOURCE_DATASET,
+        "sv_metadata_sha256": SVD_SV_METADATA_SHA256,
+        "cs_metadata_sha256": SVD_CS_METADATA_SHA256,
+        "health_status_mapping": dict(SVD_HEALTH_STATUS_MAPPING),
+        "paired_cs_sv_same_session_required": True,
+        "minimum_raw_mono_duration_seconds": dict(
+            SVD_MINIMUM_RAW_MONO_SECONDS
+        ),
+        "eligible_session_per_speaker": "minimum_numeric_session_id",
+        "speaker_selection_salt": SVD_SPEAKER_SELECTION_SALT,
+        "speaker_rank_digest": "SHA256(salt:speaker_id:session_id)",
+        "prior_ledger_excluded_before_hash_ranking": True,
+        "diagnosis_used_for_selection": False,
         "exact_scores_opened": False,
         "speaker_split_before_simulation": True,
-        "selection_or_tuning_on_this_panel": False,
+        "gap_simulation_inventory_sha256": GAP_SIMULATION_INVENTORY_SHA256,
+        "gap_rir_manifest_sha256": GAP_RIR_MANIFEST_SHA256,
+        "gap_noise_manifest_sha256": GAP_NOISE_MANIFEST_SHA256,
+        "recipe_assignment_salt": GAP_RECIPE_ASSIGNMENT_SALT,
+        "recipe_uid_unique_per_row": True,
+        "recipe_uid_reused_across_splits": False,
+        "condition_recipe_semantics": {
+            "clean": "no_simulation",
+            "rir_only": "rir_only",
+            "snr20": "rir_plus_noise_fixed_target_snr_20db",
+            "snr10": "rir_plus_noise_fixed_target_snr_10db",
+        },
+        "metadata_only_result_blind_selection": True,
+        "mild_severe_labels_created": False,
+        "prior_panel_speaker_overlap": 0,
+        "waveform_steps": 1,
+        "one_global_alpha": True,
+        "gradient_normalization": "waveform_rms_normalized",
+        "alpha_grid": list(GLOBAL_ALPHA_GRID),
+        "zero_alpha_selectable": False,
+        "alpha_required_gate_families": list(ALPHA_REQUIRED_GATE_FAMILIES),
+        "alpha_required_gate_split": "calibration",
+        "alpha_selection_objective": ALPHA_SELECTION_OBJECTIVE,
+        "alpha_selection_tie_break": ALPHA_SELECTION_TIE_BREAK,
+        "alpha_selection_split": "calibration",
+        "final_tuning_permitted": False,
+        "optimization_weight_source_decision": SIX_GRADIENT_PASS_DECISION,
+        "optimization_weights_calibration_only": True,
+        "optimization_weights_used_for_exact_joint_decision": False,
+        "normalization_source": NORMALIZATION_SOURCE,
+        "normalization_target_mean_field": NORMALIZATION_TARGET_MEAN_FIELD,
+        "normalization_target_scale_field": NORMALIZATION_TARGET_SCALE_FIELD,
+        "normalization_refit_permitted": False,
+        "healthy_no_step_does_not_establish_optimized_healthy_safety": True,
     }
-    if any(seal.get(key) is not value for key, value in required_values.items()):
+    if any(seal.get(key) != value for key, value in required_values.items()):
         raise ValueError("six-joint split seal semantics differ")
     bindings = {
         "joint_gate_contract_sha256": gate_sha256,
@@ -712,6 +1305,11 @@ def validate_readiness_manifest(
     """Validate evidence, then remain NO-GO until missing runners exist."""
     if manifest.get("schema_version") != READINESS_SCHEMA_VERSION:
         raise ValueError("six-joint readiness schema differs")
+    if (
+        manifest.get("scientific_contract_schema_version")
+        != FROZEN_SCIENTIFIC_CONTRACT_SCHEMA_VERSION
+    ):
+        raise ValueError("six-joint frozen scientific contract binding differs")
     if manifest.get("candidate_exact_outcomes_opened") is not False:
         raise ValueError("six-joint readiness opened candidate outcomes")
     if manifest.get("fresh_panel_opened") is not False:
@@ -742,6 +1340,10 @@ def validate_readiness_manifest(
             "six-joint scientific schemas remain unfrozen: "
             + "; ".join(UNFROZEN_SCIENTIFIC_CONTRACTS)
         )
+    raise ValueError(
+        "six-joint execution remains closed: actual manifests, evidence, "
+        "speaker selection, target bank, and evaluator runners remain unbound"
+    )
 
 
 def repository_value(root: Path, *arguments: str) -> str:
