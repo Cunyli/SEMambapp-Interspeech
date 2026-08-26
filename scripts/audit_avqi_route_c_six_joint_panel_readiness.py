@@ -39,12 +39,28 @@ from model.avqi_route_c import (
     route_c_six_registry_records,
 )
 from model.avqi_route_c_v19_contracts import sha256_file
+from scripts.decide_avqi_route_c_six_component_gradients import (
+    ACTIVE_COMPONENTS as FROZEN_SIX_GRADIENT_COMPONENTS,
+    DECISION_RECEIPT_SCHEMA_VERSION as SIX_GRADIENT_RECEIPT_SCHEMA_VERSION,
+    DECISION_SCHEMA_VERSION as SIX_GRADIENT_SCHEMA_VERSION,
+    DECISION_IMPLEMENTATION_KEYS as SIX_GRADIENT_DECISION_IMPLEMENTATION_KEYS,
+    FROZEN_FIVE_JOB_ID,
+    FROZEN_FIVE_RECEIPT_SHA256,
+    FROZEN_FIVE_REPORT_SHA256,
+    FROZEN_GATE_KEYS as SIX_GRADIENT_FROZEN_GATE_KEYS,
+    JOINT_PANEL_NO_GO as SIX_GRADIENT_JOINT_PANEL_NO_GO,
+    MAXIMUM_CALIBRATION_WEIGHTED_MEDIAN_RATIO,
+    MAXIMUM_WEIGHTED_COMPONENT_SHARE,
+    PASS_DECISION as SIX_GRADIENT_PASS_DECISION,
+    RAW_PENDING_DECISION as SIX_GRADIENT_RAW_PENDING_DECISION,
+    READINESS_SOURCE_EVIDENCE_KEYS,
+    TRAINING_NO_GO,
+    decision_requirements as six_gradient_decision_requirements,
+)
 
 
 READINESS_SCHEMA_VERSION = "avqi-route-c-six-joint-panel-readiness-v1"
 DRAFT_SPLIT_SEAL_SCHEMA_VERSION = "draft-avqi-route-c-six-joint-split-seal-v1"
-DRAFT_SIX_GRADIENT_SCHEMA_VERSION = "draft-avqi-route-c-six-gradient-audit-v1"
-SIX_GRADIENT_PASS_DECISION = "PASS_ROUTE_C_SIX_ACTIVE_CODE_GRADIENT_AUDIT"
 SHIMMER_DB_REQUIRED_STATUS = "fresh_speaker_panel_pass"
 REQUIRED_SPLITS = ("calibration", "final")
 REQUIRED_VIEWS = ("cs", "sv")
@@ -95,6 +111,8 @@ REQUIRED_ARTIFACT_KEYS = (
     "five_gradient_receipt",
     "shimmer_db_promotion_report",
     "shimmer_db_promotion_receipt",
+    "six_gradient_raw_report",
+    "six_gradient_raw_receipt",
     "six_gradient_report",
     "six_gradient_receipt",
     "fresh_panel_split_seal",
@@ -120,15 +138,9 @@ REQUIRED_ARTIFACT_KEYS = (
     "exact_runtime_manifest",
 )
 SIX_GRADIENT_SOURCE_EVIDENCE_KEYS = (
-    *FIVE_COMPONENT_EVIDENCE_KEYS,
-    "five_gradient_report",
-    "five_gradient_receipt",
-    "shimmer_db_promotion_report",
-    "shimmer_db_promotion_receipt",
-    "v19_runtime_evidence_manifest",
+    *READINESS_SOURCE_EVIDENCE_KEYS,
 )
 MISSING_CODE_STAGES = (
-    "scientifically frozen six-component gradient decision evaluator/runner",
     "joint waveform preparation and immutable sealing runner",
     "post-seal exact-Praat six-component evaluator/decision runner",
 )
@@ -137,8 +149,7 @@ UNFROZEN_SCIENTIFIC_CONTRACTS = (
     "fresh speaker source-manifest schema",
     "fresh panel split-seal schema",
     "clean pathological target-bank schema",
-    "six-component gradient report schema",
-    "six-component joint numeric gate contract",
+    "six-component joint waveform/exact gate contract",
 )
 DRAFT_PANEL_DATA_REQUIREMENTS = (
     "each speaker has clean/RIR/SNR x CS/SV rows",
@@ -171,9 +182,10 @@ SOURCE_REQUIREMENT_MATRIX = (
     {
         "requirement": "six-component gradient evaluator/runner",
         "current_evidence": (
-            "scripts.evaluate_avqi_route_c_six_component_gradients"
+            "scripts.evaluate_avqi_route_c_six_component_gradients + "
+            "scripts.decide_avqi_route_c_six_component_gradients"
         ),
-        "status": "present_dev_only_measurement_scientific_decision_pending",
+        "status": "present_dev_only_raw_measurement_plus_frozen_code_decision",
     },
     {
         "requirement": "two-stage sealed joint waveform evaluator/runner",
@@ -193,9 +205,12 @@ SOURCE_REQUIREMENT_MATRIX = (
         "status": "unfrozen_scientific_contract_blocker",
     },
     {
-        "requirement": "joint numeric gate thresholds",
-        "current_evidence": None,
-        "status": "unfrozen_scientific_contract_blocker",
+        "requirement": "joint waveform/exact gate thresholds",
+        "current_evidence": (
+            "six-component code-gradient thresholds frozen separately from "
+            "future waveform/exact gates"
+        ),
+        "status": "downstream_scientific_contract_blocker",
     },
 )
 
@@ -438,125 +453,150 @@ def _validate_six_gradient(
     report_sha256: str,
     expected_source_evidence: Mapping[str, str],
 ) -> dict[str, float]:
-    if report.get("schema_version") != DRAFT_SIX_GRADIENT_SCHEMA_VERSION:
+    if report.get("schema_version") != SIX_GRADIENT_SCHEMA_VERSION:
         raise ValueError("six-component gradient schema differs")
     if report.get("decision") != SIX_GRADIENT_PASS_DECISION:
         raise ValueError("six-component gradient audit did not pass")
+    if receipt.get("schema_version") != SIX_GRADIENT_RECEIPT_SCHEMA_VERSION:
+        raise ValueError("six-component gradient receipt schema differs")
     if receipt.get("decision") != report["decision"]:
         raise ValueError("six-component gradient receipt decision differs")
-    if tuple(report.get("active_components", ())) != ROUTE_C_SIX_ACTIVE_COMPONENTS:
+    if (
+        report.get("joint_panel_decision") != SIX_GRADIENT_JOINT_PANEL_NO_GO
+        or receipt.get("joint_panel_decision")
+        != SIX_GRADIENT_JOINT_PANEL_NO_GO
+    ):
+        raise ValueError("six-component gradient joint-panel decision differs")
+    if (
+        tuple(report.get("active_components", ()))
+        != ROUTE_C_SIX_ACTIVE_COMPONENTS
+        or tuple(receipt.get("active_components", ()))
+        != ROUTE_C_SIX_ACTIVE_COMPONENTS
+        or tuple(report.get("active_components", ()))
+        != FROZEN_SIX_GRADIENT_COMPONENTS
+    ):
         raise ValueError("six-component gradient active order differs")
     if report.get("source_evidence_sha256") != expected_source_evidence:
         raise ValueError("six-component gradient source-evidence binding differs")
-    if report.get("shimmer_db_topology_role") != "base_current_output":
-        raise ValueError("six-component gradient slot 3 topology role differs")
-    if report.get("slot3_checkpoint_affine_used") is not False:
-        raise ValueError("six-component gradient reused slot 3 checkpoint affine")
-    if report.get("slot2_checkpoint_unchanged") is not True:
-        raise ValueError("six-component gradient changed slot 2")
-    selection = report.get("selection")
-    if not isinstance(selection, dict):
-        raise ValueError("six-component gradient selection is unavailable")
-    if tuple(selection.get("allowed_splits", ())) != (
-        "surrogate_calibration",
-        "surrogate_holdout",
+    if report.get("frozen_contract") != six_gradient_decision_requirements().get(
+        "frozen_contract"
     ):
-        raise ValueError("six-component gradient split contract differs")
-    if selection.get("speaker_overlap") != 0:
-        raise ValueError("six-component gradient speakers overlap")
-    if selection.get("component_and_joint_share_split") is not True:
-        raise ValueError("six-component component/joint gradient splits differ")
-    speaker_sets: list[set[str]] = []
-    for key in ("calibration_speaker_ids", "holdout_speaker_ids"):
-        speaker_ids = selection.get(key)
-        if (
-            not isinstance(speaker_ids, list)
-            or not speaker_ids
-            or len(speaker_ids) != len(set(speaker_ids))
-        ):
-            raise ValueError(f"six-component gradient {key} differs")
-        speaker_sets.append(set(speaker_ids))
-    if speaker_sets[0] & speaker_sets[1]:
-        raise ValueError("six-component gradient speaker IDs overlap")
-    if selection.get("final_panel_opened") is not False:
-        raise ValueError("six-component gradient audit opened a final panel")
-    calibration = report.get("calibration")
-    if not isinstance(calibration, dict):
-        raise ValueError("six-component gradient calibration is unavailable")
+        raise ValueError("six-component gradient frozen contract differs")
+    precedent = report.get("accepted_numeric_precedent")
+    expected_precedent = {
+        "slurm_job_id": FROZEN_FIVE_JOB_ID,
+        "report_sha256": FROZEN_FIVE_REPORT_SHA256,
+        "receipt_sha256": FROZEN_FIVE_RECEIPT_SHA256,
+    }
+    if precedent != expected_precedent or receipt.get(
+        "accepted_numeric_precedent"
+    ) != expected_precedent:
+        raise ValueError("six-component gradient numeric precedent differs")
+    raw = report.get("raw_measurement_evidence")
+    raw_receipt_hashes = receipt.get("raw_measurement_sha256")
+    if not isinstance(raw, dict) or not isinstance(raw_receipt_hashes, dict):
+        raise ValueError("six-component raw measurement binding is unavailable")
+    if (
+        raw.get("raw_decision") != SIX_GRADIENT_RAW_PENDING_DECISION
+        or raw.get("raw_artifacts_rewritten") is not False
+        or receipt.get("raw_artifacts_rewritten") is not False
+        or raw_receipt_hashes
+        != {"report": raw.get("report_sha256"), "receipt": raw.get("receipt_sha256")}
+        or not _is_sha256(raw.get("report_sha256"))
+        or not _is_sha256(raw.get("receipt_sha256"))
+    ):
+        raise ValueError("six-component raw measurement binding differs")
+    decision_source = report.get("decision_source")
+    if (
+        not isinstance(decision_source, dict)
+        or receipt.get("source_commit") != decision_source.get("head")
+        or receipt.get("source_branch") != decision_source.get("branch")
+    ):
+        raise ValueError("six-component gradient decision source differs")
+    implementation = report.get("implementation_sha256")
+    if (
+        not isinstance(implementation, dict)
+        or set(implementation) != set(SIX_GRADIENT_DECISION_IMPLEMENTATION_KEYS)
+        or implementation != receipt.get("implementation_sha256")
+        or any(not _is_sha256(value) for value in implementation.values())
+    ):
+        raise ValueError("six-component gradient decision implementation differs")
+    immutability = report.get("post_evaluation_immutability")
+    expected_immutability_hashes = {
+        "raw_report": raw["report_sha256"],
+        "raw_receipt": raw["receipt_sha256"],
+        "five_precedent_report": FROZEN_FIVE_REPORT_SHA256,
+        "five_precedent_receipt": FROZEN_FIVE_RECEIPT_SHA256,
+    }
+    if (
+        not isinstance(immutability, dict)
+        or immutability.get("verified") is not True
+        or immutability.get("artifact_sha256") != expected_immutability_hashes
+        or receipt.get("post_evaluation_immutability") != immutability
+    ):
+        raise ValueError("six-component gradient input immutability differs")
+    gates = report.get("gates")
+    if (
+        not isinstance(gates, dict)
+        or set(gates) != set(SIX_GRADIENT_FROZEN_GATE_KEYS)
+        or any(value is not True for value in gates.values())
+    ):
+        raise ValueError("six-component gradient frozen gates failed")
+    summary = report.get("measurement_summary")
+    if not isinstance(summary, dict):
+        raise ValueError("six-component gradient measurement summary is unavailable")
     weights = _finite_mapping(
-        calibration.get("frozen_inverse_gradient_weights"),
+        summary.get("calibration_inverse_gradient_weights"),
         ROUTE_C_SIX_ACTIVE_COMPONENTS,
         "six-component frozen weights",
         positive=True,
     )
-    holdout = report.get("holdout")
-    if not isinstance(holdout, dict):
-        raise ValueError("six-component gradient holdout is unavailable")
-    required_holdout_gates = (
-        "all_component_gradients_pass",
-        "all_joint_gradients_pass",
-        "all_pairwise_cosines_reported",
-        "all_component_to_joint_cosines_reported",
-        "bounded_gates_pass",
-        "weighted_dominance_gate_pass",
-    )
-    if any(holdout.get(key) is not True for key in required_holdout_gates):
-        raise ValueError("six-component gradient holdout gates failed")
-    _finite_mapping(
-        holdout.get("component_gradient_norms"),
-        ROUTE_C_SIX_ACTIVE_COMPONENTS,
-        "six-component gradient norms",
-        positive=True,
-    )
-    _finite_mapping(
-        holdout.get("component_to_joint_cosines"),
-        ROUTE_C_SIX_ACTIVE_COMPONENTS,
-        "six-component component-to-joint cosines",
-        minimum=-1.0,
-        maximum=1.0,
-    )
-    pairwise_keys = tuple(
-        f"{left}__{right}"
-        for left_index, left in enumerate(ROUTE_C_SIX_ACTIVE_COMPONENTS)
-        for right in ROUTE_C_SIX_ACTIVE_COMPONENTS[left_index + 1 :]
-    )
-    _finite_mapping(
-        holdout.get("pairwise_cosines"),
-        pairwise_keys,
-        "six-component pairwise cosines",
-        minimum=-1.0,
-        maximum=1.0,
-    )
-    shares = _finite_mapping(
-        holdout.get("weighted_component_shares"),
-        ROUTE_C_SIX_ACTIVE_COMPONENTS,
-        "six-component weighted shares",
-        minimum=0.0,
-        maximum=1.0,
-    )
-    if not math.isclose(sum(shares.values()), 1.0, abs_tol=1e-6):
-        raise ValueError("six-component weighted shares do not sum to one")
-    if not math.isclose(
-        float(holdout.get("max_weighted_component_share", math.nan)),
-        max(shares.values()),
-        abs_tol=1e-9,
+    ratio = summary.get("calibration_weighted_median_norm_ratio")
+    maximum_share = summary.get("maximum_weighted_component_norm_share")
+    minimum_joint_cosine = summary.get("minimum_component_to_joint_cosine")
+    if (
+        not isinstance(ratio, (int, float))
+        or not math.isfinite(ratio)
+        or ratio > MAXIMUM_CALIBRATION_WEIGHTED_MEDIAN_RATIO
+        or not isinstance(maximum_share, (int, float))
+        or not math.isfinite(maximum_share)
+        or maximum_share > MAXIMUM_WEIGHTED_COMPONENT_SHARE
+        or not isinstance(minimum_joint_cosine, (int, float))
+        or not math.isfinite(minimum_joint_cosine)
+        or minimum_joint_cosine < 0.0
+        or summary.get("calibration_cases") != 4
+        or summary.get("holdout_cases") != 4
+        or summary.get("pairwise_negative_values_are_diagnostic_only") is not True
     ):
-        raise ValueError("six-component weighted dominance differs")
-    joint_norm = holdout.get("joint_gradient_norm")
-    if not isinstance(joint_norm, (int, float)) or not math.isfinite(joint_norm):
-        raise ValueError("six-component joint gradient norm is invalid")
-    if joint_norm <= 0.0:
-        raise ValueError("six-component joint gradient is zero")
-    _require_all_true_gates(report, "six-component gradient audit")
-    if report.get("joint_scientific_promotion_granted") is not False:
-        raise ValueError("six-component gradient audit overclaims science")
-    if report.get("combined_final_panel_opened") is not False:
-        raise ValueError("six-component gradient audit opened a combined panel")
+        raise ValueError("six-component gradient frozen summary differs")
+    required_false = (
+        "scientific_promotion_granted",
+        "joint_scientific_promotion_granted",
+        "joint_panel_authorized",
+        "combined_final_panel_opened",
+        "fresh_panel_opened",
+        "exact_candidate_scoring_requested",
+        "waveform_generation_performed",
+        "formal_generator_training_submitted",
+    )
+    if any(report.get(key) is not False for key in required_false):
+        raise ValueError("six-component gradient report overclaims science")
+    if any(receipt.get(key) is not False for key in required_false):
+        raise ValueError("six-component gradient receipt overclaims science")
+    if (
+        report.get("scientific_contract_frozen_before_six_holdout_open") is not True
+        or report.get("raw_measurement_recomputed") is not False
+        or report.get("authoritative_training_decision") != TRAINING_NO_GO
+        or receipt.get("authoritative_training_decision") != TRAINING_NO_GO
+    ):
+        raise ValueError("six-component gradient decision boundaries differ")
     _require_optimizer_zero(report, "six-component gradient report")
     _require_optimizer_zero(receipt, "six-component gradient receipt")
     receipt_hashes = receipt.get("artifact_sha256")
-    if not isinstance(receipt_hashes, dict) or report_sha256 not in (
-        receipt_hashes.values()
+    if (
+        not isinstance(receipt_hashes, dict)
+        or len(receipt_hashes) != 1
+        or report_sha256 not in receipt_hashes.values()
     ):
         raise ValueError("six-component gradient receipt does not bind its report")
     return weights

@@ -15,7 +15,6 @@ from model.avqi_route_c import (
 )
 from scripts import audit_avqi_route_c_six_joint_panel_readiness as readiness
 from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
-    DRAFT_SIX_GRADIENT_SCHEMA_VERSION,
     DRAFT_SPLIT_SEAL_SCHEMA_VERSION,
     DRAFT_PANEL_DATA_REQUIREMENTS,
     FIVE_COMPONENT_EVIDENCE_KEYS,
@@ -29,6 +28,9 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     REQUIRED_SPLITS,
     REQUIRED_VIEWS,
     SHIMMER_DB_REQUIRED_STATUS,
+    SIX_GRADIENT_FROZEN_GATE_KEYS,
+    SIX_GRADIENT_RECEIPT_SCHEMA_VERSION,
+    SIX_GRADIENT_SCHEMA_VERSION,
     SIX_GRADIENT_PASS_DECISION,
     SIX_GRADIENT_SOURCE_EVIDENCE_KEYS,
     UNFROZEN_SCIENTIFIC_CONTRACTS,
@@ -40,6 +42,16 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     readiness_requirements,
     sha256_file,
     validate_readiness_manifest,
+)
+from scripts.decide_avqi_route_c_six_component_gradients import (
+    FROZEN_FIVE_JOB_ID,
+    FROZEN_FIVE_RECEIPT_SHA256,
+    FROZEN_FIVE_REPORT_SHA256,
+    JOINT_PANEL_NO_GO,
+    PASS_DECISION,
+    RAW_PENDING_DECISION,
+    TRAINING_NO_GO,
+    decision_requirements as six_gradient_decision_requirements,
 )
 
 
@@ -218,70 +230,101 @@ def _five_evidence_bundle(
     return artifacts, paths
 
 
-def _pairwise_keys() -> tuple[str, ...]:
-    return tuple(
-        f"{left}__{right}"
-        for index, left in enumerate(ROUTE_C_SIX_ACTIVE_COMPONENTS)
-        for right in ROUTE_C_SIX_ACTIVE_COMPONENTS[index + 1 :]
-    )
-
-
 def _six_gradient_evidence() -> tuple[dict[str, object], dict[str, object], str]:
     source_evidence = {
         key: "a" * 64 for key in SIX_GRADIENT_SOURCE_EVIDENCE_KEYS
     }
-    share = 1.0 / len(ROUTE_C_SIX_ACTIVE_COMPONENTS)
     report: dict[str, object] = {
-        "schema_version": DRAFT_SIX_GRADIENT_SCHEMA_VERSION,
+        "schema_version": SIX_GRADIENT_SCHEMA_VERSION,
         "decision": SIX_GRADIENT_PASS_DECISION,
+        "joint_panel_decision": JOINT_PANEL_NO_GO,
         "active_components": list(ROUTE_C_SIX_ACTIVE_COMPONENTS),
         "source_evidence_sha256": source_evidence,
-        "shimmer_db_topology_role": "base_current_output",
-        "slot3_checkpoint_affine_used": False,
-        "slot2_checkpoint_unchanged": True,
-        "selection": {
-            "allowed_splits": ["surrogate_calibration", "surrogate_holdout"],
-            "speaker_overlap": 0,
-            "component_and_joint_share_split": True,
-            "calibration_speaker_ids": ["cal-speaker"],
-            "holdout_speaker_ids": ["hold-speaker"],
-            "final_panel_opened": False,
+        "frozen_contract": six_gradient_decision_requirements()[
+            "frozen_contract"
+        ],
+        "accepted_numeric_precedent": {
+            "slurm_job_id": FROZEN_FIVE_JOB_ID,
+            "report_sha256": FROZEN_FIVE_REPORT_SHA256,
+            "receipt_sha256": FROZEN_FIVE_RECEIPT_SHA256,
         },
-        "calibration": {
-            "frozen_inverse_gradient_weights": {
+        "raw_measurement_evidence": {
+            "report_sha256": "c" * 64,
+            "receipt_sha256": "d" * 64,
+            "raw_decision": RAW_PENDING_DECISION,
+            "raw_artifacts_rewritten": False,
+        },
+        "decision_source": {
+            "head": "e" * 40,
+            "branch": "feat/avqi-route-c-six-component-scaffold-v1",
+        },
+        "implementation_sha256": {
+            "decide_avqi_route_c_six_component_gradients.py": "f" * 64,
+            "run_avqi_route_c_six_component_gradient_decision.sh": "1" * 64,
+        },
+        "post_evaluation_immutability": {
+            "verified": True,
+            "artifact_sha256": {
+                "raw_report": "c" * 64,
+                "raw_receipt": "d" * 64,
+                "five_precedent_report": FROZEN_FIVE_REPORT_SHA256,
+                "five_precedent_receipt": FROZEN_FIVE_RECEIPT_SHA256,
+            },
+        },
+        "measurement_summary": {
+            "calibration_cases": 4,
+            "holdout_cases": 4,
+            "calibration_inverse_gradient_weights": {
                 name: 1.0 for name in ROUTE_C_SIX_ACTIVE_COMPONENTS
-            }
+            },
+            "calibration_weighted_median_norm_ratio": 1.0,
+            "maximum_weighted_component_norm_share": 0.5,
+            "minimum_component_to_joint_cosine": 0.0,
+            "pairwise_negative_values_are_diagnostic_only": True,
         },
-        "holdout": {
-            "all_component_gradients_pass": True,
-            "all_joint_gradients_pass": True,
-            "all_pairwise_cosines_reported": True,
-            "all_component_to_joint_cosines_reported": True,
-            "bounded_gates_pass": True,
-            "weighted_dominance_gate_pass": True,
-            "component_gradient_norms": {
-                name: 1.0 for name in ROUTE_C_SIX_ACTIVE_COMPONENTS
-            },
-            "component_to_joint_cosines": {
-                name: 0.5 for name in ROUTE_C_SIX_ACTIVE_COMPONENTS
-            },
-            "pairwise_cosines": {key: 0.0 for key in _pairwise_keys()},
-            "weighted_component_shares": {
-                name: share for name in ROUTE_C_SIX_ACTIVE_COMPONENTS
-            },
-            "max_weighted_component_share": share,
-            "joint_gradient_norm": 1.0,
-        },
-        "gates": {"draft_all_bounded_gates": True},
+        "gates": {key: True for key in SIX_GRADIENT_FROZEN_GATE_KEYS},
+        "scientific_contract_frozen_before_six_holdout_open": True,
+        "raw_measurement_recomputed": False,
+        "scientific_promotion_granted": False,
         "joint_scientific_promotion_granted": False,
+        "joint_panel_authorized": False,
         "combined_final_panel_opened": False,
+        "fresh_panel_opened": False,
+        "exact_candidate_scoring_requested": False,
+        "waveform_generation_performed": False,
         "generator_optimizer_steps": 0,
+        "formal_generator_training_submitted": False,
+        "authoritative_training_decision": TRAINING_NO_GO,
     }
     report_sha256 = "b" * 64
     receipt = {
+        "schema_version": SIX_GRADIENT_RECEIPT_SCHEMA_VERSION,
         "decision": SIX_GRADIENT_PASS_DECISION,
+        "joint_panel_decision": JOINT_PANEL_NO_GO,
+        "active_components": list(ROUTE_C_SIX_ACTIVE_COMPONENTS),
+        "raw_measurement_sha256": {
+            "report": "c" * 64,
+            "receipt": "d" * 64,
+        },
+        "accepted_numeric_precedent": report["accepted_numeric_precedent"],
+        "source_commit": "e" * 40,
+        "source_branch": "feat/avqi-route-c-six-component-scaffold-v1",
+        "implementation_sha256": report["implementation_sha256"],
+        "post_evaluation_immutability": report[
+            "post_evaluation_immutability"
+        ],
         "artifact_sha256": {"gradient_report.json": report_sha256},
+        "raw_artifacts_rewritten": False,
+        "scientific_promotion_granted": False,
+        "joint_scientific_promotion_granted": False,
+        "joint_panel_authorized": False,
+        "combined_final_panel_opened": False,
+        "fresh_panel_opened": False,
+        "exact_candidate_scoring_requested": False,
+        "waveform_generation_performed": False,
         "generator_optimizer_steps": 0,
+        "formal_generator_training_submitted": False,
+        "authoritative_training_decision": TRAINING_NO_GO,
     }
     return report, receipt, report_sha256
 
@@ -299,6 +342,16 @@ def test_current_requirements_are_explicitly_no_go() -> None:
     assert requirements["missing_code_stages"] == list(MISSING_CODE_STAGES)
     assert requirements["unfrozen_scientific_contracts"] == list(
         UNFROZEN_SCIENTIFIC_CONTRACTS
+    )
+    assert "six-component gradient report schema" not in (
+        requirements["unfrozen_scientific_contracts"]
+    )
+    assert not any(
+        "gradient decision evaluator" in item
+        for item in requirements["missing_code_stages"]
+    )
+    assert "six-component joint waveform/exact gate contract" in (
+        requirements["unfrozen_scientific_contracts"]
     )
     assert requirements["draft_panel_data_requirements"] == list(
         DRAFT_PANEL_DATA_REQUIREMENTS
@@ -461,6 +514,59 @@ def test_six_gradient_binds_five_evidence_and_reports_all_interference() -> None
     report["source_evidence_sha256"].pop("tilt_receipt")
     with pytest.raises(ValueError, match="source-evidence binding differs"):
         _validate_six_gradient(report, receipt, report_sha256, expected)
+
+    report, receipt, report_sha256 = _six_gradient_evidence()
+    report["raw_measurement_evidence"]["raw_decision"] = PASS_DECISION
+    with pytest.raises(ValueError, match="raw measurement binding differs"):
+        _validate_six_gradient(report, receipt, report_sha256, expected)
+
+
+def test_six_gradient_sorted_json_round_trip_preserves_mapping_semantics(
+    tmp_path: Path,
+) -> None:
+    report, receipt, _ = _six_gradient_evidence()
+    report_path = _write_json(tmp_path / "six_gradient_decision_report.json", report)
+    report_sha256 = sha256_file(report_path)
+    receipt["artifact_sha256"] = {report_path.name: report_sha256}
+    receipt_path = _write_json(tmp_path / "completion_receipt.json", receipt)
+    loaded_report = json.loads(report_path.read_text(encoding="utf-8"))
+    loaded_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    expected = {
+        key: "a" * 64 for key in SIX_GRADIENT_SOURCE_EVIDENCE_KEYS
+    }
+
+    assert tuple(loaded_report["gates"]) != SIX_GRADIENT_FROZEN_GATE_KEYS
+    weights = _validate_six_gradient(
+        loaded_report,
+        loaded_receipt,
+        report_sha256,
+        expected,
+    )
+    assert set(weights) == set(ROUTE_C_SIX_ACTIVE_COMPONENTS)
+
+    loaded_report["implementation_sha256"] = dict(
+        reversed(tuple(loaded_report["implementation_sha256"].items()))
+    )
+    loaded_receipt["implementation_sha256"] = dict(
+        loaded_report["implementation_sha256"]
+    )
+    _validate_six_gradient(
+        loaded_report,
+        loaded_receipt,
+        report_sha256,
+        expected,
+    )
+
+    loaded_report["active_components"] = list(
+        reversed(ROUTE_C_SIX_ACTIVE_COMPONENTS)
+    )
+    with pytest.raises(ValueError, match="active order differs"):
+        _validate_six_gradient(
+            loaded_report,
+            loaded_receipt,
+            report_sha256,
+            expected,
+        )
 
 
 def test_preflight_source_contains_no_panel_execution_path() -> None:

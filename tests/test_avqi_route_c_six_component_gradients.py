@@ -471,15 +471,16 @@ def test_collector_source_contains_no_scientific_threshold_or_experiment_path() 
     assert tuple(ROUTE_C_SIX_ACTIVE_COMPONENTS) == AVQI_COMPONENT_NAMES
 
 
-def test_readiness_distinguishes_raw_collector_from_scientific_decision() -> None:
+def test_readiness_distinguishes_raw_collector_from_frozen_decision() -> None:
     requirement = next(
         row
         for row in readiness_requirements()["source_requirement_matrix"]
         if row["requirement"] == "six-component gradient evaluator/runner"
     )
     assert requirement["current_evidence"] == (
-        "scripts.evaluate_avqi_route_c_six_component_gradients"
+        "scripts.evaluate_avqi_route_c_six_component_gradients + "
+        "scripts.decide_avqi_route_c_six_component_gradients"
     )
     assert requirement["status"] == (
-        "present_dev_only_measurement_scientific_decision_pending"
+        "present_dev_only_raw_measurement_plus_frozen_code_decision"
     )
