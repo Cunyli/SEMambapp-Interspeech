@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-import hashlib
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -20,6 +19,27 @@ from model.avqi_components import (
     PraatDifferentiableAVQIComponentEstimator,
     freeze_module,
 )
+from model.avqi_route_c_v19_contracts import (
+    ROUTE_C_V19_EVIDENCE_SCHEMA_VERSION,
+    ROUTE_C_V19_BASE_TOPOLOGY_HIGHPASS_MODE,
+    ROUTE_C_V19_BASE_TOPOLOGY_INPUT_LOADER,
+    ROUTE_C_V19_FULL_STEP_GATE_KEYS,
+    ROUTE_C_V19_FULL_STEP_ARTIFACT_KEYS,
+    ROUTE_C_V19_IMPLEMENTATION_ARTIFACT_KEYS,
+    ROUTE_C_V19_PASS_DECISION,
+    ROUTE_C_V19_PAIRED_CANDIDATE_HIGHPASS_MODE,
+    ROUTE_C_V19_PAIRED_CANDIDATE_INPUT_LOADER,
+    ROUTE_C_V19_RECEIPT_SCHEMA_VERSION,
+    ROUTE_C_V19_REPORT_SCHEMA_VERSION,
+    ROUTE_C_V19_SAMPLE_RATE,
+    ROUTE_C_V19_TOPOLOGY_IMPLEMENTATION,
+    ROUTE_C_V19_TOPOLOGY_SCALAR_FIELDS,
+    RouteCArtifactBinding,
+    RouteCV19EvidenceManifest,
+    sha256_file,
+    validate_v19_evidence_manifest,
+    validate_v19_exact_topology,
+)
 
 
 ROUTE_C_FOUR_ACTIVE_ARCHITECTURE = (
@@ -27,6 +47,10 @@ ROUTE_C_FOUR_ACTIVE_ARCHITECTURE = (
 )
 ROUTE_C_FIVE_ACTIVE_ARCHITECTURE = (
     "direct_praat_hard_cpps_v12_hnr_v7_shimmer_v6_ltas_slope_tilt"
+)
+ROUTE_C_SIX_ACTIVE_ARCHITECTURE = (
+    "direct_praat_hard_cpps_v12_hnr_v7_shimmer_percent_v6_"
+    "shimmer_db_v19_exact_topology_scaffold_ltas_slope_tilt"
 )
 ROUTE_C_FOUR_ACTIVE_COMPONENTS = (
     "cpps",
@@ -41,6 +65,7 @@ ROUTE_C_FIVE_ACTIVE_COMPONENTS = (
     "slope",
     "tilt",
 )
+ROUTE_C_SIX_ACTIVE_COMPONENTS = AVQI_COMPONENT_NAMES
 # Compatibility alias for the sealed four-active integration branch.
 ROUTE_C_ACTIVE_COMPONENTS = ROUTE_C_FOUR_ACTIVE_COMPONENTS
 ROUTE_C_SOURCE_CHECKPOINT_KEYS = (
@@ -79,7 +104,22 @@ ROUTE_C_FIVE_SOURCE_ARCHITECTURES = {
     **ROUTE_C_SOURCE_ARCHITECTURES,
     "slope": "direct_praat_hard_shimmer_pulse_path_v6",
 }
+ROUTE_C_SIX_SOURCE_CHECKPOINT_KEYS = ROUTE_C_FIVE_SOURCE_CHECKPOINT_KEYS
+ROUTE_C_SIX_SOURCE_COMPONENT_INDICES = {
+    "cpps": (0,),
+    "hnr": (1,),
+    "shimmer_percent": (2,),
+    "slope": (4,),
+    "tilt": (5,),
+}
+ROUTE_C_SIX_EXTERNAL_COMPONENT_INDICES = {"shimmer_db": (3,)}
+ROUTE_C_SIX_SOURCE_ARCHITECTURES = {
+    **ROUTE_C_FIVE_SOURCE_ARCHITECTURES,
+}
 ROUTE_C_REGISTRY_SCHEMA_VERSION = "avqi-route-c-component-registry-v2"
+ROUTE_C_SIX_REGISTRY_SCHEMA_VERSION = (
+    "avqi-route-c-six-component-scaffold-registry-v1"
+)
 
 
 @dataclass(frozen=True)
@@ -167,9 +207,56 @@ ROUTE_C_COMPONENT_REGISTRY = (
 )
 
 
+@dataclass(frozen=True)
+class RouteCSixComponentSlot:
+    """One six-component scaffold slot without scientific promotion claims."""
+
+    index: int
+    name: str
+    avqi_coefficient: float
+    expanded_avqi_coefficient: float
+    implementation: str
+    code_status: str
+    scientific_status: str
+    active_in_six_component_scorer: bool
+
+
+ROUTE_C_SIX_COMPONENT_REGISTRY = tuple(
+    RouteCSixComponentSlot(
+        index=slot.index,
+        name=slot.name,
+        avqi_coefficient=slot.avqi_coefficient,
+        expanded_avqi_coefficient=slot.expanded_avqi_coefficient,
+        implementation=(
+            "v19_output_conditioned_exact_topology_scaffold"
+            if slot.name == "shimmer_db"
+            else slot.implementation
+        ),
+        code_status=(
+            "fail_closed_scaffold"
+            if slot.name == "shimmer_db"
+            else slot.code_status
+        ),
+        scientific_status=(
+            "pending_v19_component_promotion"
+            if slot.name == "shimmer_db"
+            else slot.scientific_status
+        ),
+        active_in_six_component_scorer=True,
+    )
+    for slot in ROUTE_C_COMPONENT_REGISTRY
+)
+ROUTE_C_SIX_SCIENTIFIC_STATUS = "pending_v19_component_promotion"
+
+
 def route_c_registry_records() -> list[dict[str, Any]]:
     """Return JSON-ready ordered records without exposing mutable globals."""
     return [asdict(slot) for slot in ROUTE_C_COMPONENT_REGISTRY]
+
+
+def route_c_six_registry_records() -> list[dict[str, Any]]:
+    """Return the ordered six-slot scaffold registry as JSON-ready records."""
+    return [asdict(slot) for slot in ROUTE_C_SIX_COMPONENT_REGISTRY]
 
 
 def build_route_c_four_active_estimator(
@@ -206,12 +293,11 @@ def build_route_c_five_active_estimator(
     return build_route_c_four_active_estimator(**estimator_kwargs)
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def build_route_c_six_active_estimator(
+    **estimator_kwargs: Any,
+) -> PraatDifferentiableAVQIComponentEstimator:
+    """Build the shared formulas; slot 3 is replaced by external v19 topology."""
+    return build_route_c_five_active_estimator(**estimator_kwargs)
 
 
 def _load_source_checkpoint(
@@ -304,6 +390,73 @@ class RouteCFiveActiveScorer(RouteCFourActiveScorer):
     """Frozen scorer carrying the five scientifically promoted components."""
 
 
+class RouteCSixActiveScorer(RouteCFiveActiveScorer):
+    """Fail-closed scorer whose Shimmer dB slot uses current-output topology."""
+
+    def forward(
+        self,
+        waveform: torch.Tensor,
+        speaking_type: str,
+        *,
+        topology: Mapping[str, Any] | None = None,
+        case_id: str | None = None,
+        view: str | None = None,
+        topology_sha256: str | None = None,
+    ) -> torch.Tensor:
+        if topology is None:
+            raise ValueError("Route C six-active scorer requires v19 topology")
+        if case_id is None or view is None or topology_sha256 is None:
+            raise ValueError("Route C six-active topology binding is incomplete")
+        if speaking_type != view:
+            raise ValueError("Route C six-active speaking type and view differ")
+        if waveform.ndim == 1:
+            current_waveform = waveform
+            scorer_input = waveform.unsqueeze(0)
+        elif waveform.ndim == 2 and waveform.shape[0] == 1:
+            current_waveform = waveform[0]
+            scorer_input = waveform
+        else:
+            raise ValueError(
+                "Route C six-active scorer requires one current output waveform"
+            )
+        validated = validate_v19_exact_topology(
+            current_waveform,
+            topology,
+            case_id=case_id,
+            view=view,
+            expected_topology_sha256=topology_sha256,
+            sample_rate=self.estimator.sample_rate,
+        )
+        base_prediction = super().forward(scorer_input, speaking_type)
+        pulses = current_waveform.new_tensor(
+            validated.pulse_positions_samples
+        ).detach()
+        source_indices = torch.as_tensor(
+            validated.metric_source_indices,
+            dtype=torch.long,
+            device=current_waveform.device,
+        ).detach()
+        raw_shimmer_db = self.estimator.raw_shimmer_from_pulse_positions(
+            current_waveform,
+            pulses,
+            metric_source_indices=source_indices,
+            metric_constant_prefix_samples=(
+                validated.metric_constant_prefix_samples
+            ),
+        )[1]
+        normalized_shimmer_db = (
+            raw_shimmer_db - self.target_mean[3]
+        ) / self.target_scale[3].clamp_min(1e-8)
+        return torch.cat(
+            (
+                base_prediction[..., :3],
+                normalized_shimmer_db.reshape(1, 1),
+                base_prediction[..., 4:],
+            ),
+            dim=-1,
+        )
+
+
 @dataclass(frozen=True)
 class RouteCScorerBundle:
     scorer: RouteCFourActiveScorer
@@ -316,6 +469,15 @@ class RouteCFiveScorerBundle:
     source_metadata: dict[str, dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class RouteCSixScorerBundle:
+    scorer: RouteCSixActiveScorer
+    source_metadata: dict[str, dict[str, Any]]
+    v19_evidence_metadata: dict[str, Any]
+    scientific_status: str = ROUTE_C_SIX_SCIENTIFIC_STATUS
+    generator_optimizer_steps: int = 0
+
+
 def _compose_route_c_scorer(
     checkpoint_paths: Mapping[str, Path],
     checkpoint_sha256: Mapping[str, str],
@@ -326,6 +488,7 @@ def _compose_route_c_scorer(
     estimator_builder: Callable[..., PraatDifferentiableAVQIComponentEstimator],
     scorer_class: type[RouteCFourActiveScorer],
     estimator_kwargs: Mapping[str, Any],
+    external_component_indices: tuple[int, ...] = (),
 ) -> tuple[RouteCFourActiveScorer, dict[str, dict[str, Any]]]:
     expected_keys = set(source_keys)
     if set(checkpoint_paths) != expected_keys:
@@ -341,7 +504,13 @@ def _compose_route_c_scorer(
         for key in source_keys
         for index in source_component_indices[key]
     ]
-    if sorted(selected_indices) != list(range(len(AVQI_COMPONENT_NAMES))):
+    if len(set(external_component_indices)) != len(external_component_indices):
+        raise ValueError("Route C external source slots contain duplicates")
+    if set(selected_indices) & set(external_component_indices):
+        raise ValueError("Route C checkpoint and external source slots overlap")
+    if sorted((*selected_indices, *external_component_indices)) != list(
+        range(len(AVQI_COMPONENT_NAMES))
+    ):
         raise ValueError("Route C source slots do not cover each AVQI component once")
     sources = {
         key: _load_source_checkpoint(
@@ -375,6 +544,11 @@ def _compose_route_c_scorer(
             alignment_bias[index] = source["state_dict"]["alignment_bias"][index]
             calibration_scale[index] = source["calibration_scale"][index]
             calibration_bias[index] = source["calibration_bias"][index]
+    for index in external_component_indices:
+        alignment_scale[index] = 1.0
+        alignment_bias[index] = 0.0
+        calibration_scale[index] = 1.0
+        calibration_bias[index] = 0.0
 
     estimator = estimator_builder(**estimator_kwargs)
     estimator.alignment_scale.copy_(alignment_scale)
@@ -437,6 +611,45 @@ def load_route_c_five_active_scorer(
     if not isinstance(scorer, RouteCFiveActiveScorer):
         raise RuntimeError("Route C five-active scorer composition returned wrong type")
     return RouteCFiveScorerBundle(scorer=scorer, source_metadata=metadata)
+
+
+def load_route_c_six_active_scorer(
+    checkpoint_paths: Mapping[str, Path],
+    checkpoint_sha256: Mapping[str, str],
+    *,
+    v19_evidence_manifest: RouteCV19EvidenceManifest,
+    **estimator_kwargs: Any,
+) -> RouteCSixScorerBundle:
+    """Compose an unpromoted six-slot scaffold with fail-closed v19 evidence."""
+    evidence_metadata = validate_v19_evidence_manifest(v19_evidence_manifest)
+    scorer, metadata = _compose_route_c_scorer(
+        checkpoint_paths,
+        checkpoint_sha256,
+        source_keys=ROUTE_C_SIX_SOURCE_CHECKPOINT_KEYS,
+        source_component_indices=ROUTE_C_SIX_SOURCE_COMPONENT_INDICES,
+        source_architectures=ROUTE_C_SIX_SOURCE_ARCHITECTURES,
+        estimator_builder=build_route_c_six_active_estimator,
+        scorer_class=RouteCSixActiveScorer,
+        estimator_kwargs=estimator_kwargs,
+        external_component_indices=ROUTE_C_SIX_EXTERNAL_COMPONENT_INDICES[
+            "shimmer_db"
+        ],
+    )
+    if not isinstance(scorer, RouteCSixActiveScorer):
+        raise RuntimeError("Route C six-active scorer composition returned wrong type")
+    metadata["shimmer_db"] = {
+        "source": "v19_current_output_exact_topology",
+        "component_indices": [3],
+        "checkpoint_affine_used": False,
+        "scientific_status": ROUTE_C_SIX_SCIENTIFIC_STATUS,
+        "scientific_promotion_granted": False,
+        "optimizer_steps": 0,
+    }
+    return RouteCSixScorerBundle(
+        scorer=scorer,
+        source_metadata=metadata,
+        v19_evidence_metadata=evidence_metadata,
+    )
 
 
 def normalized_bidirectional_component_gaps(
@@ -509,4 +722,20 @@ def five_active_bidirectional_gap_losses(
         target_mean,
         target_scale,
         ROUTE_C_FIVE_ACTIVE_COMPONENTS,
+    )
+
+
+def six_active_bidirectional_gap_losses(
+    normalized_prediction: torch.Tensor,
+    raw_target: torch.Tensor,
+    target_mean: torch.Tensor,
+    target_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Return six same-speaker, normalized, bidirectional SmoothL1 losses."""
+    return component_bidirectional_gap_losses(
+        normalized_prediction,
+        raw_target,
+        target_mean,
+        target_scale,
+        ROUTE_C_SIX_ACTIVE_COMPONENTS,
     )
