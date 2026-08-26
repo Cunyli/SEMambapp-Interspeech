@@ -340,20 +340,24 @@ def validate_v19_topology_evidence(
     return hashes
 
 
-def attempt_id_from_reference(row: dict[str, str]) -> str:
-    attempt_index = int(row["attempt_index"])
+def attempt_id_from_reference(row: dict[str, Any]) -> str:
+    attempt_index = parse_optional_int(row["attempt_index"])
+    if attempt_index is None:
+        raise ValueError("v18 attempt index missing")
+    backtrack_index = parse_optional_int(row["backtrack_index"])
     if attempt_index == 0:
-        if row["backtrack_index"] not in {"", "None"}:
+        if backtrack_index is not None:
             raise ValueError("v18 Candidate D backtrack index drift")
         return "candidate_d"
-    backtrack_index = int(row["backtrack_index"])
+    if backtrack_index is None:
+        raise ValueError("v18 Candidate C backtrack index missing")
     if attempt_index != backtrack_index + 1:
         raise ValueError("v18 Candidate C attempt ordering drift")
     return f"candidate_c_bt{backtrack_index}"
 
 
 def load_reference_attempts(
-    rows: list[dict[str, str]],
+    rows: list[dict[str, Any]],
 ) -> dict[tuple[str, str], dict[str, Any]]:
     references: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
@@ -601,14 +605,21 @@ def make_paired_refresh(
     return refresh_candidate_records_v19
 
 
-def parse_optional_int(value: str) -> int | None:
-    return None if value in {"", "None"} else int(value)
+def parse_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"invalid frozen optional integer: {value!r}")
+    numeric = float(value)
+    if not math.isfinite(numeric) or not numeric.is_integer():
+        raise ValueError(f"invalid frozen optional integer: {value!r}")
+    return int(numeric)
 
 
-def parse_bool(value: str) -> bool:
-    if value not in {"True", "False"}:
-        raise ValueError(f"invalid frozen boolean: {value}")
-    return value == "True"
+def parse_bool(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"invalid frozen boolean: {value!r}")
+    return value
 
 
 def float_equivalent(current: float, reference: str) -> bool:

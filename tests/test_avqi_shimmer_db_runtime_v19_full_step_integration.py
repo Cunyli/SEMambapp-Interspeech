@@ -243,6 +243,40 @@ def test_repeated_key_coverage_requires_exact_unique_reference_sets() -> None:
     )
 
 
+def test_typed_csv_contract_supports_candidate_d_and_c(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "preselection.csv"
+    csv_path.write_text(
+        "case_id,attempt_index,backtrack_index,selected_attempt\n"
+        "case-a,0,,True\n"
+        "case-a,1,0,False\n",
+        encoding="utf-8",
+    )
+    candidate_d, candidate_c = integration.opened24.read_csv(csv_path)
+
+    assert candidate_d["attempt_index"] == 0.0
+    assert candidate_d["backtrack_index"] is None
+    assert candidate_d["selected_attempt"] is True
+    assert integration.attempt_id_from_reference(candidate_d) == "candidate_d"
+    assert integration.parse_optional_int(candidate_d["backtrack_index"]) is None
+    assert integration.parse_bool(candidate_d["selected_attempt"]) is True
+
+    assert candidate_c["attempt_index"] == 1.0
+    assert candidate_c["backtrack_index"] == 0.0
+    assert candidate_c["selected_attempt"] is False
+    assert integration.attempt_id_from_reference(candidate_c) == "candidate_c_bt0"
+    assert integration.parse_optional_int(candidate_c["backtrack_index"]) == 0
+    assert integration.parse_bool(candidate_c["selected_attempt"]) is False
+
+    for invalid in (0.5, float("nan"), True, "1"):
+        with pytest.raises(ValueError, match="optional integer"):
+            integration.parse_optional_int(invalid)
+    for invalid in (1, "True", None):
+        with pytest.raises(ValueError, match="frozen boolean"):
+            integration.parse_bool(invalid)
+
+
 def test_integration_authorization_requires_every_fail_closed_gate() -> None:
     gates = {
         "all_attempts_equal_frozen_v18": True,
