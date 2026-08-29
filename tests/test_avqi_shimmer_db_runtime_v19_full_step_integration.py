@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -295,6 +297,146 @@ def test_integration_authorization_requires_every_fail_closed_gate() -> None:
         integration.integration_authorized({**gates, "extra": True})
 
 
+def test_deterministic_authorization_preserves_historical_disclosure() -> None:
+    common = {
+        "complete_24case_three_repeat_coverage": True,
+        "all_full_steps_within_frozen_500ms": True,
+        "all_full_steps_within_450ms_engineering_margin": True,
+        "all_selectors_pass": True,
+        "selected_pcm24_durable_byte_equivalence": True,
+        "full_step_timer_envelope_and_phase_accounting": True,
+        "all_attempts_equal_deterministic_reference": True,
+        "historical_v18_comparison_complete": True,
+    }
+    assert integration.integration_authorized(
+        common,
+        "deterministic_capture",
+    )
+    repeat = {
+        **common,
+        "baseline_capture_receipt_authorized_repeat": True,
+    }
+    assert integration.integration_authorized(
+        repeat,
+        "deterministic_repeat",
+    )
+    for gate_name in common:
+        assert not integration.integration_authorized(
+            {**common, gate_name: False},
+            "deterministic_capture",
+        )
+    with pytest.raises(ValueError, match="gate coverage"):
+        integration.integration_authorized(
+            {
+                key: value
+                for key, value in common.items()
+                if key != "historical_v18_comparison_complete"
+            },
+            "deterministic_capture",
+        )
+
+
+def test_capture_reference_is_bound_once_and_then_fails_closed() -> None:
+    waveform = np.linspace(-0.1, 0.1, 128, dtype=np.float32)
+    references: dict[tuple[str, str], dict[str, object]] = {}
+    record = {
+        "attempt_id": "candidate_d",
+        "candidate_sha256": "1" * 64,
+        "stored_waveform": waveform,
+    }
+    reference = integration.reference_for_record(
+        references,
+        "case-a",
+        record,
+        allow_capture=True,
+    )
+    assert reference["candidate_sha256"] == "1" * 64
+    assert reference["raw_float32_sha256"] == float32_payload(waveform)[2]
+    with pytest.raises(ValueError, match="active reference"):
+        integration.reference_for_record(
+            references,
+            "case-a",
+            {**record, "candidate_sha256": "2" * 64},
+        )
+    with pytest.raises(ValueError, match="missing candidate"):
+        integration.reference_for_record(
+            references,
+            "case-b",
+            record,
+        )
+
+
+def test_migration_review_is_hash_bound_and_never_authorizes_training(
+    tmp_path: Path,
+) -> None:
+    review = {
+        "schema_version": integration.MIGRATION_REVIEW_SCHEMA,
+        "immutable_v18": {
+            "report_sha256": "1" * 64,
+            "preselection_sha256": "2" * 64,
+            "receipt_sha256": "3" * 64,
+            "byte_gate_preserved": True,
+            "kept_as_separate_historical_evidence": True,
+        },
+        "one_case_deterministic_evidence": {
+            "v20_report_sha256": integration.V20_REPORT_SHA256,
+            "v20_receipt_sha256": integration.V20_RECEIPT_SHA256,
+            "v21_report_sha256": integration.V21_REPORT_SHA256,
+            "v21_receipt_sha256": integration.V21_RECEIPT_SHA256,
+            "sample_count": 220300,
+            "v20_v21_differing_sample_count": 0,
+            "old_v18_differing_pcm24_sample_count": 3,
+            "full_internal_hash_repeat_observed": True,
+        },
+        "authorizations": {
+            "opened24_deterministic_baseline_capture": True,
+            "opened24_deterministic_repeat_after_bound_capture": True,
+            "opened24_exact_component_scoring": False,
+            "new_sealed_panel_before_full_repeat": False,
+            "formal_generator_training": False,
+        },
+        "frozen_scientific_contract": {
+            "candidate_d_math_unchanged": True,
+            "candidate_d_alpha": 0.001,
+            "selector_unchanged": True,
+            "pcm24_gate_unchanged": True,
+            "runtime_gate_ms": 500.0,
+            "engineering_margin_ms": 450.0,
+            "candidate_exact_outcomes_opened": False,
+            "generator_optimizer_steps": 0,
+            "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
+        },
+    }
+    review_path = tmp_path / "migration_review.json"
+    review_path.write_text(
+        json.dumps(review, sort_keys=True),
+        encoding="utf-8",
+    )
+    review_sha256 = hashlib.sha256(review_path.read_bytes()).hexdigest()
+    args = SimpleNamespace(
+        candidate_reference_mode="deterministic_capture",
+        migration_review=review_path,
+        migration_review_sha256=review_sha256,
+        v18_report_sha256="1" * 64,
+        v18_preselection_sha256="2" * 64,
+        v18_receipt_sha256="3" * 64,
+    )
+    observed, observed_hash = integration.validate_migration_review(args)
+    assert observed == review
+    assert observed_hash == review_sha256
+
+    review["authorizations"]["formal_generator_training"] = True
+    review_path.write_text(
+        json.dumps(review, sort_keys=True),
+        encoding="utf-8",
+    )
+    args.migration_review_sha256 = hashlib.sha256(
+        review_path.read_bytes()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="authorization drift"):
+        integration.validate_migration_review(args)
+
+
 def synthetic_timer_record() -> dict[str, object]:
     batch = {
         "candidate_gpu_to_cpu_batch_ms": 1.0,
@@ -352,8 +494,9 @@ def test_integration_probe_keeps_exact_components_closed_and_core_frozen() -> No
     for token in (
         '"candidate_exact_avqi_components_opened": False',
         '"exact_component_scoring_requested": False',
-        '"opened24_rerun_authorized": all_gates_pass',
-        '"new_sealed_panel_authorized": False',
+        '"historical_v18_kept_separate": True',
+        '"immutable_v18_comparison_disclosed_separately": True',
+        '"new_sealed_panel_authorized": new_sealed_panel_authorized',
         '"generator_optimizer_steps": 0',
         "candidate_pcm24_readback_used_for_refresh",
         "paired_base_highpass_timing_sha256",
@@ -401,7 +544,7 @@ def test_full_step_runner_is_hash_bound_single_submit_and_no_exact_open() -> Non
         "CONFIRM_SLURM_SUBMIT",
         "status --porcelain=v1 --untracked-files=all",
         "squeue --noheader",
-        "Refusing duplicate v19 integration job",
+        "Refusing duplicate full-step integration job",
         "EVALUATOR_SHA256",
         "PEAK_CERTIFICATE_HELPER_SHA256",
         "PHASE1_EVALUATOR_SHA256",
@@ -417,6 +560,12 @@ def test_full_step_runner_is_hash_bound_single_submit_and_no_exact_open() -> Non
         "V19_TOPOLOGY_PCM24_EQUIVALENCE_SHA256",
         "V19_TOPOLOGY_RECEIPT_SHA256",
         "--integration-runner-sha256",
+        "CUBLAS_WORKSPACE_CONFIG=\":4096:8\"",
+        "--nodelist=\"$EXPECTED_NODE\"",
+        "--candidate-reference-mode",
+        "--migration-review-sha256",
+        "--deterministic-baseline-manifest-sha256",
+        "--deterministic-baseline-receipt-sha256",
         "phase=full_step_integration",
         "--repeats \"$REPEATS\"",
     ):

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Audit the v19 paired certificate inside the frozen full v18 selector step.
+"""Audit the paired certificate inside the frozen full v18 selector step.
 
 This opened-development probe executes the unchanged D-then-C selector on all
-24 v14+v15 cases for at least three repeats.  Candidate exact AVQI components
-remain closed.  Every attempted candidate must be byte-identical to the
-immutable v18 PCM24 candidate, topology/proxy certificates must remain
-equivalent, and the complete timed step must retain both the frozen 500-ms
-gate and the pre-registered 450-ms engineering margin.
+24 v14+v15 cases for at least three repeats. Candidate exact AVQI components
+remain closed. The legacy mode requires every attempted candidate to be
+byte-identical to immutable v18. The deterministic migration modes preserve
+that comparison as separately disclosed historical evidence while capturing
+or replaying a new process-start deterministic baseline. Topology/proxy
+certificates and the frozen 500-ms/450-ms runtime gates remain unchanged.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 import tempfile
@@ -44,6 +46,18 @@ from scripts import (
 
 PASS_DECISION = "PASS_SHIMMER_DB_RUNTIME_V19_FULL_STEP_INTEGRATION"
 FAIL_DECISION = "NO_GO_SHIMMER_DB_RUNTIME_V19_FULL_STEP_INTEGRATION"
+CAPTURE_PASS_DECISION = (
+    "CAPTURED_SHIMMER_DB_DETERMINISTIC_FULL_STEP_BASELINE_NO_PROMOTION"
+)
+CAPTURE_FAIL_DECISION = (
+    "NO_GO_SHIMMER_DB_DETERMINISTIC_FULL_STEP_BASELINE_CAPTURE"
+)
+REPEAT_PASS_DECISION = (
+    "PASS_SHIMMER_DB_DETERMINISTIC_FULL_STEP_REPEAT_V22"
+)
+REPEAT_FAIL_DECISION = (
+    "NO_GO_SHIMMER_DB_DETERMINISTIC_FULL_STEP_REPEAT_V22"
+)
 V18_NO_GO_DECISION = "NO_GO_SHIMMER_DB_V18_OPENED24_PRESELECTION"
 V18_SOURCE_COMMIT = "cb29d05ec073649b5d11beb7d5813f445d38eb43"
 V18_SLURM_JOB_ID = "19943414"
@@ -61,6 +75,30 @@ DEFAULT_REPEATS = 3
 FORMAL_RUNTIME_GATE_MS = 500.0
 ENGINEERING_MARGIN_MS = 450.0
 PROXY_EQUIVALENCE_ABS_TOLERANCE = 1e-7
+REFERENCE_MODES = (
+    "immutable_v18",
+    "deterministic_capture",
+    "deterministic_repeat",
+)
+DETERMINISTIC_MANIFEST_SCHEMA = (
+    "avqi-route-c-shimmer-db-deterministic-full-step-baseline-v22"
+)
+MIGRATION_REVIEW_SCHEMA = (
+    "avqi-route-c-shimmer-db-deterministic-contract-migration-review-v22"
+)
+REQUIRED_CUBLAS_WORKSPACE_CONFIG = ":4096:8"
+V20_REPORT_SHA256 = (
+    "7058cddae55f83815a93efe140024a0cbdca16123c65ef4b6f9200f14c0767df"
+)
+V20_RECEIPT_SHA256 = (
+    "18dd5d7f2a9834211920d5147f4048c1020b15e5e19361432c6ff3711a5f794d"
+)
+V21_REPORT_SHA256 = (
+    "20496db0bf370bed4bd3f47dbb95a5ee91c3b213d0ff4fdad6ef6e14de51db6b"
+)
+V21_RECEIPT_SHA256 = (
+    "04b1e2a05a2397a30335d121d187ac475337ad88612309bb0946e0240a61bb18"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,6 +166,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slurm-job-id", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--repeats", type=int, default=DEFAULT_REPEATS)
+    parser.add_argument(
+        "--candidate-reference-mode",
+        choices=REFERENCE_MODES,
+        default="immutable_v18",
+    )
+    parser.add_argument("--migration-review", type=Path)
+    parser.add_argument("--migration-review-sha256")
+    parser.add_argument("--deterministic-baseline-manifest", type=Path)
+    parser.add_argument("--deterministic-baseline-manifest-sha256")
+    parser.add_argument("--deterministic-baseline-receipt", type=Path)
+    parser.add_argument("--deterministic-baseline-receipt-sha256")
     return parser.parse_args()
 
 
@@ -207,6 +256,145 @@ def validate_repository_provenance(
         "repository_tree_clean": True,
         "implementation_sha256": implementation_hashes,
     }
+
+
+def validate_deterministic_process_contract(
+    reference_mode: str,
+) -> dict[str, Any]:
+    if reference_mode == "immutable_v18":
+        return {
+            "enabled": False,
+            "reference_mode": reference_mode,
+        }
+    expected_environment = {
+        "CUBLAS_WORKSPACE_CONFIG": REQUIRED_CUBLAS_WORKSPACE_CONFIG,
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+    }
+    observed_environment = {
+        key: os.environ.get(key) for key in expected_environment
+    }
+    if observed_environment != expected_environment:
+        raise ValueError(
+            "deterministic process-start environment drift: "
+            f"{observed_environment!r}"
+        )
+    torch.use_deterministic_algorithms(True)
+    torch.set_num_threads(1)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+    if not torch.are_deterministic_algorithms_enabled():
+        raise ValueError("PyTorch deterministic algorithms are not enabled")
+    expected_node = os.environ.get("EXPECTED_NODE")
+    observed_node = os.environ.get("SLURMD_NODENAME")
+    expected_gpu_uuid = os.environ.get("EXPECTED_GPU_UUID")
+    observed_gpu_uuid = os.environ.get("OBSERVED_GPU_UUID")
+    if (
+        not expected_node
+        or observed_node != expected_node
+        or not expected_gpu_uuid
+        or observed_gpu_uuid != expected_gpu_uuid
+    ):
+        raise ValueError("deterministic node or GPU identity drift")
+    return {
+        "enabled": True,
+        "reference_mode": reference_mode,
+        "environment": observed_environment,
+        "expected_node": expected_node,
+        "observed_node": observed_node,
+        "expected_gpu_uuid": expected_gpu_uuid,
+        "observed_gpu_uuid": observed_gpu_uuid,
+        "deterministic_algorithms_enabled": True,
+        "deterministic_algorithms_warn_only": False,
+        "torch_num_threads": torch.get_num_threads(),
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+    }
+
+
+def validate_migration_review(
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any] | None, str | None]:
+    deterministic = args.candidate_reference_mode != "immutable_v18"
+    review_values = (
+        args.migration_review,
+        args.migration_review_sha256,
+    )
+    if not deterministic:
+        if any(value is not None for value in review_values):
+            raise ValueError("legacy v18 mode must not receive migration review")
+        return None, None
+    if any(value is None for value in review_values):
+        raise ValueError("deterministic mode requires migration review and hash")
+    review_hash = opened24.validate_hash(
+        args.migration_review,
+        args.migration_review_sha256,
+        "deterministic contract migration review",
+    )
+    review = opened24.read_json(args.migration_review)
+    if review.get("schema_version") != MIGRATION_REVIEW_SCHEMA:
+        raise ValueError("deterministic migration review schema drift")
+    immutable_v18 = review.get("immutable_v18", {})
+    expected_v18_hashes = {
+        "report_sha256": args.v18_report_sha256,
+        "preselection_sha256": args.v18_preselection_sha256,
+        "receipt_sha256": args.v18_receipt_sha256,
+    }
+    if {
+        key: immutable_v18.get(key) for key in expected_v18_hashes
+    } != expected_v18_hashes:
+        raise ValueError("deterministic migration review v18 binding drift")
+    if immutable_v18.get("byte_gate_preserved") is not True:
+        raise ValueError("deterministic migration review weakened v18 byte gate")
+    if immutable_v18.get("kept_as_separate_historical_evidence") is not True:
+        raise ValueError("deterministic migration review overwrote v18 evidence")
+    one_case = review.get("one_case_deterministic_evidence", {})
+    expected_one_case = {
+        "v20_report_sha256": V20_REPORT_SHA256,
+        "v20_receipt_sha256": V20_RECEIPT_SHA256,
+        "v21_report_sha256": V21_REPORT_SHA256,
+        "v21_receipt_sha256": V21_RECEIPT_SHA256,
+        "sample_count": 220300,
+        "v20_v21_differing_sample_count": 0,
+        "old_v18_differing_pcm24_sample_count": 3,
+        "full_internal_hash_repeat_observed": True,
+    }
+    if {
+        key: one_case.get(key) for key in expected_one_case
+    } != expected_one_case:
+        raise ValueError("one-case deterministic evidence binding drift")
+    authorizations = review.get("authorizations", {})
+    required_authorizations = {
+        "opened24_deterministic_baseline_capture": True,
+        "opened24_deterministic_repeat_after_bound_capture": True,
+        "opened24_exact_component_scoring": False,
+        "new_sealed_panel_before_full_repeat": False,
+        "formal_generator_training": False,
+    }
+    if {
+        key: authorizations.get(key) for key in required_authorizations
+    } != required_authorizations:
+        raise ValueError("deterministic migration authorization drift")
+    frozen = review.get("frozen_scientific_contract", {})
+    required_frozen = {
+        "candidate_d_math_unchanged": True,
+        "candidate_d_alpha": 0.001,
+        "selector_unchanged": True,
+        "pcm24_gate_unchanged": True,
+        "runtime_gate_ms": 500.0,
+        "engineering_margin_ms": 450.0,
+        "candidate_exact_outcomes_opened": False,
+        "generator_optimizer_steps": 0,
+        "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
+    }
+    if {key: frozen.get(key) for key in required_frozen} != required_frozen:
+        raise ValueError("deterministic migration scientific contract drift")
+    return review, review_hash
 
 
 def validate_artifact_group(
@@ -384,6 +572,7 @@ def load_reference_attempts(
             "attempt_id": attempt_id,
             "candidate_sha256": observed_sha256,
             "raw_float32_sha256": raw_float32_sha256,
+            "_stored_waveform": stored,
         }
     if len(references) != EXPECTED_REFERENCE_ATTEMPT_COUNT:
         raise ValueError("immutable v18 candidate reference coverage drift")
@@ -392,24 +581,164 @@ def load_reference_attempts(
     return references
 
 
+def load_deterministic_reference_manifest(
+    args: argparse.Namespace,
+    process_contract: dict[str, Any],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, Any], str]:
+    required = (
+        args.deterministic_baseline_manifest,
+        args.deterministic_baseline_manifest_sha256,
+        args.deterministic_baseline_receipt,
+        args.deterministic_baseline_receipt_sha256,
+    )
+    if any(value is None for value in required):
+        raise ValueError(
+            "deterministic repeat requires baseline manifest/receipt hashes"
+        )
+    manifest_hash = opened24.validate_hash(
+        args.deterministic_baseline_manifest,
+        args.deterministic_baseline_manifest_sha256,
+        "deterministic full-step baseline manifest",
+    )
+    receipt_hash = opened24.validate_hash(
+        args.deterministic_baseline_receipt,
+        args.deterministic_baseline_receipt_sha256,
+        "deterministic full-step baseline receipt",
+    )
+    manifest = opened24.read_json(args.deterministic_baseline_manifest)
+    receipt = opened24.read_json(args.deterministic_baseline_receipt)
+    if manifest.get("schema_version") != DETERMINISTIC_MANIFEST_SCHEMA:
+        raise ValueError("deterministic baseline manifest schema drift")
+    if manifest.get("source_commit") != args.source_commit:
+        raise ValueError("deterministic baseline source commit drift")
+    if manifest.get("migration_review_sha256") != args.migration_review_sha256:
+        raise ValueError("deterministic baseline migration review drift")
+    if manifest.get("candidate_reference_mode") != "deterministic_capture":
+        raise ValueError("deterministic baseline was not a capture run")
+    if manifest.get("deterministic_repeat_authorized") is not True:
+        raise ValueError("deterministic baseline did not authorize repeat")
+    if manifest.get("candidate_exact_avqi_components_opened") is not False:
+        raise ValueError("deterministic baseline opened exact components")
+    if manifest.get("historical_v18_kept_separate") is not True:
+        raise ValueError("deterministic baseline overwrote v18 evidence")
+    if receipt.get("decision") != CAPTURE_PASS_DECISION:
+        raise ValueError("deterministic baseline receipt decision drift")
+    if receipt.get("source_commit") != args.source_commit:
+        raise ValueError("deterministic baseline receipt source drift")
+    if receipt.get("migration_review_sha256") != args.migration_review_sha256:
+        raise ValueError("deterministic baseline receipt migration review drift")
+    if receipt.get("deterministic_repeat_authorized") is not True:
+        raise ValueError("deterministic baseline receipt did not authorize repeat")
+    if receipt.get("new_sealed_panel_authorized") is not False:
+        raise ValueError("deterministic capture over-authorized sealed panel")
+    if receipt.get("candidate_exact_avqi_components_opened") is not False:
+        raise ValueError("deterministic baseline receipt opened exact components")
+    if receipt.get("generator_optimizer_steps") != 0:
+        raise ValueError("deterministic baseline training boundary drift")
+    if receipt.get("artifact_sha256", {}).get(
+        "deterministic_baseline_manifest.json"
+    ) != manifest_hash:
+        raise ValueError("deterministic baseline receipt manifest binding drift")
+    baseline_process = manifest.get("process_contract", {})
+    process_fields = (
+        "environment",
+        "deterministic_algorithms_enabled",
+        "deterministic_algorithms_warn_only",
+        "torch_num_threads",
+        "cuda_matmul_allow_tf32",
+        "cudnn_allow_tf32",
+        "cudnn_benchmark",
+        "cudnn_deterministic",
+        "expected_node",
+        "observed_node",
+        "expected_gpu_uuid",
+        "observed_gpu_uuid",
+    )
+    if {
+        field: baseline_process.get(field) for field in process_fields
+    } != {field: process_contract.get(field) for field in process_fields}:
+        raise ValueError("deterministic baseline process contract drift")
+    rows = manifest.get("attempt_references")
+    if not isinstance(rows, list):
+        raise ValueError("deterministic baseline attempt references missing")
+    references: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("deterministic baseline attempt row is not an object")
+        key = (str(row.get("case_id")), str(row.get("attempt_id")))
+        if key in references:
+            raise ValueError("duplicate deterministic baseline attempt")
+        required_fields = (
+            "case_id",
+            "attempt_id",
+            "family",
+            "alpha",
+            "backtrack_index",
+            "candidate_sha256",
+            "raw_float32_sha256",
+            "candidate_topology_sha256",
+            "candidate_pulse_count",
+            "proxy_before",
+            "proxy_after_frozen_topology",
+            "normalized_proxy_gap_before",
+            "normalized_proxy_gap_after",
+            "proxy_nonregression_pass",
+            "topology_stability_pass",
+            "reference_to_candidate_match_rate_16_samples",
+            "candidate_to_reference_match_rate_16_samples",
+            "finite_safety_pass",
+            "pcm24_effective_step_pass",
+            "selected_family",
+            "selected_alpha",
+            "selected_attempt",
+        )
+        if any(field not in row for field in required_fields):
+            raise ValueError("deterministic baseline attempt field missing")
+        references[key] = dict(row)
+    if len(references) != EXPECTED_REFERENCE_ATTEMPT_COUNT:
+        raise ValueError("deterministic baseline attempt coverage drift")
+    if len({case_id for case_id, _ in references}) != EXPECTED_CASE_COUNT:
+        raise ValueError("deterministic baseline case coverage drift")
+    binding = {
+        "manifest_sha256": manifest_hash,
+        "receipt_sha256": receipt_hash,
+        "capture_slurm_job_id": manifest.get("slurm_job_id"),
+    }
+    return references, binding, manifest_hash
+
+
 def reference_for_record(
     references: dict[tuple[str, str], dict[str, Any]],
     case_id: str,
     record: dict[str, Any],
+    *,
+    allow_capture: bool = False,
 ) -> dict[str, Any]:
     key = (case_id, str(record["attempt_id"]))
     if key not in references:
-        raise ValueError(f"missing immutable v18 attempt reference: {key}")
+        if not allow_capture:
+            raise ValueError(f"missing candidate attempt reference: {key}")
+        _, _, raw_float32_sha256 = float32_payload(
+            record["stored_waveform"]
+        )
+        references[key] = {
+            "case_id": case_id,
+            "attempt_id": str(record["attempt_id"]),
+            "candidate_sha256": record["candidate_sha256"],
+            "raw_float32_sha256": raw_float32_sha256,
+        }
     reference = references[key]
     if record["candidate_sha256"] != reference["candidate_sha256"]:
         raise ValueError(
-            f"v19 candidate PCM24 differs from frozen v18 bytes: {key}"
+            f"candidate PCM24 differs from active reference: {key}"
         )
     return reference
 
 
 def make_paired_refresh(
     references: dict[tuple[str, str], dict[str, Any]],
+    *,
+    capture_state: dict[str, bool] | None = None,
 ):
     def refresh_candidate_records_v19(
         context: dict[str, Any],
@@ -441,6 +770,9 @@ def make_paired_refresh(
                     references,
                     context["case_id"],
                     record,
+                    allow_capture=bool(
+                        capture_state and capture_state.get("enabled")
+                    ),
                 )
                 for record in grouped_records
             ]
@@ -505,6 +837,9 @@ def make_paired_refresh(
                 references,
                 context["case_id"],
                 record,
+                allow_capture=bool(
+                    capture_state and capture_state.get("enabled")
+                ),
             )
             raw_hash_pass = (
                 staging["raw_float32_sha256"]
@@ -629,6 +964,224 @@ def float_equivalent(current: float, reference: str) -> bool:
         rel_tol=0.0,
         abs_tol=PROXY_EQUIVALENCE_ABS_TOLERANCE,
     )
+
+
+def capture_reference_attempts(
+    panel_row: dict[str, Any],
+    case_record: dict[str, Any],
+    references: dict[tuple[str, str], dict[str, Any]],
+) -> None:
+    current_rows = selector_core.preselection_rows(
+        [panel_row],
+        [case_record],
+    )
+    for attempt, current in zip(
+        case_record["attempts"],
+        current_rows,
+        strict=True,
+    ):
+        key = (current["case_id"], str(attempt["attempt_id"]))
+        if key not in references:
+            raise ValueError("capture reference was not bound before refresh")
+        reference = references[key]
+        current_raw_hash = attempt["candidate_topology"][
+            "source_waveform_float32_sha256"
+        ]
+        if (
+            reference["candidate_sha256"] != current["candidate_sha256"]
+            or reference["raw_float32_sha256"] != current_raw_hash
+        ):
+            raise ValueError("capture reference hash changed after refresh")
+        reference.update(
+            {
+                **current,
+                "attempt_id": str(attempt["attempt_id"]),
+                "raw_float32_sha256": current_raw_hash,
+            }
+        )
+
+
+def deterministic_reference_rows(
+    references: dict[tuple[str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    fields = (
+        "case_id",
+        "attempt_index",
+        "attempt_id",
+        "family",
+        "alpha",
+        "backtrack_index",
+        "candidate_sha256",
+        "raw_float32_sha256",
+        "candidate_topology_sha256",
+        "candidate_pulse_count",
+        "proxy_before",
+        "proxy_after_frozen_topology",
+        "normalized_proxy_gap_before",
+        "normalized_proxy_gap_after",
+        "proxy_nonregression_pass",
+        "topology_stability_pass",
+        "reference_to_candidate_match_rate_16_samples",
+        "candidate_to_reference_match_rate_16_samples",
+        "finite_safety_pass",
+        "pcm24_effective_step_pass",
+        "selected_family",
+        "selected_alpha",
+        "selected_attempt",
+    )
+    rows = []
+    for key in sorted(references):
+        reference = references[key]
+        if any(field not in reference for field in fields):
+            raise ValueError("deterministic capture reference is incomplete")
+        rows.append({field: reference[field] for field in fields})
+    if len(rows) != EXPECTED_REFERENCE_ATTEMPT_COUNT:
+        raise ValueError("deterministic capture reference coverage drift")
+    return rows
+
+
+def compare_historical_v18_rows(
+    panel_row: dict[str, Any],
+    case_record: dict[str, Any],
+    historical_references: dict[tuple[str, str], dict[str, Any]],
+    repeat_index: int,
+) -> list[dict[str, Any]]:
+    current_rows = selector_core.preselection_rows(
+        [panel_row],
+        [case_record],
+    )
+    output: list[dict[str, Any]] = []
+    for attempt, current in zip(
+        case_record["attempts"],
+        current_rows,
+        strict=True,
+    ):
+        key = (current["case_id"], str(attempt["attempt_id"]))
+        reference = historical_references[key]
+        current_values, sample_rate = sf.read(
+            attempt["candidate_path"],
+            dtype="float32",
+            always_2d=False,
+        )
+        reference_values = reference["_stored_waveform"]
+        if sample_rate != 16_000 or current_values.shape != reference_values.shape:
+            raise ValueError("historical v18 waveform comparison shape drift")
+        current_codes = np.rint(current_values.astype(np.float64) * (2**23))
+        reference_codes = np.rint(
+            reference_values.astype(np.float64) * (2**23)
+        )
+        difference = current_codes.astype(np.int64) - reference_codes.astype(
+            np.int64
+        )
+        differing = np.flatnonzero(difference)
+        current_raw_hash = attempt["candidate_topology"][
+            "source_waveform_float32_sha256"
+        ]
+        scalar_equal = all(
+            float_equivalent(current[field], reference[field])
+            for field in (
+                "proxy_before",
+                "proxy_after_frozen_topology",
+                "normalized_proxy_gap_before",
+                "normalized_proxy_gap_after",
+                "reference_to_candidate_match_rate_16_samples",
+                "candidate_to_reference_match_rate_16_samples",
+            )
+        )
+        boolean_equal = all(
+            bool(current[field]) == parse_bool(reference[field])
+            for field in (
+                "proxy_nonregression_pass",
+                "topology_stability_pass",
+                "finite_safety_pass",
+                "pcm24_effective_step_pass",
+                "selected_attempt",
+            )
+        )
+        output.append(
+            {
+                "case_id": current["case_id"],
+                "attempt_id": str(attempt["attempt_id"]),
+                "repeat_index": repeat_index,
+                "current_candidate_sha256": current["candidate_sha256"],
+                "immutable_v18_candidate_sha256": reference[
+                    "candidate_sha256"
+                ],
+                "candidate_wav_byte_equal_to_v18": (
+                    current["candidate_sha256"]
+                    == reference["candidate_sha256"]
+                ),
+                "candidate_raw_float32_equal_to_v18": (
+                    current_raw_hash == reference["raw_float32_sha256"]
+                ),
+                "candidate_topology_equal_to_v18": (
+                    current["candidate_topology_sha256"]
+                    == reference["candidate_topology_sha256"]
+                ),
+                "candidate_pulse_count_equal_to_v18": (
+                    int(current["candidate_pulse_count"])
+                    == int(reference["candidate_pulse_count"])
+                ),
+                "proxy_scalar_equal_to_v18": scalar_equal,
+                "certificate_boolean_equal_to_v18": boolean_equal,
+                "sample_count": int(current_values.size),
+                "differing_pcm24_sample_count": int(differing.size),
+                "first_differing_index": (
+                    int(differing[0]) if differing.size else None
+                ),
+                "last_differing_index": (
+                    int(differing[-1]) if differing.size else None
+                ),
+                "maximum_abs_pcm24_code_difference": (
+                    int(np.max(np.abs(difference))) if differing.size else 0
+                ),
+                "historical_v18_full_equivalence_pass": all(
+                    (
+                        current["candidate_sha256"]
+                        == reference["candidate_sha256"],
+                        current_raw_hash == reference["raw_float32_sha256"],
+                        current["candidate_topology_sha256"]
+                        == reference["candidate_topology_sha256"],
+                        scalar_equal,
+                        boolean_equal,
+                    )
+                ),
+            }
+        )
+    return output
+
+
+def summarize_historical_v18(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    first_repeat = [row for row in rows if row["repeat_index"] == 1]
+    mismatches = [
+        row
+        for row in first_repeat
+        if not row["historical_v18_full_equivalence_pass"]
+    ]
+    return {
+        "historical_gate_preserved_but_not_used_for_new_authorization": True,
+        "attempt_count": len(first_repeat),
+        "full_equivalence_count": len(first_repeat) - len(mismatches),
+        "mismatch_count": len(mismatches),
+        "mismatch_attempts": [
+            {
+                "case_id": row["case_id"],
+                "attempt_id": row["attempt_id"],
+                "differing_pcm24_sample_count": row[
+                    "differing_pcm24_sample_count"
+                ],
+                "first_differing_index": row["first_differing_index"],
+                "last_differing_index": row["last_differing_index"],
+                "maximum_abs_pcm24_code_difference": row[
+                    "maximum_abs_pcm24_code_difference"
+                ],
+                "topology_equal": row["candidate_topology_equal_to_v18"],
+            }
+            for row in mismatches
+        ],
+    }
 
 
 def compare_attempt_rows(
@@ -914,24 +1467,74 @@ def case_runtime_row(
     }
 
 
+def write_deterministic_manifest(
+    args: argparse.Namespace,
+    references: dict[tuple[str, str], dict[str, Any]],
+    gates: dict[str, bool],
+    process_contract: dict[str, Any],
+    migration_review_sha256: str,
+    historical_v18_summary: dict[str, Any],
+) -> Path:
+    if args.candidate_reference_mode != "deterministic_capture":
+        raise ValueError("only deterministic capture may write baseline manifest")
+    repeat_authorized = integration_authorized(
+        gates,
+        args.candidate_reference_mode,
+    )
+    manifest = {
+        "schema_version": DETERMINISTIC_MANIFEST_SCHEMA,
+        "source_commit": args.source_commit,
+        "slurm_job_id": args.slurm_job_id,
+        "candidate_reference_mode": args.candidate_reference_mode,
+        "migration_review_sha256": migration_review_sha256,
+        "process_contract": process_contract,
+        "case_count": EXPECTED_CASE_COUNT,
+        "speaker_count": EXPECTED_SPEAKER_COUNT,
+        "attempt_count": EXPECTED_REFERENCE_ATTEMPT_COUNT,
+        "repeat_count_per_case": args.repeats,
+        "capture_gates": gates,
+        "deterministic_repeat_authorized": repeat_authorized,
+        "historical_v18_kept_separate": True,
+        "historical_v18_summary": historical_v18_summary,
+        "candidate_exact_avqi_components_opened": False,
+        "exact_component_scoring_requested": False,
+        "new_sealed_panel_authorized": False,
+        "generator_optimizer_steps": 0,
+        "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
+        "attempt_references": deterministic_reference_rows(references),
+    }
+    path = args.output_dir / "deterministic_baseline_manifest.json"
+    opened24.write_json(path, manifest)
+    return path
+
+
 def write_completion_receipt(
     args: argparse.Namespace,
     decision: str,
     artifact_paths: list[Path],
     source_provenance: dict[str, Any],
     opened24_rerun_authorized: bool,
+    deterministic_repeat_authorized: bool,
+    new_sealed_panel_authorized: bool,
+    migration_review_sha256: str | None,
 ) -> None:
     receipt = {
         "schema_version": (
-            "avqi-route-c-shimmer-db-runtime-v19-full-step-integration-receipt-v1"
+            "avqi-route-c-shimmer-db-full-step-integration-receipt-v2"
         ),
         "decision": decision,
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
+        "candidate_reference_mode": args.candidate_reference_mode,
+        "migration_review_sha256": migration_review_sha256,
         "source_provenance": source_provenance,
         "candidate_exact_avqi_components_opened": False,
+        "exact_component_scoring_requested": False,
         "opened24_rerun_authorized": opened24_rerun_authorized,
-        "new_sealed_panel_authorized": False,
+        "deterministic_repeat_authorized": (
+            deterministic_repeat_authorized
+        ),
+        "new_sealed_panel_authorized": new_sealed_panel_authorized,
         "promotion_authorized": False,
         "generator_optimizer_steps": 0,
         "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
@@ -942,9 +1545,11 @@ def write_completion_receipt(
     opened24.write_json(args.output_dir / "completion_receipt.json", receipt)
 
 
-def integration_authorized(gates: dict[str, bool]) -> bool:
-    expected = {
-        "all_attempts_equal_frozen_v18",
+def integration_authorized(
+    gates: dict[str, bool],
+    reference_mode: str = "immutable_v18",
+) -> bool:
+    common = {
         "complete_24case_three_repeat_coverage",
         "all_full_steps_within_frozen_500ms",
         "all_full_steps_within_450ms_engineering_margin",
@@ -952,8 +1557,23 @@ def integration_authorized(gates: dict[str, bool]) -> bool:
         "selected_pcm24_durable_byte_equivalence",
         "full_step_timer_envelope_and_phase_accounting",
     }
+    if reference_mode == "immutable_v18":
+        expected = common | {"all_attempts_equal_frozen_v18"}
+    elif reference_mode == "deterministic_capture":
+        expected = common | {
+            "all_attempts_equal_deterministic_reference",
+            "historical_v18_comparison_complete",
+        }
+    elif reference_mode == "deterministic_repeat":
+        expected = common | {
+            "all_attempts_equal_deterministic_reference",
+            "historical_v18_comparison_complete",
+            "baseline_capture_receipt_authorized_repeat",
+        }
+    else:
+        raise ValueError("unknown candidate reference mode")
     if set(gates) != expected:
-        raise ValueError("v19 integration gate coverage drift")
+        raise ValueError("full-step integration gate coverage drift")
     return all(gates.values())
 
 
@@ -1058,6 +1678,12 @@ def full_step_timer_contract(
 
 def main() -> None:
     args = parse_args()
+    process_contract = validate_deterministic_process_contract(
+        args.candidate_reference_mode
+    )
+    migration_review, migration_review_sha256 = validate_migration_review(
+        args
+    )
     source_provenance = validate_repository_provenance(args)
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite output: {args.output_dir}")
@@ -1075,7 +1701,35 @@ def main() -> None:
         raise ValueError("v19 integration speaker coverage drift")
     v18_hashes, v18_rows, v18_failures = validate_v18_evidence(args)
     v19_topology_hashes = validate_v19_topology_evidence(args)
-    references = load_reference_attempts(v18_rows)
+    historical_references = load_reference_attempts(v18_rows)
+    baseline_binding: dict[str, Any] | None = None
+    if args.candidate_reference_mode == "immutable_v18":
+        references = historical_references
+        unexpected_baseline_values = (
+            args.deterministic_baseline_manifest,
+            args.deterministic_baseline_manifest_sha256,
+            args.deterministic_baseline_receipt,
+            args.deterministic_baseline_receipt_sha256,
+        )
+        if any(value is not None for value in unexpected_baseline_values):
+            raise ValueError("legacy v18 mode received deterministic baseline")
+    elif args.candidate_reference_mode == "deterministic_capture":
+        references = {}
+        unexpected_baseline_values = (
+            args.deterministic_baseline_manifest,
+            args.deterministic_baseline_manifest_sha256,
+            args.deterministic_baseline_receipt,
+            args.deterministic_baseline_receipt_sha256,
+        )
+        if any(value is not None for value in unexpected_baseline_values):
+            raise ValueError("deterministic capture received prior baseline")
+    else:
+        references, baseline_binding, _ = (
+            load_deterministic_reference_manifest(
+                args,
+                process_contract,
+            )
+        )
     source_hashes.update(
         {
             f"immutable_v18_{name}": value
@@ -1089,6 +1743,17 @@ def main() -> None:
         }
     )
     source_hashes.update(source_provenance["implementation_sha256"])
+    if migration_review_sha256 is not None:
+        source_hashes["deterministic_migration_review"] = (
+            migration_review_sha256
+        )
+    if baseline_binding is not None:
+        source_hashes["deterministic_baseline_manifest"] = (
+            baseline_binding["manifest_sha256"]
+        )
+        source_hashes["deterministic_baseline_receipt"] = (
+            baseline_binding["receipt_sha256"]
+        )
 
     args.output_dir.mkdir(parents=True)
     durable_root = args.output_dir / "durable_selected_pcm24"
@@ -1110,9 +1775,18 @@ def main() -> None:
     worker_startups: list[dict[str, Any]] = []
     worker_warmups: list[dict[str, Any]] = []
     attempt_rows: list[dict[str, Any]] = []
+    historical_v18_rows: list[dict[str, Any]] = []
     runtime_rows: list[dict[str, Any]] = []
     durable_rows: list[dict[str, Any]] = []
-    paired_refresh = make_paired_refresh(references)
+    capture_state = {
+        "enabled": (
+            args.candidate_reference_mode == "deterministic_capture"
+        )
+    }
+    paired_refresh = make_paired_refresh(
+        references,
+        capture_state=capture_state,
+    )
     original_refresh = selector_core.refresh_candidate_records
     original_sync = selector_core.synchronize
     sync_state = {"call_count": 0, "wall_ms": 0.0}
@@ -1208,6 +1882,32 @@ def main() -> None:
                                 ),
                             }
                         )
+                        if (
+                            args.candidate_reference_mode
+                            == "deterministic_capture"
+                            and repeat_index == 1
+                        ):
+                            capture_reference_attempts(
+                                panel_row,
+                                case_record,
+                                references,
+                            )
+                        attempt_rows.extend(
+                            compare_attempt_rows(
+                                panel_row,
+                                case_record,
+                                references,
+                                repeat_index,
+                            )
+                        )
+                        historical_v18_rows.extend(
+                            compare_historical_v18_rows(
+                                panel_row,
+                                case_record,
+                                historical_references,
+                                repeat_index,
+                            )
+                        )
                         runtime_rows.append(
                             case_runtime_row(
                                 panel_row,
@@ -1223,20 +1923,14 @@ def main() -> None:
                                 repeat_index,
                             )
                         )
-                        attempt_rows.extend(
-                            compare_attempt_rows(
-                                panel_row,
-                                case_record,
-                                references,
-                                repeat_index,
-                            )
-                        )
                         print(
                             "v19_full_step_integration="
                             f"repeat_{repeat_index}:"
                             f"{case_index}/{EXPECTED_CASE_COUNT}",
                             flush=True,
                         )
+                    if repeat_index == 1:
+                        capture_state["enabled"] = False
     finally:
         selector_core.refresh_candidate_records = original_refresh
         selector_core.synchronize = original_sync
@@ -1244,9 +1938,13 @@ def main() -> None:
             worker.close()
 
     attempts_path = args.output_dir / "full_step_attempt_equivalence.csv"
+    historical_v18_path = (
+        args.output_dir / "historical_v18_attempt_comparison.csv"
+    )
     runtime_path = args.output_dir / "full_step_case_runtime_repeats.csv"
     durable_path = args.output_dir / "durable_selected_equivalence.csv"
     opened24.write_csv(attempts_path, attempt_rows)
+    opened24.write_csv(historical_v18_path, historical_v18_rows)
     opened24.write_csv(runtime_path, runtime_rows)
     opened24.write_csv(durable_path, durable_rows)
 
@@ -1258,6 +1956,12 @@ def main() -> None:
         attempt_rows,
         args.repeats,
         reference_keys,
+        ("case_id", "attempt_id"),
+    )
+    historical_key_coverage_pass = repeated_key_sets_equal(
+        historical_v18_rows,
+        args.repeats,
+        set(historical_references),
         ("case_id", "attempt_id"),
     )
     runtime_key_coverage_pass = repeated_key_sets_equal(
@@ -1276,6 +1980,10 @@ def main() -> None:
         len(attempt_rows) == expected_attempt_rows
         and attempt_key_coverage_pass
         and all(row["attempt_equivalence_pass"] for row in attempt_rows)
+    )
+    historical_comparison_complete = (
+        len(historical_v18_rows) == expected_attempt_rows
+        and historical_key_coverage_pass
     )
     full_coverage_pass = (
         len(runtime_rows) == expected_runtime_rows
@@ -1300,7 +2008,6 @@ def main() -> None:
         for row in durable_rows
     )
     gates = {
-        "all_attempts_equal_frozen_v18": attempt_equivalence_pass,
         "complete_24case_three_repeat_coverage": full_coverage_pass,
         "all_full_steps_within_frozen_500ms": formal_runtime_pass,
         "all_full_steps_within_450ms_engineering_margin": (
@@ -1310,8 +2017,52 @@ def main() -> None:
         "selected_pcm24_durable_byte_equivalence": durable_pass,
         "full_step_timer_envelope_and_phase_accounting": timer_contract_pass,
     }
-    all_gates_pass = integration_authorized(gates)
-    decision = PASS_DECISION if all_gates_pass else FAIL_DECISION
+    if args.candidate_reference_mode == "immutable_v18":
+        gates["all_attempts_equal_frozen_v18"] = attempt_equivalence_pass
+    else:
+        gates["all_attempts_equal_deterministic_reference"] = (
+            attempt_equivalence_pass
+        )
+        gates["historical_v18_comparison_complete"] = (
+            historical_comparison_complete
+        )
+        if args.candidate_reference_mode == "deterministic_repeat":
+            gates["baseline_capture_receipt_authorized_repeat"] = (
+                baseline_binding is not None
+            )
+    all_gates_pass = integration_authorized(
+        gates,
+        args.candidate_reference_mode,
+    )
+    if args.candidate_reference_mode == "immutable_v18":
+        decision = PASS_DECISION if all_gates_pass else FAIL_DECISION
+    elif args.candidate_reference_mode == "deterministic_capture":
+        decision = (
+            CAPTURE_PASS_DECISION
+            if all_gates_pass
+            else CAPTURE_FAIL_DECISION
+        )
+    else:
+        decision = (
+            REPEAT_PASS_DECISION
+            if all_gates_pass
+            else REPEAT_FAIL_DECISION
+        )
+    opened24_rerun_authorized = (
+        args.candidate_reference_mode == "immutable_v18"
+        and all_gates_pass
+    )
+    deterministic_repeat_authorized = (
+        args.candidate_reference_mode == "deterministic_capture"
+        and all_gates_pass
+    )
+    new_sealed_panel_authorized = (
+        args.candidate_reference_mode == "deterministic_repeat"
+        and all_gates_pass
+    )
+    historical_v18_summary = summarize_historical_v18(
+        historical_v18_rows
+    )
     runtime_values = [
         float(row["total_metric_step_runtime_ms"]) for row in runtime_rows
     ]
@@ -1330,13 +2081,34 @@ def main() -> None:
         }
         for case_id in v18_failures
     }
+    deterministic_manifest_path: Path | None = None
+    deterministic_manifest_output: dict[str, Any] | None = None
+    if args.candidate_reference_mode == "deterministic_capture":
+        if migration_review_sha256 is None:
+            raise ValueError("deterministic capture migration review missing")
+        deterministic_manifest_path = write_deterministic_manifest(
+            args,
+            references,
+            gates,
+            process_contract,
+            migration_review_sha256,
+            historical_v18_summary,
+        )
+        deterministic_manifest_output = {
+            "path": str(deterministic_manifest_path.resolve()),
+            "sha256": sha256_file(deterministic_manifest_path),
+            "deterministic_repeat_authorized": (
+                deterministic_repeat_authorized
+            ),
+        }
     report = {
         "schema_version": (
-            "avqi-route-c-shimmer-db-runtime-v19-full-step-integration-v1"
+            "avqi-route-c-shimmer-db-full-step-integration-v2"
         ),
         "decision": decision,
         "source_commit": args.source_commit,
         "slurm_job_id": args.slurm_job_id,
+        "candidate_reference_mode": args.candidate_reference_mode,
         "phase": "opened24_full_selector_step_integration_only",
         "dev_only": True,
         "candidate_exact_avqi_components_opened": False,
@@ -1354,8 +2126,21 @@ def main() -> None:
         "speaker_count": EXPECTED_SPEAKER_COUNT,
         "source_sha256": source_hashes,
         "source_provenance": source_provenance,
+        "migration_review": (
+            {
+                "schema_version": migration_review["schema_version"],
+                "sha256": migration_review_sha256,
+                "one_case_scope_not_silently_generalized": True,
+                "immutable_v18_kept_separate": True,
+            }
+            if migration_review is not None
+            else None
+        ),
+        "deterministic_baseline_binding": baseline_binding,
+        "deterministic_baseline_output": deterministic_manifest_output,
         "panel_bindings": panel_metadata,
         "runtime_environment": {
+            "deterministic_process_contract": process_contract,
             "torch_synthetic_warmup": torch_warmup,
             "candidate_d_synthetic_warmup": candidate_d_warmup,
             "selector_synthetic_warmup": selector_warmup,
@@ -1398,11 +2183,27 @@ def main() -> None:
             "durable_case_set_unique_and_complete_each_repeat": (
                 durable_key_coverage_pass
             ),
+            "historical_v18_attempt_set_complete_each_repeat": (
+                historical_key_coverage_pass
+            ),
         },
+        "historical_v18_comparison": historical_v18_summary,
         "candidate_input_contract": {
             "candidate_float32_source": "tmpfs_pcm24_file_readback_only",
-            "candidate_pcm24_hash_bound_to_frozen_v18": True,
-            "candidate_raw_float32_hash_bound_to_frozen_v18": True,
+            "active_reference": args.candidate_reference_mode,
+            "candidate_pcm24_hash_bound_to_frozen_v18": (
+                args.candidate_reference_mode == "immutable_v18"
+            ),
+            "candidate_raw_float32_hash_bound_to_frozen_v18": (
+                args.candidate_reference_mode == "immutable_v18"
+            ),
+            "candidate_pcm24_hash_bound_to_deterministic_reference": (
+                args.candidate_reference_mode != "immutable_v18"
+            ),
+            "candidate_raw_float32_hash_bound_to_deterministic_reference": (
+                args.candidate_reference_mode != "immutable_v18"
+            ),
+            "immutable_v18_comparison_disclosed_separately": True,
             "prequantization_tensor_sent_to_worker": False,
         },
         "paired_base_contract": {
@@ -1417,8 +2218,11 @@ def main() -> None:
             "selected_path_updated_before_future_seal": True,
             "byte_identical_sha_verified": durable_pass,
         },
-        "opened24_rerun_authorized": all_gates_pass,
-        "new_sealed_panel_authorized": False,
+        "opened24_rerun_authorized": opened24_rerun_authorized,
+        "deterministic_repeat_authorized": (
+            deterministic_repeat_authorized
+        ),
+        "new_sealed_panel_authorized": new_sealed_panel_authorized,
         "promotion_authorized": False,
         "generator_loaded": False,
         "generator_optimizer_created": False,
@@ -1427,19 +2231,37 @@ def main() -> None:
     }
     report_path = args.output_dir / "diagnostic_report.json"
     opened24.write_json(report_path, report)
+    artifact_paths = [
+        report_path,
+        attempts_path,
+        historical_v18_path,
+        runtime_path,
+        durable_path,
+    ]
+    if deterministic_manifest_path is not None:
+        artifact_paths.append(deterministic_manifest_path)
     write_completion_receipt(
         args,
         decision,
-        [report_path, attempts_path, runtime_path, durable_path],
+        artifact_paths,
         source_provenance,
-        all_gates_pass,
+        opened24_rerun_authorized,
+        deterministic_repeat_authorized,
+        new_sealed_panel_authorized,
+        migration_review_sha256,
     )
     print(
         json.dumps(
             {
                 "decision": decision,
                 "maximum_full_step_ms": max(runtime_values),
-                "opened24_rerun_authorized": all_gates_pass,
+                "opened24_rerun_authorized": opened24_rerun_authorized,
+                "deterministic_repeat_authorized": (
+                    deterministic_repeat_authorized
+                ),
+                "new_sealed_panel_authorized": (
+                    new_sealed_panel_authorized
+                ),
                 "candidate_exact_avqi_components_opened": False,
             },
             sort_keys=True,
