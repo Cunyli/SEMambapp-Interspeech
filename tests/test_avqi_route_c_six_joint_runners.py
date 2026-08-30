@@ -195,6 +195,11 @@ def test_runners_keep_exact_metric_branch_separate_from_emitted_audio() -> None:
     ).read_text(encoding="utf-8")
 
     assert '"emitted_waveform_highpass": False' in prepare_source
+    assert 'parser.add_argument("--readiness-report"' in prepare_source
+    assert 'parser.add_argument("--readiness-receipt"' in prepare_source
+    assert "validate_readiness_authorization(" in prepare_source
+    assert '"readiness_report": readiness_report_sha256' in prepare_source
+    assert '"readiness_receipt": readiness_receipt_sha256' in prepare_source
     assert "run_avqi(" in exact_source
     assert '"formal_generator_training_authorized": False' in exact_source
     assert "NO_GO_AVQI_T2_TRAINING" not in exact_source

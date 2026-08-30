@@ -34,12 +34,18 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     PANEL_ROW_FIELDS,
     PATHOLOGICAL_ROLE,
     READINESS_SCHEMA_VERSION,
+    READINESS_PASS_DECISION,
+    READINESS_RECEIPT_SCHEMA_VERSION,
     REQUIRED_ARTIFACT_KEYS,
     REQUIRED_CONDITIONS,
     REQUIRED_EFFICACY_SLICES,
     REQUIRED_SPLITS,
     REQUIRED_VIEWS,
     SHIMMER_DB_REQUIRED_STATUS,
+    SHIMMER_DB_PROMOTION_PASS_DECISION,
+    SHIMMER_DB_PROMOTION_RECEIPT_SCHEMA,
+    SHIMMER_DB_PROMOTION_REPORT_SCHEMA,
+    SHIMMER_DB_READINESS_PASS,
     SIX_GRADIENT_FROZEN_GATE_KEYS,
     SIX_GRADIENT_RECEIPT_SCHEMA_VERSION,
     SIX_GRADIENT_SCHEMA_VERSION,
@@ -55,10 +61,12 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     _validate_panel_rows,
     _validate_six_gradient,
     _validate_split_seal,
+    _validate_shimmer_db_promotion,
     current_blockers,
     frozen_svd_speaker_rank,
     readiness_requirements,
     sha256_file,
+    validate_readiness_authorization,
     validate_readiness_manifest,
 )
 from scripts.decide_avqi_route_c_six_component_gradients import (
@@ -853,6 +861,149 @@ def test_opened_exact_outcomes_fail_before_registry_or_artifacts() -> None:
     with pytest.raises(ValueError, match="opened candidate outcomes"):
         validate_readiness_manifest(
             _readiness_manifest(candidate_exact_outcomes_opened=True)
+        )
+
+
+def _shimmer_v26_evidence() -> tuple[dict[str, object], dict[str, object]]:
+    ledger_sha256 = "e" * 64
+    report_sha256 = "a" * 64
+    selector_sha256 = "b" * 64
+    report = {
+        "schema_version": SHIMMER_DB_PROMOTION_REPORT_SCHEMA,
+        "decision": SHIMMER_DB_PROMOTION_PASS_DECISION,
+        "component": "shimmer_db",
+        "component_status": SHIMMER_DB_PROMOTION_PASS_DECISION,
+        "readiness_status": SHIMMER_DB_READINESS_PASS,
+        "summary": {
+            "all_gates_pass": True,
+            "mechanism_gates": {"effect": True, "gradient": True},
+            "integration_gates": {"safety": True, "external": True},
+            "external_effect_slices": {"decision": "PASS"},
+            "svd_severity_labels_available": False,
+            "frozen_core_severity_slice_gate_applied_to_svd": False,
+        },
+        "fixed_scientific_thresholds": {
+            "candidate_d_fixed_alpha": 0.001,
+        },
+        "candidate_exact_outcomes_opened_after_selector_seal": True,
+        "old_v18_evidence_kept_separate": True,
+        "opened24_v23_severity_accuracy_calibration_anti_shortcut_bound": True,
+        "external_speaker_gate_pass": True,
+        "bounded_waveform_promotion_pass": True,
+        "scientific_promotion_granted": True,
+        "six_component_readiness_eligible": True,
+        "selector_seal_sha256": selector_sha256,
+        "evidence_bindings": {
+            "updated_speaker_ledger_sha256": ledger_sha256,
+        },
+        "source_sha256": {
+            "updated_speaker_ledger": ledger_sha256,
+        },
+        "joint_panel_authorized": False,
+        "generator_optimizer_steps": 0,
+        "formal_generator_training_submitted": False,
+        "authoritative_training_decision": TRAINING_NO_GO,
+    }
+    receipt = {
+        "schema_version": SHIMMER_DB_PROMOTION_RECEIPT_SCHEMA,
+        "decision": SHIMMER_DB_PROMOTION_PASS_DECISION,
+        "component": "shimmer_db",
+        "candidate_exact_outcomes_opened_after_selector_seal": True,
+        "old_v18_evidence_kept_separate": True,
+        "scientific_promotion_granted": True,
+        "six_component_readiness_eligible": True,
+        "joint_panel_authorized": False,
+        "generator_optimizer_steps": 0,
+        "formal_generator_training_submitted": False,
+        "authoritative_training_decision": TRAINING_NO_GO,
+        "artifact_sha256": {
+            "diagnostic_report.json": report_sha256,
+            "selector_seal.json": selector_sha256,
+            "external_svd_exact_results.csv": "c" * 64,
+            "family_selector_preselection.csv": "d" * 64,
+        },
+    }
+    return report, receipt
+
+
+def test_shimmer_v26_promotion_binds_external_exact_and_old_v18() -> None:
+    report, receipt = _shimmer_v26_evidence()
+    hashes = _validate_shimmer_db_promotion(
+        report,
+        receipt,
+        report_sha256="a" * 64,
+        receipt_sha256="f" * 64,
+        prior_ledger_sha256="e" * 64,
+    )
+
+    assert hashes == {
+        "report": "a" * 64,
+        "receipt": "f" * 64,
+        "prior_panel_speaker_ledger": "e" * 64,
+    }
+
+    collapsed = dict(report)
+    collapsed["old_v18_evidence_kept_separate"] = False
+    with pytest.raises(ValueError, match="evidence boundary differs"):
+        _validate_shimmer_db_promotion(
+            collapsed,
+            receipt,
+            report_sha256="a" * 64,
+            receipt_sha256="f" * 64,
+            prior_ledger_sha256="e" * 64,
+        )
+
+
+def test_prepare_requires_independent_hash_bound_readiness_pass() -> None:
+    inputs = {
+        "fresh_panel_split_seal": "1" * 64,
+        "joint_gradient_manifest": "2" * 64,
+    }
+    report = {
+        "schema_version": READINESS_SCHEMA_VERSION,
+        "decision": READINESS_PASS_DECISION,
+        "source_commit": "a" * 40,
+        "input_sha256": inputs,
+        "execution_authorized": True,
+        "joint_panel_authorized": True,
+        "joint_scientific_promotion_granted": False,
+        "candidate_exact_outcomes_opened": False,
+        "fresh_panel_opened": False,
+        "generator_optimizer_steps": 0,
+        "authoritative_training_decision": TRAINING_NO_GO,
+    }
+    receipt = {
+        "schema_version": READINESS_RECEIPT_SCHEMA_VERSION,
+        "decision": READINESS_PASS_DECISION,
+        "source_commit": "a" * 40,
+        "execution_authorized": True,
+        "joint_panel_authorized": True,
+        "joint_scientific_promotion_granted": False,
+        "candidate_exact_outcomes_opened": False,
+        "fresh_panel_opened": False,
+        "generator_optimizer_steps": 0,
+        "authoritative_training_decision": TRAINING_NO_GO,
+        "artifact_sha256": {"readiness_report.json": "b" * 64},
+    }
+    validate_readiness_authorization(
+        report,
+        receipt,
+        report_name="readiness_report.json",
+        report_sha256="b" * 64,
+        expected_source_commit="a" * 40,
+        expected_input_sha256=inputs,
+    )
+
+    drifted = dict(report)
+    drifted["input_sha256"] = {**inputs, "joint_gradient_manifest": "3" * 64}
+    with pytest.raises(ValueError, match="input binding differs"):
+        validate_readiness_authorization(
+            drifted,
+            receipt,
+            report_name="readiness_report.json",
+            report_sha256="b" * 64,
+            expected_source_commit="a" * 40,
+            expected_input_sha256=inputs,
         )
 
 

@@ -49,6 +49,7 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     NORMALIZATION_SOURCE,
     PANEL_ROW_FIELDS,
     PATHOLOGICAL_ROLE,
+    READINESS_PASS_DECISION,
     SIX_GRADIENT_PASS_DECISION,
     TRAINING_NO_GO,
     _finite_mapping,
@@ -56,6 +57,7 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     _validate_panel_rows,
     _validate_six_gradient,
     _validate_split_seal,
+    validate_readiness_authorization,
     validate_source,
 )
 
@@ -419,6 +421,11 @@ def validate_gradient_manifest(
 
 def prepare_and_seal(
     *,
+    readiness_report: Mapping[str, Any],
+    readiness_receipt: Mapping[str, Any],
+    readiness_report_name: str,
+    readiness_report_sha256: str,
+    readiness_receipt_sha256: str,
     split_seal: Mapping[str, Any],
     split_seal_sha256: str,
     target_bank: Mapping[str, Any],
@@ -440,6 +447,26 @@ def prepare_and_seal(
 ) -> dict[str, Any]:
     if output_dir.exists():
         raise FileExistsError(f"refusing to overwrite waveform seal: {output_dir}")
+    readiness_inputs = {
+        "fresh_panel_split_seal": split_seal_sha256,
+        "clean_target_label_bank": target_bank_sha256,
+        "joint_gradient_manifest": gradient_manifest_sha256,
+        "six_gradient_raw_report": six_gradient_raw_report_sha256,
+        "six_gradient_report": six_gradient_report_sha256,
+        "six_gradient_receipt": six_gradient_receipt_sha256,
+        "joint_gate_contract": gate_sha256,
+        "target_value_protocol_contract": target_protocol_sha256,
+        "prior_panel_speaker_ledger": ledger_sha256,
+        "fresh_speaker_source_manifest": source_manifest_sha256,
+    }
+    validate_readiness_authorization(
+        readiness_report,
+        readiness_receipt,
+        report_name=readiness_report_name,
+        report_sha256=readiness_report_sha256,
+        expected_source_commit=source["head"],
+        expected_input_sha256=readiness_inputs,
+    )
     _validate_split_seal(
         split_seal,
         gate_sha256=gate_sha256,
@@ -609,6 +636,8 @@ def prepare_and_seal(
             implementation_path.name: sha256_file(implementation_path)
         },
         "input_sha256": {
+            "readiness_report": readiness_report_sha256,
+            "readiness_receipt": readiness_receipt_sha256,
             "fresh_panel_split_seal": split_seal_sha256,
             "clean_target_label_bank": target_bank_sha256,
             "joint_gradient_manifest": gradient_manifest_sha256,
@@ -641,6 +670,7 @@ def prepare_and_seal(
         "calibration_exact_outcomes_opened": False,
         "final_exact_outcomes_opened": False,
         "final_waveforms_sealed_before_final_exact_open": True,
+        "readiness_decision": READINESS_PASS_DECISION,
         "generator_loaded": False,
         "generator_optimizer_steps": 0,
         "formal_generator_training_submitted": False,
@@ -669,6 +699,10 @@ def prepare_and_seal(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--readiness-report", type=Path, required=True)
+    parser.add_argument("--readiness-report-sha256", required=True)
+    parser.add_argument("--readiness-receipt", type=Path, required=True)
+    parser.add_argument("--readiness-receipt-sha256", required=True)
     parser.add_argument("--split-seal", type=Path, required=True)
     parser.add_argument("--split-seal-sha256", required=True)
     parser.add_argument("--clean-target-label-bank", type=Path, required=True)
@@ -699,6 +733,14 @@ def main() -> None:
     args = parse_args()
     source = validate_source(args.source_root, args.source_commit)
     paths_and_hashes = {
+        "readiness_report": (
+            args.readiness_report,
+            args.readiness_report_sha256,
+        ),
+        "readiness_receipt": (
+            args.readiness_receipt,
+            args.readiness_receipt_sha256,
+        ),
         "split_seal": (args.split_seal, args.split_seal_sha256),
         "target_bank": (
             args.clean_target_label_bank,
@@ -742,6 +784,15 @@ def main() -> None:
         for key, (path, expected_hash) in paths_and_hashes.items()
     }
     result = prepare_and_seal(
+        readiness_report=_read_json_mapping(
+            verified["readiness_report"], "readiness report"
+        ),
+        readiness_receipt=_read_json_mapping(
+            verified["readiness_receipt"], "readiness receipt"
+        ),
+        readiness_report_name=verified["readiness_report"].name,
+        readiness_report_sha256=args.readiness_report_sha256,
+        readiness_receipt_sha256=args.readiness_receipt_sha256,
         split_seal=_read_json_mapping(verified["split_seal"], "split seal"),
         split_seal_sha256=args.split_seal_sha256,
         target_bank=_read_json_mapping(verified["target_bank"], "target bank"),

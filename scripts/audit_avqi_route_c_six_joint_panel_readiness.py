@@ -61,11 +61,27 @@ from scripts.decide_avqi_route_c_six_component_gradients import (
 
 
 READINESS_SCHEMA_VERSION = "avqi-route-c-six-joint-panel-readiness-v2"
+READINESS_RECEIPT_SCHEMA_VERSION = (
+    "avqi-route-c-six-joint-panel-readiness-receipt-v1"
+)
+READINESS_PASS_DECISION = "PASS_SIX_JOINT_PANEL_READINESS"
 FROZEN_SCIENTIFIC_CONTRACT_SCHEMA_VERSION = (
     "avqi-route-c-six-joint-scientific-contract-v1"
 )
 FROZEN_SPLIT_SEAL_SCHEMA_VERSION = "avqi-route-c-six-joint-split-seal-v1"
 SHIMMER_DB_REQUIRED_STATUS = "fresh_speaker_panel_pass"
+SHIMMER_DB_PROMOTION_REPORT_SCHEMA = (
+    "avqi-route-c-shimmer-db-external-svd-exact-promotion-v26"
+)
+SHIMMER_DB_PROMOTION_RECEIPT_SCHEMA = (
+    "avqi-route-c-shimmer-db-external-svd-exact-promotion-receipt-v26"
+)
+SHIMMER_DB_PROMOTION_PASS_DECISION = (
+    "PASS_SHIMMER_DB_EXACT_PRAAT_EXTERNAL_SVD_PROMOTION_V26"
+)
+SHIMMER_DB_READINESS_PASS = (
+    "READY_SHIMMER_DB_FOR_SIX_COMPONENT_JOINT_READINESS"
+)
 SOURCE_DATASET = "SVD"
 SVD_SV_METADATA_SHA256 = (
     "36d8a725a209578744a862e63b5990d348e3d17d066a0247cdcd2e657c7ffc03"
@@ -826,6 +842,163 @@ def _receipt_binds_report(
         or receipt_hashes.get(report_path.name) != report_sha256
     ):
         raise ValueError(f"{label} receipt does not bind its report")
+
+
+def _validate_shimmer_db_promotion(
+    report: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    report_sha256: str,
+    receipt_sha256: str,
+    prior_ledger_sha256: str,
+) -> dict[str, str]:
+    """Validate the external exact-Praat Shimmer promotion boundary."""
+    if report.get("schema_version") != SHIMMER_DB_PROMOTION_REPORT_SCHEMA:
+        raise ValueError("Shimmer dB promotion report schema differs")
+    if receipt.get("schema_version") != SHIMMER_DB_PROMOTION_RECEIPT_SCHEMA:
+        raise ValueError("Shimmer dB promotion receipt schema differs")
+    if (
+        report.get("decision") != SHIMMER_DB_PROMOTION_PASS_DECISION
+        or receipt.get("decision") != SHIMMER_DB_PROMOTION_PASS_DECISION
+        or report.get("component_status")
+        != SHIMMER_DB_PROMOTION_PASS_DECISION
+        or report.get("readiness_status") != SHIMMER_DB_READINESS_PASS
+    ):
+        raise ValueError("Shimmer dB external exact promotion did not pass")
+    if report.get("component") != "shimmer_db" or receipt.get(
+        "component"
+    ) != "shimmer_db":
+        raise ValueError("Shimmer dB promotion component identity differs")
+    summary = report.get("summary")
+    if (
+        not isinstance(summary, dict)
+        or summary.get("all_gates_pass") is not True
+        or not isinstance(summary.get("mechanism_gates"), dict)
+        or any(value is not True for value in summary["mechanism_gates"].values())
+        or not isinstance(summary.get("integration_gates"), dict)
+        or any(
+            value is not True
+            for value in summary["integration_gates"].values()
+        )
+        or summary.get("external_effect_slices", {}).get("decision") != "PASS"
+        or summary.get("svd_severity_labels_available") is not False
+        or summary.get("frozen_core_severity_slice_gate_applied_to_svd")
+        is not False
+    ):
+        raise ValueError("Shimmer dB promotion gates differ")
+    thresholds = report.get("fixed_scientific_thresholds")
+    if not isinstance(thresholds, dict) or thresholds.get(
+        "candidate_d_fixed_alpha"
+    ) != 0.001:
+        raise ValueError("Shimmer dB frozen alpha differs")
+    required_true = (
+        "candidate_exact_outcomes_opened_after_selector_seal",
+        "old_v18_evidence_kept_separate",
+        "opened24_v23_severity_accuracy_calibration_anti_shortcut_bound",
+        "external_speaker_gate_pass",
+        "bounded_waveform_promotion_pass",
+        "scientific_promotion_granted",
+        "six_component_readiness_eligible",
+    )
+    if any(report.get(key) is not True for key in required_true):
+        raise ValueError("Shimmer dB promotion evidence boundary differs")
+    if (
+        receipt.get("candidate_exact_outcomes_opened_after_selector_seal")
+        is not True
+        or receipt.get("old_v18_evidence_kept_separate") is not True
+        or receipt.get("scientific_promotion_granted") is not True
+        or receipt.get("six_component_readiness_eligible") is not True
+    ):
+        raise ValueError("Shimmer dB promotion receipt boundary differs")
+    for label, value in (("report", report), ("receipt", receipt)):
+        if value.get("joint_panel_authorized") is not False:
+            raise ValueError(f"Shimmer dB {label} over-authorized joint panel")
+        if value.get("generator_optimizer_steps") != 0:
+            raise ValueError(f"Shimmer dB {label} optimizer boundary differs")
+        if value.get("formal_generator_training_submitted") is not False:
+            raise ValueError(f"Shimmer dB {label} overclaims formal training")
+        if value.get("authoritative_training_decision") != TRAINING_NO_GO:
+            raise ValueError(f"Shimmer dB {label} training decision differs")
+    receipt_hashes = receipt.get("artifact_sha256")
+    if (
+        not isinstance(receipt_hashes, dict)
+        or receipt_hashes.get("diagnostic_report.json") != report_sha256
+        or receipt_hashes.get("selector_seal.json")
+        != report.get("selector_seal_sha256")
+        or not _is_sha256(receipt_hashes.get("external_svd_exact_results.csv"))
+        or not _is_sha256(
+            receipt_hashes.get("family_selector_preselection.csv")
+        )
+    ):
+        raise ValueError("Shimmer dB promotion receipt artifact binding differs")
+    evidence = report.get("evidence_bindings")
+    source_sha256 = report.get("source_sha256")
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("updated_speaker_ledger_sha256")
+        != prior_ledger_sha256
+        or not isinstance(source_sha256, dict)
+        or source_sha256.get("updated_speaker_ledger")
+        != prior_ledger_sha256
+    ):
+        raise ValueError("Shimmer dB promotion speaker-ledger binding differs")
+    return {
+        "report": report_sha256,
+        "receipt": receipt_sha256,
+        "prior_panel_speaker_ledger": prior_ledger_sha256,
+    }
+
+
+def validate_readiness_authorization(
+    report: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    report_name: str,
+    report_sha256: str,
+    expected_source_commit: str,
+    expected_input_sha256: Mapping[str, str],
+) -> None:
+    """Require an independent PASS receipt before waveform preparation."""
+    if report.get("schema_version") != READINESS_SCHEMA_VERSION:
+        raise ValueError("six-joint readiness authorization schema differs")
+    if receipt.get("schema_version") != READINESS_RECEIPT_SCHEMA_VERSION:
+        raise ValueError("six-joint readiness receipt schema differs")
+    if (
+        report.get("decision") != READINESS_PASS_DECISION
+        or receipt.get("decision") != READINESS_PASS_DECISION
+    ):
+        raise ValueError("six-joint readiness authorization did not pass")
+    if (
+        report.get("source_commit") != expected_source_commit
+        or receipt.get("source_commit") != expected_source_commit
+    ):
+        raise ValueError("six-joint readiness source binding differs")
+    for label, value in (("report", report), ("receipt", receipt)):
+        if value.get("execution_authorized") is not True:
+            raise ValueError(f"six-joint readiness {label} did not authorize execution")
+        if value.get("joint_panel_authorized") is not True:
+            raise ValueError(f"six-joint readiness {label} did not authorize panel")
+        if value.get("joint_scientific_promotion_granted") is not False:
+            raise ValueError(f"six-joint readiness {label} overclaims science")
+        if value.get("candidate_exact_outcomes_opened") is not False:
+            raise ValueError(f"six-joint readiness {label} opened exact outcomes")
+        if value.get("fresh_panel_opened") is not False:
+            raise ValueError(f"six-joint readiness {label} opened fresh panel")
+        if value.get("generator_optimizer_steps") != 0:
+            raise ValueError(f"six-joint readiness {label} optimizer boundary differs")
+        if value.get("authoritative_training_decision") != TRAINING_NO_GO:
+            raise ValueError(f"six-joint readiness {label} training decision differs")
+    inputs = report.get("input_sha256")
+    if not isinstance(inputs, dict) or any(
+        inputs.get(key) != value for key, value in expected_input_sha256.items()
+    ):
+        raise ValueError("six-joint readiness/preparation input binding differs")
+    receipt_hashes = receipt.get("artifact_sha256")
+    if (
+        not isinstance(receipt_hashes, dict)
+        or receipt_hashes.get(report_name) != report_sha256
+    ):
+        raise ValueError("six-joint readiness receipt/report binding differs")
 
 
 def _validate_five_component_evidence(
