@@ -43,6 +43,7 @@ from scripts.evaluate_avqi_shimmer_db_candidate_c_fresh_panel import (
     load_predictor,
     read_waveform,
     run_exact,
+    topology_stability,
 )
 from scripts.evaluate_avqi_shimmer_db_source_informed_v17 import (
     synthetic_candidate_d_warmup,
@@ -80,7 +81,6 @@ from scripts.evaluate_avqi_shimmer_hybrid_topology import (
     RESIDUAL_CEILING_DB,
     aggregate_candidate,
     summarize_effect_slice,
-    topology_stability,
     waveform_safety,
 )
 from scripts.evaluate_direct_avqi_waveform_optimization import (
