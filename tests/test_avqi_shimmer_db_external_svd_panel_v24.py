@@ -72,28 +72,33 @@ def test_external_panel_requires_bound_v23_pass_without_overauthorization() -> N
 
 
 def prior_ledger() -> dict[str, object]:
+    entries = [
+        {
+            "dataset": "TAU",
+            "speaker_id": speaker_id,
+            "canonical_speaker_id": f"TAU:{speaker_id}",
+            "panel_role": "frozen-shimmer-history",
+        }
+        for speaker_id in sorted(v24.REQUIRED_PRIOR_TAU_SPEAKER_IDS)
+    ]
+    entries.append(
+        {
+            "dataset": "SVD",
+            "speaker_id": "100",
+            "canonical_speaker_id": "SVD:100",
+            "panel_role": "prior-test-panel",
+        }
+    )
     return {
         "schema_version": v24.PRIOR_LEDGER_SCHEMA,
         "exact_outcomes_used_for_selection": False,
-        "entries": [
-            {
-                "dataset": "SVD",
-                "speaker_id": "100",
-                "canonical_speaker_id": "SVD:100",
-                "panel_role": "prior-test-panel",
-            },
-            {
-                "dataset": "TAU",
-                "speaker_id": "SD05",
-                "canonical_speaker_id": "TAU:SD05",
-                "panel_role": "opened24-v14",
-            },
-        ],
+        "entries": entries,
     }
 
 
 def test_prior_ledger_is_canonical_unique_and_result_blind() -> None:
-    assert v24.validate_prior_ledger(prior_ledger()) == {"SVD:100", "TAU:SD05"}
+    speakers = v24.validate_prior_ledger(prior_ledger())
+    assert speakers == v24.REQUIRED_PRIOR_TAU_SPEAKERS | {"SVD:100"}
 
     duplicate = prior_ledger()
     duplicate["entries"].append(dict(duplicate["entries"][0]))
@@ -104,6 +109,15 @@ def test_prior_ledger_is_canonical_unique_and_result_blind() -> None:
     result_selected["exact_outcomes_used_for_selection"] = True
     with pytest.raises(ValueError, match="selected using exact outcomes"):
         v24.validate_prior_ledger(result_selected)
+
+    missing_history = prior_ledger()
+    missing_history["entries"] = [
+        entry
+        for entry in missing_history["entries"]
+        if entry["canonical_speaker_id"] != "TAU:SD05"
+    ]
+    with pytest.raises(ValueError, match="omits frozen Shimmer history"):
+        v24.validate_prior_ledger(missing_history)
 
 
 def write_svd_audio(path: Path, seconds: float) -> None:
@@ -194,7 +208,7 @@ def test_ledger_extension_registers_external_speakers_before_exact(
     updated = v24.extend_prior_ledger(prior_ledger(), cases, "c" * 40)
     speakers = v24.validate_prior_ledger(updated)
 
-    assert len(speakers) == 8
+    assert len(speakers) == len(v24.REQUIRED_PRIOR_TAU_SPEAKERS) + 7
     assert updated["added_speaker_count"] == 6
     additions = [
         entry
@@ -221,3 +235,14 @@ def test_prepare_stage_has_no_exact_scoring_or_training_path() -> None:
     assert '"joint_panel_authorized": False' in source
     assert '"generator_optimizer_steps": 0' in source
     assert '"emitted_waveform_highpass": False' in source
+
+
+def test_checked_in_prior_ledger_covers_frozen_shimmer_history() -> None:
+    path = (
+        Path(v24.__file__).resolve().parents[1]
+        / "configs"
+        / "avqi_route_c_shimmer_db_prior_speaker_ledger_v24.json"
+    )
+    ledger = v24.read_json(path)
+
+    assert v24.validate_prior_ledger(ledger) == v24.REQUIRED_PRIOR_TAU_SPEAKERS

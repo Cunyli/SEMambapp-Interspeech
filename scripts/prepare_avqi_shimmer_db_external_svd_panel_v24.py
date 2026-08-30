@@ -43,6 +43,11 @@ from scripts.evaluate_avqi_shimmer_fresh_panel import (
     read_fixed_recipes,
     recipe_wds_row,
 )
+from scripts.evaluate_avqi_shimmer_db_candidate_c_fresh_panel import (
+    PANEL_ROWS as V14_PANEL_ROWS,
+    PREVIOUS_WAVEFORM_PILOT_SPEAKERS,
+    RUNTIME_V15_PANEL_ROWS,
+)
 from scripts.prepare_avqi_component_expanded_data import (
     WdsReader,
     crop_or_tile,
@@ -67,6 +72,14 @@ CONDITIONS = ("rir_only", "snr20", "snr10")
 EXPECTED_CASES = EXPECTED_SPEAKERS * len(VIEWS)
 SV_DURATION_MIN_SECONDS = 1.0
 CS_DURATION_MIN_SECONDS = 3.0
+REQUIRED_PRIOR_TAU_SPEAKER_IDS = frozenset(
+    set(PREVIOUS_WAVEFORM_PILOT_SPEAKERS)
+    | {str(row[0]) for row in V14_PANEL_ROWS}
+    | {str(row[0]) for row in RUNTIME_V15_PANEL_ROWS}
+)
+REQUIRED_PRIOR_TAU_SPEAKERS = frozenset(
+    f"TAU:{speaker_id}" for speaker_id in REQUIRED_PRIOR_TAU_SPEAKER_IDS
+)
 
 
 @dataclass(frozen=True)
@@ -272,6 +285,12 @@ def validate_prior_ledger(ledger: dict[str, Any]) -> set[str]:
         if canonical in speakers:
             raise ValueError(f"duplicate prior-ledger speaker: {canonical}")
         speakers.add(canonical)
+    missing_history = REQUIRED_PRIOR_TAU_SPEAKERS - speakers
+    if missing_history:
+        raise ValueError(
+            "prior-panel ledger omits frozen Shimmer history: "
+            f"{sorted(missing_history)}"
+        )
     return speakers
 
 
@@ -419,6 +438,7 @@ def select_svd_cases(
         "selected_sessions": sorted({case.session_id for case in cases}, key=int),
         "sex_counts": dict(Counter(case.sex for case in cases[::2])),
         "prior_panel_speaker_overlap": 0,
+        "required_prior_tau_speaker_count": len(REQUIRED_PRIOR_TAU_SPEAKERS),
     }
     return cases, selection
 

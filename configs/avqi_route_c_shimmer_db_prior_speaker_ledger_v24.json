@@ -1,0 +1,174 @@
+{
+  "entries": [
+    {
+      "canonical_speaker_id": "TAU:FD11",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "FD11"
+    },
+    {
+      "canonical_speaker_id": "TAU:FD20",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "FD20"
+    },
+    {
+      "canonical_speaker_id": "TAU:FD23",
+      "dataset": "TAU",
+      "panel_role": "opened24_v15",
+      "speaker_id": "FD23"
+    },
+    {
+      "canonical_speaker_id": "TAU:FD26",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "FD26"
+    },
+    {
+      "canonical_speaker_id": "TAU:FD09",
+      "dataset": "TAU",
+      "panel_role": "opened24_v15",
+      "speaker_id": "FD09"
+    },
+    {
+      "canonical_speaker_id": "TAU:PD04",
+      "dataset": "TAU",
+      "panel_role": "opened24_v15",
+      "speaker_id": "PD04"
+    },
+    {
+      "canonical_speaker_id": "TAU:PD08",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "PD08"
+    },
+    {
+      "canonical_speaker_id": "TAU:PD_37",
+      "dataset": "TAU",
+      "panel_role": "opened24_v15",
+      "speaker_id": "PD_37"
+    },
+    {
+      "canonical_speaker_id": "TAU:PD_51",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "PD_51"
+    },
+    {
+      "canonical_speaker_id": "TAU:SD05",
+      "dataset": "TAU",
+      "panel_role": "opened24_v14",
+      "speaker_id": "SD05"
+    },
+    {
+      "canonical_speaker_id": "TAU:SD17",
+      "dataset": "TAU",
+      "panel_role": "opened24_v14",
+      "speaker_id": "SD17"
+    },
+    {
+      "canonical_speaker_id": "TAU:SD20",
+      "dataset": "TAU",
+      "panel_role": "opened24_v14",
+      "speaker_id": "SD20"
+    },
+    {
+      "canonical_speaker_id": "TAU:SD23",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "SD23"
+    },
+    {
+      "canonical_speaker_id": "TAU:SD25",
+      "dataset": "TAU",
+      "panel_role": "opened24_v15",
+      "speaker_id": "SD25"
+    },
+    {
+      "canonical_speaker_id": "TAU:SD32",
+      "dataset": "TAU",
+      "panel_role": "opened24_v14",
+      "speaker_id": "SD32"
+    },
+    {
+      "canonical_speaker_id": "TAU:SD36",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "SD36"
+    },
+    {
+      "canonical_speaker_id": "TAU:SD37",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "SD37"
+    },
+    {
+      "canonical_speaker_id": "TAU:V55",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "V55"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH05",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "ÄHH05"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH10",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "ÄHH10"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH13",
+      "dataset": "TAU",
+      "panel_role": "opened24_v14",
+      "speaker_id": "ÄHH13"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH16",
+      "dataset": "TAU",
+      "panel_role": "opened24_v14",
+      "speaker_id": "ÄHH16"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH20",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "ÄHH20"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH22",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "ÄHH22"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH25",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "ÄHH25"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH28",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "ÄHH28"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH29",
+      "dataset": "TAU",
+      "panel_role": "prior_waveform_pilot",
+      "speaker_id": "ÄHH29"
+    },
+    {
+      "canonical_speaker_id": "TAU:ÄHH32",
+      "dataset": "TAU",
+      "panel_role": "opened24_v15",
+      "speaker_id": "ÄHH32"
+    }
+  ],
+  "exact_outcomes_used_for_selection": false,
+  "schema_version": "avqi-route-c-prior-panel-speaker-ledger-v1"
+}
