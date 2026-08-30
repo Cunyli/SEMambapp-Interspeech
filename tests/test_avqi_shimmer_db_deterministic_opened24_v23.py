@@ -204,6 +204,90 @@ def test_durable_selected_requires_three_hash_identical_unique_copies(
         v23.validate_durable_rows(drifted, case_ids)
 
 
+def test_panel_contract_allows_frozen_cross_view_condition_rotation(
+    tmp_path: Path,
+) -> None:
+    waveform = np.sin(np.arange(512, dtype=np.float32) / 19.0) * 0.05
+    paths = {}
+    for role in ("base", "target", "candidate"):
+        path = tmp_path / f"{role}.wav"
+        sf.write(path, waveform, v23.hybrid.SAMPLE_RATE, subtype="PCM_24")
+        paths[role] = path
+    rows = []
+    target_rows = []
+    result_rows = []
+    conditions = ("rir_only", "snr20", "snr10")
+    for speaker_index in range(6):
+        sample_group = (
+            "pathological_mild"
+            if speaker_index < 3
+            else "pathological_severe"
+        )
+        for view_index, view in enumerate(("cs", "sv")):
+            condition = conditions[(2 * speaker_index + view_index) % 3]
+            case_id = f"speaker-{speaker_index}__{view}__{condition}"
+            rows.append(
+                {
+                    "case_id": case_id,
+                    "speaker_id": f"speaker-{speaker_index}",
+                    "view": view,
+                    "condition": condition,
+                    "sample_group": sample_group,
+                    "base_path": str(paths["base"]),
+                    "base_sha256": v23.sha256_file(paths["base"]),
+                    "target_path": str(paths["target"]),
+                    "target_sha256": v23.sha256_file(paths["target"]),
+                }
+            )
+            target_rows.append(
+                {
+                    "case_id": case_id,
+                    "speaker_id": f"speaker-{speaker_index}",
+                    "view": view,
+                    "target_sha256": v23.sha256_file(paths["target"]),
+                    "exact_target_shimmer_db": 0.5,
+                }
+            )
+            result_rows.append(
+                {
+                    "case_id": case_id,
+                    "gradient_finite": "True",
+                    "gradient_l2_norm": "1.0",
+                    "fixed_alpha": "0.001",
+                    "optimized_component": "shimmer_db",
+                    "candidate_path": str(paths["candidate"]),
+                    "candidate_sha256": v23.sha256_file(paths["candidate"]),
+                }
+            )
+    panel = {
+        "schema_version": v23.PANEL_SCHEMAS["v14"],
+        "speaker_split_before_simulation": True,
+        "panel_status": "sealed_new_speaker_panel_before_exact_outcomes",
+        "rows": rows,
+    }
+    target = {
+        "schema_version": v23.TARGET_CONTRACT_SCHEMA,
+        "selection_or_tuning_use": False,
+        "base_exact_outcomes_present": False,
+        "candidate_exact_outcomes_present": False,
+        "clean_target_pulse_positions_exposed_to_output_branch": False,
+        "rows": target_rows,
+    }
+
+    validated, _, _ = v23.validate_panel_payloads(
+        "v14",
+        panel,
+        target,
+        result_rows,
+    )
+
+    assert len(validated) == 12
+    assert any(
+        first["condition"] != second["condition"]
+        for first, second in zip(validated[::2], validated[1::2])
+    )
+
+
 def test_exact_items_open_candidate_only_after_seal_and_hide_target_topology() -> None:
     panel_rows = [
         {

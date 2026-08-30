@@ -447,8 +447,6 @@ def validate_panel_payloads(
             raise ValueError(f"{label} speaker view pairing drift: {speaker}")
         if len({row["sample_group"] for row in selected}) != 1:
             raise ValueError(f"{label} speaker severity drift: {speaker}")
-        if len({row["condition"] for row in selected}) != 1:
-            raise ValueError(f"{label} speaker condition drift: {speaker}")
     for row in rows:
         for role in ("base", "target"):
             validate_waveform_hash(row, role)
