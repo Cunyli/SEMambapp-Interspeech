@@ -186,11 +186,12 @@ def test_calibration_selects_only_passing_nonzero_alpha_and_ties_smaller() -> No
 
 
 def test_runners_keep_exact_metric_branch_separate_from_emitted_audio() -> None:
-    prepare_source = Path(
-        "scripts/prepare_avqi_route_c_six_joint_waveforms.py"
+    project_root = Path(__file__).resolve().parents[1]
+    prepare_source = (
+        project_root / "scripts/prepare_avqi_route_c_six_joint_waveforms.py"
     ).read_text(encoding="utf-8")
-    exact_source = Path(
-        "scripts/evaluate_avqi_route_c_six_joint_exact_panel.py"
+    exact_source = (
+        project_root / "scripts/evaluate_avqi_route_c_six_joint_exact_panel.py"
     ).read_text(encoding="utf-8")
 
     assert '"emitted_waveform_highpass": False' in prepare_source
