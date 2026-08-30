@@ -476,8 +476,11 @@ def test_current_requirements_are_explicitly_no_go() -> None:
         "frozen_contract_actual_manifests_required"
     )
     assert matrix["joint waveform/exact gate thresholds"]["status"] == (
-        "frozen_contract_missing_evaluator_runner"
+        "frozen_contract_evaluator_runner_present"
     )
+    assert matrix["two-stage sealed joint waveform evaluator/runner"][
+        "status"
+    ] == "present_fail_closed_hash_bound_runners"
     assert matrix[
         "GAP simulation source and recipe assignment contract"
     ]["status"] == (
@@ -491,6 +494,7 @@ def test_current_requirements_are_explicitly_no_go() -> None:
         "gap_v1_arni_rir_manifest",
         "gap_v1_dns5_noise_manifest",
         "joint_recipe_assignment_manifest",
+        "joint_gradient_manifest",
     } <= set(
         requirements["required_artifacts"]
     )

@@ -264,14 +264,12 @@ REQUIRED_ARTIFACT_KEYS = (
     "simulation_source",
     "exact_avqi_code_tree_manifest",
     "exact_runtime_manifest",
+    "joint_gradient_manifest",
 )
 SIX_GRADIENT_SOURCE_EVIDENCE_KEYS = (
     *READINESS_SOURCE_EVIDENCE_KEYS,
 )
-MISSING_CODE_STAGES = (
-    "joint waveform preparation and immutable sealing runner",
-    "post-seal exact-Praat six-component evaluator/decision runner",
-)
+MISSING_CODE_STAGES: tuple[str, ...] = ()
 UNFROZEN_SCIENTIFIC_CONTRACTS: tuple[str, ...] = ()
 UNBOUND_EXECUTION_INPUTS = (
     "reviewed Shimmer dB fresh-promotion evidence",
@@ -282,6 +280,10 @@ UNBOUND_EXECUTION_INPUTS = (
     "fresh SVD speaker source manifest",
     "fresh panel split seal",
     "same-speaker same-view clean pathological six-component target bank",
+    (
+        "96-row hash-bound joint-gradient manifest with current-output "
+        "Shimmer dB topology"
+    ),
 )
 FROZEN_PANEL_DATA_REQUIREMENTS = (
     "source dataset is SVD with frozen SV/CS metadata hashes",
@@ -301,6 +303,10 @@ FROZEN_PANEL_DATA_REQUIREMENTS = (
     "speaker splitting precedes salted unique recipe assignment",
     "source manifest binds every selected case and waveform hash",
     "target bank covers every patient case and all six exact columns",
+    (
+        "joint-gradient manifest exactly covers all rows and carries no "
+        "candidate exact outcomes"
+    ),
     "selected speakers do not overlap the prior-panel ledger",
 )
 SOURCE_REQUIREMENT_MATRIX = (
@@ -331,8 +337,11 @@ SOURCE_REQUIREMENT_MATRIX = (
     },
     {
         "requirement": "two-stage sealed joint waveform evaluator/runner",
-        "current_evidence": None,
-        "status": "missing",
+        "current_evidence": (
+            "scripts.prepare_avqi_route_c_six_joint_waveforms + "
+            "scripts.evaluate_avqi_route_c_six_joint_exact_panel"
+        ),
+        "status": "present_fail_closed_hash_bound_runners",
     },
     {
         "requirement": "five promoted-component scientific evidence bundle",
@@ -361,9 +370,9 @@ SOURCE_REQUIREMENT_MATRIX = (
         "requirement": "joint waveform/exact gate thresholds",
         "current_evidence": (
             "frozen result-independent six-component exact, slice, safety, "
-            "pathology, and denoising gates"
+            "pathology, and denoising gates with tested post-seal evaluator"
         ),
-        "status": "frozen_contract_missing_evaluator_runner",
+        "status": "frozen_contract_evaluator_runner_present",
     },
 )
 
@@ -1302,7 +1311,7 @@ def validate_readiness_manifest(
     *,
     registry_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Validate evidence, then remain NO-GO until missing runners exist."""
+    """Validate fail-closed headers before any execution authorization."""
     if manifest.get("schema_version") != READINESS_SCHEMA_VERSION:
         raise ValueError("six-joint readiness schema differs")
     if (
@@ -1342,7 +1351,7 @@ def validate_readiness_manifest(
         )
     raise ValueError(
         "six-joint execution remains closed: actual manifests, evidence, "
-        "speaker selection, target bank, and evaluator runners remain unbound"
+        "speaker selection, target bank, and joint gradients remain unbound"
     )
 
 
@@ -1408,7 +1417,7 @@ def main() -> None:
     if manifest.get("source_commit") != source["head"]:
         raise ValueError("six-joint manifest/source commit binding differs")
     validate_readiness_manifest(manifest)
-    raise ValueError("six-joint executable runner remains unavailable")
+    raise ValueError("six-joint preflight returned without authorization")
 
 
 if __name__ == "__main__":
