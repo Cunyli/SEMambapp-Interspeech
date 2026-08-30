@@ -33,6 +33,7 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     NORMALIZATION_TARGET_SCALE_FIELD,
     PANEL_ROW_FIELDS,
     PATHOLOGICAL_ROLE,
+    PRIOR_PANEL_LEDGER_SCHEMA,
     READINESS_SCHEMA_VERSION,
     READINESS_PASS_DECISION,
     READINESS_RECEIPT_SCHEMA_VERSION,
@@ -46,6 +47,7 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     SHIMMER_DB_PROMOTION_RECEIPT_SCHEMA,
     SHIMMER_DB_PROMOTION_REPORT_SCHEMA,
     SHIMMER_DB_READINESS_PASS,
+    SHIMMER_DB_LEDGER_SOURCE_KEY,
     SIX_GRADIENT_FROZEN_GATE_KEYS,
     SIX_GRADIENT_RECEIPT_SCHEMA_VERSION,
     SIX_GRADIENT_SCHEMA_VERSION,
@@ -62,6 +64,7 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     _validate_six_gradient,
     _validate_split_seal,
     _validate_shimmer_db_promotion,
+    _validate_prior_panel_ledger_merge,
     current_blockers,
     frozen_svd_speaker_rank,
     readiness_requirements,
@@ -933,13 +936,13 @@ def test_shimmer_v26_promotion_binds_external_exact_and_old_v18() -> None:
         receipt,
         report_sha256="a" * 64,
         receipt_sha256="f" * 64,
-        prior_ledger_sha256="e" * 64,
+        shimmer_ledger_sha256="e" * 64,
     )
 
     assert hashes == {
         "report": "a" * 64,
         "receipt": "f" * 64,
-        "prior_panel_speaker_ledger": "e" * 64,
+        "shimmer_db_prior_panel_speaker_ledger": "e" * 64,
     }
 
     collapsed = dict(report)
@@ -950,7 +953,61 @@ def test_shimmer_v26_promotion_binds_external_exact_and_old_v18() -> None:
             receipt,
             report_sha256="a" * 64,
             receipt_sha256="f" * 64,
-            prior_ledger_sha256="e" * 64,
+            shimmer_ledger_sha256="e" * 64,
+        )
+
+
+def test_six_joint_ledger_is_a_hash_bound_superset_of_shimmer_history() -> None:
+    shimmer_entries = [
+        {
+            "dataset": "SVD",
+            "speaker_id": "100",
+            "canonical_speaker_id": "SVD:100",
+            "panel_role": "shimmer_db_external_svd_v24",
+            "exact_shimmer_outcomes_opened_at_ledger_update": False,
+        },
+        {
+            "dataset": "TAU",
+            "speaker_id": "SD05",
+            "canonical_speaker_id": "TAU:SD05",
+            "panel_role": "opened24_v14",
+        },
+    ]
+    shimmer = {
+        "schema_version": PRIOR_PANEL_LEDGER_SCHEMA,
+        "exact_outcomes_used_for_selection": False,
+        "entries": shimmer_entries,
+    }
+    merged = {
+        "schema_version": PRIOR_PANEL_LEDGER_SCHEMA,
+        "exact_outcomes_used_for_selection": False,
+        "source_ledger_sha256": {
+            SHIMMER_DB_LEDGER_SOURCE_KEY: "a" * 64,
+            "other_components": "b" * 64,
+        },
+        "entries": [
+            *shimmer_entries,
+            {
+                "dataset": "SVD",
+                "speaker_id": "200",
+                "canonical_speaker_id": "SVD:200",
+                "panel_role": "prior_ltas_panel",
+            },
+        ],
+    }
+    assert _validate_prior_panel_ledger_merge(
+        merged,
+        shimmer,
+        shimmer_ledger_sha256="a" * 64,
+    ) == {"shimmer_speaker_count": 2, "merged_speaker_count": 3}
+
+    omitted = dict(merged)
+    omitted["entries"] = merged["entries"][1:]
+    with pytest.raises(ValueError, match="omits Shimmer speakers"):
+        _validate_prior_panel_ledger_merge(
+            omitted,
+            shimmer,
+            shimmer_ledger_sha256="a" * 64,
         )
 
 

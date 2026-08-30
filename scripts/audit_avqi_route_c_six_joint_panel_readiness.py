@@ -82,6 +82,8 @@ SHIMMER_DB_PROMOTION_PASS_DECISION = (
 SHIMMER_DB_READINESS_PASS = (
     "READY_SHIMMER_DB_FOR_SIX_COMPONENT_JOINT_READINESS"
 )
+PRIOR_PANEL_LEDGER_SCHEMA = "avqi-route-c-prior-panel-speaker-ledger-v1"
+SHIMMER_DB_LEDGER_SOURCE_KEY = "shimmer_db_external_svd_v24"
 SOURCE_DATASET = "SVD"
 SVD_SV_METADATA_SHA256 = (
     "36d8a725a209578744a862e63b5990d348e3d17d066a0247cdcd2e657c7ffc03"
@@ -249,6 +251,7 @@ REQUIRED_ARTIFACT_KEYS = (
     "five_gradient_receipt",
     "shimmer_db_promotion_report",
     "shimmer_db_promotion_receipt",
+    "shimmer_db_prior_panel_speaker_ledger",
     "six_gradient_raw_report",
     "six_gradient_raw_receipt",
     "six_gradient_report",
@@ -850,7 +853,7 @@ def _validate_shimmer_db_promotion(
     *,
     report_sha256: str,
     receipt_sha256: str,
-    prior_ledger_sha256: str,
+    shimmer_ledger_sha256: str,
 ) -> dict[str, str]:
     """Validate the external exact-Praat Shimmer promotion boundary."""
     if report.get("schema_version") != SHIMMER_DB_PROMOTION_REPORT_SCHEMA:
@@ -936,16 +939,78 @@ def _validate_shimmer_db_promotion(
     if (
         not isinstance(evidence, dict)
         or evidence.get("updated_speaker_ledger_sha256")
-        != prior_ledger_sha256
+        != shimmer_ledger_sha256
         or not isinstance(source_sha256, dict)
         or source_sha256.get("updated_speaker_ledger")
-        != prior_ledger_sha256
+        != shimmer_ledger_sha256
     ):
         raise ValueError("Shimmer dB promotion speaker-ledger binding differs")
     return {
         "report": report_sha256,
         "receipt": receipt_sha256,
-        "prior_panel_speaker_ledger": prior_ledger_sha256,
+        "shimmer_db_prior_panel_speaker_ledger": shimmer_ledger_sha256,
+    }
+
+
+def _ledger_entries(
+    ledger: Mapping[str, Any],
+    label: str,
+) -> dict[str, Mapping[str, Any]]:
+    if ledger.get("schema_version") != PRIOR_PANEL_LEDGER_SCHEMA:
+        raise ValueError(f"{label} schema differs")
+    if ledger.get("exact_outcomes_used_for_selection") is not False:
+        raise ValueError(f"{label} was selected using exact outcomes")
+    entries = ledger.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(f"{label} entries are unavailable")
+    indexed: dict[str, Mapping[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError(f"{label} entry is not a mapping")
+        dataset = str(entry.get("dataset", "")).strip().upper()
+        speaker_id = str(entry.get("speaker_id", "")).strip()
+        canonical = str(entry.get("canonical_speaker_id", ""))
+        if (
+            not dataset
+            or not speaker_id
+            or canonical != f"{dataset}:{speaker_id}"
+            or canonical in indexed
+        ):
+            raise ValueError(f"{label} canonical speaker identity differs")
+        indexed[canonical] = entry
+    return indexed
+
+
+def _validate_prior_panel_ledger_merge(
+    merged_ledger: Mapping[str, Any],
+    shimmer_ledger: Mapping[str, Any],
+    *,
+    shimmer_ledger_sha256: str,
+) -> dict[str, int]:
+    """Require the six-joint ledger to preserve the full Shimmer ledger."""
+    shimmer_entries = _ledger_entries(shimmer_ledger, "Shimmer dB prior ledger")
+    merged_entries = _ledger_entries(merged_ledger, "six-joint prior ledger")
+    source_hashes = merged_ledger.get("source_ledger_sha256")
+    if (
+        not isinstance(source_hashes, dict)
+        or source_hashes.get(SHIMMER_DB_LEDGER_SOURCE_KEY)
+        != shimmer_ledger_sha256
+    ):
+        raise ValueError("six-joint prior ledger does not bind the Shimmer ledger")
+    if not set(shimmer_entries).issubset(merged_entries):
+        raise ValueError("six-joint prior ledger omits Shimmer speakers")
+    for speaker, shimmer_entry in shimmer_entries.items():
+        merged_entry = merged_entries[speaker]
+        if any(
+            merged_entry.get(key) != value
+            for key, value in shimmer_entry.items()
+        ):
+            raise ValueError(
+                f"six-joint prior ledger rewrites Shimmer history: {speaker}"
+            )
+    return {
+        "shimmer_speaker_count": len(shimmer_entries),
+        "merged_speaker_count": len(merged_entries),
     }
 
 
