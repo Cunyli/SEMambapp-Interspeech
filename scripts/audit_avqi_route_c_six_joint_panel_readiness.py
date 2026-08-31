@@ -82,6 +82,41 @@ SHIMMER_DB_PROMOTION_PASS_DECISION = (
 SHIMMER_DB_READINESS_PASS = (
     "READY_SHIMMER_DB_FOR_SIX_COMPONENT_JOINT_READINESS"
 )
+SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_SCHEMA = (
+    "avqi-route-c-shimmer-db-component-no-go-closure-v23"
+)
+SHIMMER_DB_COMPONENT_NO_GO_DECISION = (
+    "COMPONENT_LEVEL_NO_GO_SHIMMER_DB_CANDIDATE_D_V23"
+)
+SHIMMER_DB_COMPONENT_NO_GO_STATUS = "component_level_no_go_candidate_d_v23"
+SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "configs"
+    / "avqi_route_c_shimmer_db_component_no_go_v23.json"
+)
+SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_SHA256 = (
+    "56a314b65b7a1272f34ad300253ed86e5618c33d5bd9c958b4515d4e12719492"
+)
+SHIMMER_DB_V23_REPORT_SCHEMA = (
+    "avqi-route-c-shimmer-db-opened24-exact-adjudication-v23"
+)
+SHIMMER_DB_V23_RECEIPT_SCHEMA = (
+    "avqi-route-c-shimmer-db-opened24-exact-adjudication-receipt-v23"
+)
+SHIMMER_DB_V23_NO_GO_DECISION = (
+    "NO_GO_SHIMMER_DB_OPENED24_EXACT_ADJUDICATION_V23"
+)
+SHIMMER_DB_V23_JOB_ID = "20006447"
+SHIMMER_DB_V23_SOURCE_COMMIT = "a23a3684e6c6d4a7dd667c71ddc7343dd683875f"
+SHIMMER_DB_V23_REPORT_SHA256 = (
+    "b38392d7ce47d982bc6e69e7b5a6289f1c163d70e27f832b43e050ed80a657e4"
+)
+SHIMMER_DB_V23_RECEIPT_SHA256 = (
+    "1436769f7d7e406cdf39d5c98d90d1532991602cdc906591873db71daaeebd59"
+)
+SHIMMER_DB_V23_EXACT_CSV_SHA256 = (
+    "0d20f918f089d34594690e62fb8c0c25ba801e73956c9e1954a632c77bee53bb"
+)
 PRIOR_PANEL_LEDGER_SCHEMA = "avqi-route-c-prior-panel-speaker-ledger-v1"
 SHIMMER_DB_LEDGER_SOURCE_KEY = "shimmer_db_external_svd_v24"
 SOURCE_DATASET = "SVD"
@@ -370,6 +405,14 @@ SOURCE_REQUIREMENT_MATRIX = (
         "status": "external_immutable_bindings_required",
     },
     {
+        "requirement": "Shimmer dB Candidate-D scientific outcome",
+        "current_evidence": (
+            "configs/avqi_route_c_shimmer_db_component_no_go_v23.json "
+            "binding v22 deterministic and v23 exact-Praat artifacts"
+        ),
+        "status": "component_level_no_go_v23_joint_closed",
+    },
+    {
         "requirement": "fresh-panel source/split/target schemas",
         "current_evidence": (
             "frozen salted SVD 12-speaker/96-row contract and structural "
@@ -411,6 +454,329 @@ def _is_sha256(value: Any) -> bool:
         and value != "0" * 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _require_mapping_values(
+    value: Any,
+    expected: Mapping[str, Any],
+    label: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, dict) or any(
+        value.get(key) != expected_value
+        for key, expected_value in expected.items()
+    ):
+        raise ValueError(f"{label} differs")
+    return value
+
+
+def _validate_shimmer_db_component_no_go_closure(
+    closure: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the immutable Candidate-D terminal scientific boundary."""
+    _require_mapping_values(
+        closure,
+        {
+            "schema_version": SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_SCHEMA,
+            "decision": SHIMMER_DB_COMPONENT_NO_GO_DECISION,
+            "component": "shimmer_db",
+            "route": "C",
+        },
+        "Shimmer dB component NO-GO closure identity",
+    )
+    if not isinstance(closure.get("recorded_at"), str) or not closure[
+        "recorded_at"
+    ]:
+        raise ValueError("Shimmer dB component NO-GO closure time differs")
+
+    _require_mapping_values(
+        closure.get("scope"),
+        {
+            "candidate": "Candidate-D",
+            "candidate_reference": (
+                "v22_repeat_1_byte_identical_across_three_repeats"
+            ),
+            "candidate_d_mathematics_changed": False,
+            "alpha_changed": False,
+            "selector_changed": False,
+            "thresholds_changed": False,
+            "pcm24_gate_changed": False,
+            "fixed_alpha": 0.001,
+            "future_pre_registered_candidate_contracts_adjudicated": False,
+        },
+        "Shimmer dB component NO-GO frozen scope",
+    )
+    _require_mapping_values(
+        closure.get("v21_receipt_fix"),
+        {
+            "schema_version": (
+                "avqi-route-c-shimmer-db-v21-receipt-field-fix-audit-v1"
+            ),
+            "audit_receipt_sha256": (
+                "3e12214a57aa2ac9b634f546731118138fa87c13979899c994a17cde53b32ab3"
+            ),
+            "source_commit": "21e871a4a4f8f023b8b7cab8d88ea79a6c307fef",
+            "wrapper_post_patch_sha256": (
+                "80393bc55105e1bdb1632e7f43f98b66e9bb431cc5498c437d6b26adf3a923d6"
+            ),
+            "launcher_post_patch_sha256": (
+                "39fb9e3aae50cfae494a47001d0883c8ebb87acdada905beed275a0d58736c74"
+            ),
+            "regression_test_sha256": (
+                "19569304704bc032e4b91fe1bb23a0fabcf3a2fbb44f849cc007bad2982bcd85"
+            ),
+            "summary_source_field": (
+                "output_wav_pcm24_byte_repeat_observed"
+            ),
+            "legacy_wrong_field_rejected": "byte_equivalence_observed",
+            "live_pytest_tests_passed": 3,
+            "live_pytest_subtests_passed": 2,
+            "real_v21_report_summary_smoke_passed": True,
+            "posthoc_audit_receipt_sufficient": True,
+            "clean_bounded_rerun_scientifically_required": False,
+            "scientific_gates_changed": False,
+            "immutable_v21_artifacts_mutated": False,
+            "old_v18_evidence_kept_separate": True,
+            "generator_optimizer_steps": 0,
+            "authoritative_training_decision": TRAINING_NO_GO,
+        },
+        "Shimmer dB v21 receipt fix closure",
+    )
+    deterministic = _require_mapping_values(
+        closure.get("deterministic_contract"),
+        {
+            "capture_job_id": "19997287",
+            "capture_decision": (
+                "CAPTURED_SHIMMER_DB_DETERMINISTIC_FULL_STEP_BASELINE_"
+                "NO_PROMOTION"
+            ),
+            "capture_manifest_sha256": (
+                "57a284084621f6b57d3f35ef1834eafd4ef67c82bf210542f723d68d4f29310d"
+            ),
+            "capture_report_sha256": (
+                "85444856b69972ce1bdad09c855352dc17dece4e38883335b336e3d8c754b99d"
+            ),
+            "capture_receipt_sha256": (
+                "04f5da2f212998ef994fa62f4464ed9009bd65231ea42bbbaafdaea87d5502d2"
+            ),
+            "repeat_job_id": "20005708",
+            "repeat_decision": (
+                "PASS_SHIMMER_DB_DETERMINISTIC_FULL_STEP_REPEAT_V22"
+            ),
+            "repeat_report_sha256": (
+                "ea6415eaa3b554a01a234eaf1ec4fe163f8735c182459970313bef2a7bbc0842"
+            ),
+            "repeat_receipt_sha256": (
+                "075df8f5a24f6453429dd8ad70c2b49a0ce9900f06f7bb4ec3622e385062c160"
+            ),
+            "durable_selected_csv_sha256": (
+                "af0561535f841348397ac82e0675d8fe9475c4a3c0b259874636890a39fad5e6"
+            ),
+            "durable_wav_count": 72,
+            "durable_wav_byte_equal_count": 72,
+            "attempt_row_count": 108,
+            "runtime_row_count": 72,
+            "old_v18_evidence_kept_separate": True,
+            "old_v18_attempt_count": 36,
+            "old_v18_mismatch_attempt_count": 22,
+            "old_v18_full_equivalence_count": 14,
+            "old_v18_gate_used_for_new_authorization": False,
+        },
+        "Shimmer dB deterministic closure",
+    )
+    for key, value in deterministic.items():
+        if key.endswith("_sha256") and not _is_sha256(value):
+            raise ValueError("Shimmer dB deterministic closure hash differs")
+
+    exact = _require_mapping_values(
+        closure.get("exact_adjudication"),
+        {
+            "schema_version": SHIMMER_DB_V23_REPORT_SCHEMA,
+            "receipt_schema_version": SHIMMER_DB_V23_RECEIPT_SCHEMA,
+            "slurm_job_id": SHIMMER_DB_V23_JOB_ID,
+            "slurm_state": "COMPLETED",
+            "slurm_exit_code": "0:0",
+            "slurm_elapsed": "00:01:58",
+            "slurm_node": "skl6",
+            "decision": SHIMMER_DB_V23_NO_GO_DECISION,
+            "case_count": 24,
+            "speaker_count": 12,
+            "parselmouth_version": "0.4.6",
+            "praat_version": "6.1.38",
+            "exact_scoring_complete": True,
+            "opened_development_evidence_only": True,
+            "target_reproduction_max_abs_error": 0.0,
+            "candidate_metric_reconstruction_max_pcm16_error": 0,
+            "full_band_pathology_guardrails_passed": True,
+            "waveform_safety_passed": True,
+            "denoising_nonregression_passed": True,
+            "anti_shortcut_contract_passed": True,
+        },
+        "Shimmer dB exact adjudication closure",
+    )
+    expected_top_level_gates = {
+        "anti_shortcut_contract": True,
+        "combined_global_exact_effect": True,
+        "old_v18_evidence_kept_separate": True,
+        "opened24_contract_complete_and_speaker_disjoint": True,
+        "v14_frozen_scientific_gates": False,
+        "v15_frozen_scientific_gates": True,
+        "v22_deterministic_chain_bound_and_passed": True,
+    }
+    if exact.get("top_level_gates") != expected_top_level_gates:
+        raise ValueError("Shimmer dB v23 top-level gates differ")
+    v14 = _require_mapping_values(
+        exact.get("v14"),
+        {
+            "role": "development_calibration",
+            "case_count": 12,
+            "speaker_count": 6,
+            "material_rows": 11,
+            "exact_db_improvement_fraction": 0.9090909090909091,
+            "median_exact_db_normalized_gap_reduction": (
+                0.01911191379993479
+            ),
+            "median_threshold": 0.02,
+            "median_margin": -0.0008880862000652107,
+            "all_gates_pass": False,
+            "only_failed_gate": "exact_db_effect",
+        },
+        "Shimmer dB v14 exact failure boundary",
+    )
+    if not float(v14["median_exact_db_normalized_gap_reduction"]) < float(
+        v14["median_threshold"]
+    ):
+        raise ValueError("Shimmer dB v14 NO-GO margin is not negative")
+    _require_mapping_values(
+        exact.get("v15"),
+        {
+            "role": "opened_validation",
+            "case_count": 12,
+            "speaker_count": 6,
+            "material_rows": 12,
+            "exact_db_improvement_fraction": 1.0,
+            "median_exact_db_normalized_gap_reduction": (
+                0.021922072292837234
+            ),
+            "median_threshold": 0.02,
+            "median_margin": 0.001922072292837234,
+            "all_gates_pass": True,
+        },
+        "Shimmer dB v15 exact boundary",
+    )
+    _require_mapping_values(
+        exact.get("failed_material_case"),
+        {
+            "case_id": "sealed_final__SD20__cs__snr20",
+            "opened_panel": "v14",
+            "exact_absolute_gap_before_shimmer_db": 0.15829437779222322,
+            "exact_absolute_gap_after_shimmer_db": 0.16602488503782875,
+            "exact_normalized_gap_reduction_shimmer_db": (
+                -0.01748682752871204
+            ),
+        },
+        "Shimmer dB v23 failed material case",
+    )
+
+    _require_mapping_values(
+        closure.get("source"),
+        {
+            "branch": "feat/avqi-route-c-shimmer-db-exact-promotion-v23",
+            "commit": SHIMMER_DB_V23_SOURCE_COMMIT,
+            "tree_clean_at_terminal_audit": True,
+            "evaluator_sha256": (
+                "9772f6d2d29767897d2caef3fc380038aad6a31e58bbd6146d64ef07c86ee554"
+            ),
+            "launcher_sha256": (
+                "cd7b6ac4dcdd58a65ac3ddaad6e3316ce16aeaf99c38bbe582b299ea6e50072c"
+            ),
+            "submission_receipt_sha256": (
+                "e0b9584d09b3e169d6affb528167e4a1c5e1b40e3e888baa43df5d87789428b0"
+            ),
+            "predictor_checkpoint_sha256": (
+                "40b819946abdcb8a4b643fe4238d1bb4d31168a3eb2a6d6c786a61752da629bc"
+            ),
+            "avqi_code_tree_sha256": (
+                "46987b3c447cb579aab4d34e87655938e4aa64e1b28c0e2348c4ea3e48f107f2"
+            ),
+        },
+        "Shimmer dB v23 source closure",
+    )
+    artifacts = _require_mapping_values(
+        closure.get("artifact_sha256"),
+        {
+            "diagnostic_report.json": SHIMMER_DB_V23_REPORT_SHA256,
+            "completion_receipt.json": SHIMMER_DB_V23_RECEIPT_SHA256,
+            "opened24_exact_results.csv": SHIMMER_DB_V23_EXACT_CSV_SHA256,
+            "slurm_stdout": (
+                "14603d1b363c4afe31e6df0eb4bca5320e35294bb3ea61debd1a6ca7b415fac7"
+            ),
+            "slurm_stderr": (
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            ),
+        },
+        "Shimmer dB v23 artifact closure",
+    )
+    if any(not _is_sha256(value) for value in artifacts.values()):
+        raise ValueError("Shimmer dB v23 artifact hash differs")
+    _require_mapping_values(
+        closure.get("authorization"),
+        {
+            "scientific_promotion_granted": False,
+            "external_speaker_panel_authorized": False,
+            "v24_prepare_authorized": False,
+            "v25_target_seal_authorized": False,
+            "v26_external_exact_authorized": False,
+            "six_component_readiness_eligible": False,
+            "joint_panel_authorized": False,
+            "generator_loaded": False,
+            "generator_optimizer_created": False,
+            "generator_optimizer_steps": 0,
+            "formal_generator_training_submitted": False,
+            "authoritative_training_decision": TRAINING_NO_GO,
+            "component_research_closed_for_frozen_candidate_d_contract": True,
+        },
+        "Shimmer dB v23 authorization boundary",
+    )
+    _require_mapping_values(
+        closure.get("immutability"),
+        {
+            "raw_artifacts_rewritten": False,
+            "old_v18_evidence_rewritten": False,
+            "closure_is_post_hoc_summary_only": True,
+        },
+        "Shimmer dB v23 immutability boundary",
+    )
+    return {
+        "scientific_status": SHIMMER_DB_COMPONENT_NO_GO_STATUS,
+        "decision": SHIMMER_DB_COMPONENT_NO_GO_DECISION,
+        "v23_job_id": SHIMMER_DB_V23_JOB_ID,
+        "v23_report_sha256": SHIMMER_DB_V23_REPORT_SHA256,
+        "v23_receipt_sha256": SHIMMER_DB_V23_RECEIPT_SHA256,
+        "v23_exact_csv_sha256": SHIMMER_DB_V23_EXACT_CSV_SHA256,
+        "failed_gate": "v14.exact_db_effect",
+        "v14_median_margin": v14["median_margin"],
+        "old_v18_evidence_kept_separate": True,
+        "six_component_readiness_eligible": False,
+        "joint_panel_authorized": False,
+        "generator_optimizer_steps": 0,
+        "authoritative_training_decision": TRAINING_NO_GO,
+    }
+
+
+def load_shimmer_db_component_no_go_closure() -> dict[str, Any]:
+    closure_sha256 = sha256_file(SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_PATH)
+    if closure_sha256 != SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_SHA256:
+        raise ValueError("Shimmer dB component NO-GO closure hash differs")
+    closure = _read_json_mapping(
+        SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_PATH,
+        "Shimmer dB component NO-GO closure",
+    )
+    validated = _validate_shimmer_db_component_no_go_closure(closure)
+    return {
+        **validated,
+        "path": str(SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_PATH),
+        "sha256": closure_sha256,
+    }
 
 
 def frozen_svd_speaker_rank(speaker_id: str, session_id: str) -> str:
@@ -785,6 +1151,7 @@ def readiness_requirements() -> dict[str, Any]:
     """Describe current blockers without reading any future panel artifact."""
     registry = route_c_six_registry_records()
     shimmer = next(row for row in registry if row["name"] == "shimmer_db")
+    component_no_go = load_shimmer_db_component_no_go_closure()
     return {
         "schema_version": READINESS_SCHEMA_VERSION,
         "decision": "NO_GO_SIX_JOINT_PANEL_EXECUTION",
@@ -797,8 +1164,12 @@ def readiness_requirements() -> dict[str, Any]:
         "required_guardrails": list(REQUIRED_GUARDRAILS),
         "scientific_contract_frozen": True,
         "frozen_scientific_contract": frozen_scientific_contract(),
-        "current_shimmer_db_scientific_status": shimmer["scientific_status"],
+        "current_shimmer_db_scientific_status": component_no_go[
+            "scientific_status"
+        ],
+        "registry_shimmer_db_scientific_status": shimmer["scientific_status"],
         "required_shimmer_db_scientific_status": SHIMMER_DB_REQUIRED_STATUS,
+        "shimmer_db_component_no_go_evidence": component_no_go,
         "missing_code_stages": list(MISSING_CODE_STAGES),
         "unfrozen_scientific_contracts": list(UNFROZEN_SCIENTIFIC_CONTRACTS),
         "unbound_execution_inputs": list(UNBOUND_EXECUTION_INPUTS),
@@ -823,6 +1194,16 @@ def current_blockers() -> list[str]:
         for value in requirements["unbound_execution_inputs"]
     )
     if requirements["current_shimmer_db_scientific_status"] == (
+        SHIMMER_DB_COMPONENT_NO_GO_STATUS
+    ):
+        blockers.insert(
+            0,
+            (
+                "Shimmer dB Candidate-D component-level NO-GO is bound to "
+                "v23 exact-Praat evidence; six-joint panel remains closed"
+            ),
+        )
+    elif requirements["registry_shimmer_db_scientific_status"] == (
         ROUTE_C_SIX_SCIENTIFIC_STATUS
     ):
         blockers.insert(0, "Shimmer dB scientific promotion remains pending")
@@ -1569,6 +1950,15 @@ def validate_readiness_manifest(
     ):
         raise ValueError("six-joint source commit binding differs")
     _require_optimizer_zero(manifest, "six-joint readiness manifest")
+
+    component_no_go = load_shimmer_db_component_no_go_closure()
+    if component_no_go["scientific_status"] == (
+        SHIMMER_DB_COMPONENT_NO_GO_STATUS
+    ):
+        raise ValueError(
+            "Shimmer dB Candidate-D component-level NO-GO is bound to v23 "
+            "exact-Praat evidence; joint panel closed"
+        )
 
     registry = (
         route_c_six_registry_records()

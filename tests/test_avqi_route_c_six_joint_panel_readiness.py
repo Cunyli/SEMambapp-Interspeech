@@ -42,6 +42,10 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     REQUIRED_EFFICACY_SLICES,
     REQUIRED_SPLITS,
     REQUIRED_VIEWS,
+    SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_PATH,
+    SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_SHA256,
+    SHIMMER_DB_COMPONENT_NO_GO_DECISION,
+    SHIMMER_DB_COMPONENT_NO_GO_STATUS,
     SHIMMER_DB_REQUIRED_STATUS,
     SHIMMER_DB_PROMOTION_PASS_DECISION,
     SHIMMER_DB_PROMOTION_RECEIPT_SCHEMA,
@@ -63,10 +67,12 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     _validate_panel_rows,
     _validate_six_gradient,
     _validate_split_seal,
+    _validate_shimmer_db_component_no_go_closure,
     _validate_shimmer_db_promotion,
     _validate_prior_panel_ledger_merge,
     current_blockers,
     frozen_svd_speaker_rank,
+    load_shimmer_db_component_no_go_closure,
     readiness_requirements,
     sha256_file,
     validate_readiness_authorization,
@@ -459,8 +465,17 @@ def test_current_requirements_are_explicitly_no_go() -> None:
     assert requirements["decision"] == "NO_GO_SIX_JOINT_PANEL_EXECUTION"
     assert requirements["execution_authorized"] is False
     assert requirements["current_shimmer_db_scientific_status"] == (
+        SHIMMER_DB_COMPONENT_NO_GO_STATUS
+    )
+    assert requirements["registry_shimmer_db_scientific_status"] == (
         ROUTE_C_SIX_SCIENTIFIC_STATUS
     )
+    component_no_go = requirements["shimmer_db_component_no_go_evidence"]
+    assert component_no_go["decision"] == SHIMMER_DB_COMPONENT_NO_GO_DECISION
+    assert component_no_go["v23_job_id"] == "20006447"
+    assert component_no_go["six_component_readiness_eligible"] is False
+    assert component_no_go["joint_panel_authorized"] is False
+    assert component_no_go["generator_optimizer_steps"] == 0
     assert requirements["required_conditions"] == list(REQUIRED_CONDITIONS)
     assert "clean" in requirements["required_conditions"]
     assert requirements["missing_code_stages"] == list(MISSING_CODE_STAGES)
@@ -489,6 +504,9 @@ def test_current_requirements_are_explicitly_no_go() -> None:
     assert matrix["joint waveform/exact gate thresholds"]["status"] == (
         "frozen_contract_evaluator_runner_present"
     )
+    assert matrix["Shimmer dB Candidate-D scientific outcome"]["status"] == (
+        "component_level_no_go_v23_joint_closed"
+    )
     assert matrix["two-stage sealed joint waveform evaluator/runner"][
         "status"
     ] == "present_fail_closed_hash_bound_runners"
@@ -511,7 +529,10 @@ def test_current_requirements_are_explicitly_no_go() -> None:
     )
     assert (
         current_blockers()[0]
-        == "Shimmer dB scientific promotion remains pending"
+        == (
+            "Shimmer dB Candidate-D component-level NO-GO is bound to v23 "
+            "exact-Praat evidence; six-joint panel remains closed"
+        )
     )
     assert not any(
         "schemas remain unfrozen" in blocker for blocker in current_blockers()
@@ -847,13 +868,13 @@ def test_existing_cpps_evidence_is_unbound_not_missing() -> None:
     )
 
 
-def test_pending_registry_closes_manifest_before_artifacts() -> None:
-    with pytest.raises(ValueError, match="scientific promotion is still pending"):
+def test_component_no_go_closes_manifest_before_artifacts() -> None:
+    with pytest.raises(ValueError, match="component-level NO-GO"):
         validate_readiness_manifest(_readiness_manifest())
 
 
-def test_promoted_registry_still_closes_unbound_execution_inputs() -> None:
-    with pytest.raises(ValueError, match="execution remains closed"):
+def test_forged_promoted_registry_cannot_bypass_component_no_go() -> None:
+    with pytest.raises(ValueError, match="component-level NO-GO"):
         validate_readiness_manifest(
             _readiness_manifest(),
             registry_records=_promoted_registry(),
@@ -865,6 +886,38 @@ def test_opened_exact_outcomes_fail_before_registry_or_artifacts() -> None:
         validate_readiness_manifest(
             _readiness_manifest(candidate_exact_outcomes_opened=True)
         )
+
+
+def test_shimmer_v23_component_no_go_closure_is_hash_bound_and_fail_closed() -> None:
+    closure = json.loads(
+        SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_PATH.read_text(encoding="utf-8")
+    )
+    validated = _validate_shimmer_db_component_no_go_closure(closure)
+    loaded = load_shimmer_db_component_no_go_closure()
+
+    assert validated["decision"] == SHIMMER_DB_COMPONENT_NO_GO_DECISION
+    assert validated["scientific_status"] == SHIMMER_DB_COMPONENT_NO_GO_STATUS
+    assert validated["failed_gate"] == "v14.exact_db_effect"
+    assert validated["v14_median_margin"] == -0.0008880862000652107
+    assert validated["old_v18_evidence_kept_separate"] is True
+    assert loaded["sha256"] == sha256_file(
+        SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_PATH
+    )
+    assert loaded["sha256"] == SHIMMER_DB_COMPONENT_NO_GO_CLOSURE_SHA256
+    assert loaded["authoritative_training_decision"] == TRAINING_NO_GO
+    assert loaded["generator_optimizer_steps"] == 0
+
+    tampered = json.loads(json.dumps(closure))
+    tampered["exact_adjudication"]["v14"][
+        "median_exact_db_normalized_gap_reduction"
+    ] = 0.02
+    with pytest.raises(ValueError, match="v14 exact failure boundary differs"):
+        _validate_shimmer_db_component_no_go_closure(tampered)
+
+    over_authorized = json.loads(json.dumps(closure))
+    over_authorized["authorization"]["v24_prepare_authorized"] = True
+    with pytest.raises(ValueError, match="authorization boundary differs"):
+        _validate_shimmer_db_component_no_go_closure(over_authorized)
 
 
 def _shimmer_v26_evidence() -> tuple[dict[str, object], dict[str, object]]:
@@ -1356,7 +1409,7 @@ def test_preflight_source_contains_no_panel_execution_path() -> None:
 
     for forbidden in (
         "sbatch",
-        "parselmouth",
+        "import parselmouth",
         "soundfile",
         "run_exact_batch",
         "torch.optim",
