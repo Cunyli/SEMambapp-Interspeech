@@ -48,7 +48,9 @@ class CandidateEProxyResult:
 def pcm16_ste(values: torch.Tensor) -> torch.Tensor:
     """Return exact PCM16 grid values with identity straight-through gradient."""
     bounded = values.clamp(-1.0, 1.0 - 1.0 / 32768.0)
-    quantized = torch.round(bounded * 32768.0) / 32768.0
+    # libsndfile's float-to-PCM16 conversion uses floor semantics for the
+    # noninteger code values exercised by the exact Praat WAV roundtrip.
+    quantized = torch.floor(bounded * 32768.0) / 32768.0
     return bounded + (quantized - bounded).detach()
 
 

@@ -1,0 +1,146 @@
+{
+  "schema_version": "avqi-route-c-shimmer-db-candidate-e-current-topology-selector-v27r2",
+  "scientific_role": "development_calibration_mechanism_diagnosis_only",
+  "predecessor": {
+    "decision": "NO_GO_CANDIDATE_E_EXACT_PATH_DIRECTIONAL_MECHANISM_V27",
+    "report_sha256": "0399a480a7397301c1cc4f264cc28cb6254aabd266bc52fce7974f5baa36f447",
+    "receipt_sha256": "98755f03592c1e0800f23ab2f287f2be72f30e2a6c480598562a718e068cb237",
+    "historical_artifacts_may_not_be_rewritten": true
+  },
+  "goal": "Correct exact-forward PCM16 semantics and select only after refreshing each candidate's own result-blind Praat pulse topology and recomputing the Candidate-E proxy.",
+  "candidate_e_hypothesis": "Use libsndfile floor-forward identity-backward PCM16 STE at input and metric-WAV output, exact official stop-Hann filtering, exact detached CS/SV mapping, exact fixed-pulse amplitude/log-ratio statistics, cycle-gain projection, then the unchanged descending backtrack ladder routed by the candidate-current-topology proxy and non-outcome certificates.",
+  "dataset_contract": {
+    "panel_role": "development_calibration",
+    "expected_case_count": 12,
+    "expected_speakers": [
+      "SD05",
+      "SD17",
+      "SD20",
+      "SD32",
+      "ÄHH13",
+      "ÄHH16"
+    ],
+    "expected_views": {
+      "cs": 6,
+      "sv": 6
+    },
+    "forbidden_speakers": [
+      "FD09",
+      "FD23",
+      "PD04",
+      "PD_37",
+      "SD25",
+      "ÄHH32"
+    ],
+    "opened_v15_access_authorized": false,
+    "external_panel_access_authorized": false,
+    "speaker_split_before_simulation_required": true
+  },
+  "frozen_directional_grid": {
+    "normalization": "waveform_rms_times_unit_gradient_rms",
+    "positive_alpha_semantics": "waveform_minus_alpha_times_normalized_projected_gradient",
+    "alphas": [
+      -0.001,
+      -0.0005,
+      -0.00025,
+      -0.000125,
+      -0.0000625,
+      0.0,
+      0.0000625,
+      0.000125,
+      0.00025,
+      0.0005,
+      0.001
+    ],
+    "primary_local_alpha": 0.000125,
+    "legacy_operating_alpha": 0.001,
+    "grid_identical_to_v27": true,
+    "grid_may_not_change_after_exact_scoring": true
+  },
+  "compared_directions": [
+    "candidate_d_frozen_predictor_exact_topology_cycle_projection",
+    "candidate_e_floor_exact_path_ste_cycle_projection"
+  ],
+  "diagnostic_ablation_directions": [
+    "candidate_d_frozen_predictor_raw_gradient",
+    "candidate_e_floor_exact_path_ste_raw_gradient"
+  ],
+  "ablation_alphas": [
+    -0.000125,
+    0.0,
+    0.000125
+  ],
+  "frozen_selector": {
+    "name": "largest_frozen_alpha_with_current_topology_proxy_strict_improvement",
+    "alpha_ladder": [
+      0.001,
+      0.0005,
+      0.00025,
+      0.000125
+    ],
+    "topology_refresh_per_candidate_required": true,
+    "proxy_recomputed_on_candidate_current_topology": true,
+    "strict_proxy_gap_improvement_required": true,
+    "finite_safety_required": true,
+    "pcm24_effective_step_required": true,
+    "topology_stability_required": true,
+    "paired_peak_certificate_required": true,
+    "seal_before_any_candidate_exact_scoring": true
+  },
+  "candidate_e_runtime_selector_inputs": [
+    "waveform",
+    "candidate_current_output_pulse_topology",
+    "candidate_e_proxy",
+    "topology_certificate",
+    "paired_peak_certificate",
+    "finite_gradient_certificate",
+    "pcm24_effective_step_certificate",
+    "waveform_safety_certificate"
+  ],
+  "forbidden_runtime_selector_inputs": [
+    "candidate_exact_shimmer_db",
+    "candidate_exact_gap",
+    "candidate_exact_gap_reduction",
+    "candidate_exact_component_outcomes",
+    "speaker_id",
+    "case_id"
+  ],
+  "development_gates": {
+    "proxy_exact_forward_absolute_error_max": 1e-9,
+    "proxy_exact_pulse_amplitude_absolute_error_max": 1e-9,
+    "proxy_exact_valid_pair_mask_match_required": true,
+    "finite_nonzero_gradient_required": true,
+    "primary_local_direction_sign_match_fraction_min": 0.9166666666666666,
+    "legacy_alpha_exact_improvement_fraction_min": 0.9166666666666666,
+    "legacy_alpha_median_exact_normalized_gap_reduction_min": 0.02,
+    "legacy_alpha_material_case_count_min": 10,
+    "non_target_component_gate_inherited_unchanged": true,
+    "topology_gate_inherited_unchanged": true,
+    "pathology_safety_denoising_gate_inherited_unchanged": true
+  },
+  "immutable_boundaries": {
+    "exact_praat_is_final_judge": true,
+    "candidate_exact_outcomes_may_not_route_runtime_selection": true,
+    "no_speaker_or_case_hardcode": true,
+    "no_historical_threshold_change": true,
+    "no_final_waveform_highpass": true,
+    "generator_optimizer_steps": 0,
+    "formal_generator_training_authorized": false,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  },
+  "failure_modes": [
+    "floor-forward proxy still differs from exact metric WAV codes",
+    "candidate-current-topology proxy fails exact parity",
+    "all frozen alphas abstain for a material case",
+    "proxy-selected candidate fails current-topology exact adjudication",
+    "exact-outcome leakage into the selector seal"
+  ],
+  "unacceptable_mistakes": [
+    "accessing v15 or an external candidate outcome during tuning",
+    "rewriting v27 or Candidate-D v23 NO_GO receipts",
+    "changing the frozen selector after exact outcomes are visible",
+    "running a generator optimizer step"
+  ],
+  "next_stage_if_pass": "Run the full v14 Candidate-E component/safety gate, freeze source and selector, then confirm once on opened v15 without tuning.",
+  "fallback_if_fail": "Remain on v14 and revise only the general proxy, topology certificate, or proxy-only abstention mechanism."
+}

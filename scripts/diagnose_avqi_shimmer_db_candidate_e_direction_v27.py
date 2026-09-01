@@ -52,6 +52,7 @@ from scripts.evaluate_avqi_shimmer_db_candidate_c_fresh_panel import (
     metric_source_indices_from_topology,
     read_waveform,
     sha256_file,
+    topology_stability,
 )
 from scripts.evaluate_avqi_shimmer_db_cycle_projected_backward import (
     read_csv,
@@ -63,7 +64,10 @@ from scripts.evaluate_avqi_shimmer_db_topology_family_selector_v18 import (
     candidate_d_projection_vectorized,
 )
 from scripts.evaluate_avqi_shimmer_db_trust_region_v16 import (
+    ALPHA_LADDER,
     base_topology_item,
+    finite_safety,
+    pcm24_effective_step,
     validate_dev_files,
 )
 from scripts.evaluate_direct_avqi_waveform_optimization import waveform_safety
@@ -190,6 +194,13 @@ def validate_config(
     legacy = float(config["frozen_directional_grid"]["legacy_operating_alpha"])
     if {-primary, primary, -legacy, legacy} - set(grid):
         raise ValueError("Candidate-E alpha grid omits a frozen decision point")
+    selector = config.get("frozen_selector")
+    if not isinstance(selector, dict):
+        raise ValueError("Candidate-E current-topology selector is not frozen")
+    if tuple(float(value) for value in selector["alpha_ladder"]) != ALPHA_LADDER:
+        raise ValueError("Candidate-E backtrack ladder drift")
+    if selector.get("seal_before_any_candidate_exact_scoring") is not True:
+        raise ValueError("Candidate-E selector/exact ordering is not frozen")
     boundaries = config["immutable_boundaries"]
     if boundaries.get("generator_optimizer_steps") != 0:
         raise ValueError("Candidate-E diagnostic may not contain optimizer steps")
@@ -335,6 +346,8 @@ def pcm16_roundtrip(values: np.ndarray) -> np.ndarray:
 
 def materialize_direction(
     case_id: str,
+    view: str,
+    base_path: Path,
     variant: str,
     alphas: tuple[float, ...],
     base: torch.Tensor,
@@ -402,8 +415,10 @@ def materialize_direction(
             {
                 "item_id": item_id,
                 "case_id": case_id,
+                "view": view,
                 "variant": variant,
                 "alpha": alpha,
+                "base_path": str(base_path.resolve()),
                 "candidate_path": str(path.resolve()),
                 "candidate_sha256": sha256_file(path),
                 "proxy_shimmer_db": proxy_value,
@@ -429,16 +444,171 @@ def materialize_direction(
         )
         exact_items.append(
             {
-                "item_id": item_id,
+                "item_id": f"{item_id}:frozen_topology",
                 "case_id": case_id,
                 "variant": variant,
                 "alpha": alpha,
+                "topology_role": "frozen_base_topology",
                 "waveform_path": str(path.resolve()),
                 "topology": topology,
                 "include_pulse_evidence": include_pulse,
             }
         )
     return rows, exact_items, evidence_by_item
+
+
+def pulse_position_drift(
+    reference: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    reference_positions = np.asarray(
+        reference["pulse_positions_samples"],
+        dtype=np.float64,
+    )
+    candidate_positions = np.asarray(
+        candidate["pulse_positions_samples"],
+        dtype=np.float64,
+    )
+    if reference_positions.size == candidate_positions.size:
+        aligned = np.abs(candidate_positions - reference_positions)
+    else:
+        distances = np.abs(
+            reference_positions[:, None] - candidate_positions[None, :]
+        )
+        aligned = np.concatenate(
+            (
+                distances.min(axis=0),
+                distances.min(axis=1),
+            )
+        )
+    return {
+        "aligned_pulse_count_equal": (
+            reference_positions.size == candidate_positions.size
+        ),
+        "aligned_pulse_absolute_drift_median_samples": float(
+            np.median(aligned)
+        ),
+        "aligned_pulse_absolute_drift_p95_samples": float(
+            np.quantile(aligned, 0.95)
+        ),
+        "aligned_pulse_absolute_drift_maximum_samples": float(
+            np.max(aligned)
+        ),
+    }
+
+
+def selector_seal(
+    candidate_rows: list[dict[str, Any]],
+    target_by_case: dict[str, float],
+    scale_value: float,
+) -> dict[str, Any]:
+    selected_rows = []
+    case_ids = sorted(
+        {
+            str(row["case_id"])
+            for row in candidate_rows
+            if row["variant"] == VARIANT_E_PROJECTED
+        }
+    )
+    for case_id in case_ids:
+        case_rows = [
+            row
+            for row in candidate_rows
+            if row["variant"] == VARIANT_E_PROJECTED
+            and row["case_id"] == case_id
+        ]
+        by_alpha = {float(row["alpha"]): row for row in case_rows}
+        if set(ALPHA_LADDER) - set(by_alpha) or 0.0 not in by_alpha:
+            raise ValueError(f"Candidate-E selector alpha coverage drift: {case_id}")
+        target = target_by_case[case_id]
+        base_proxy_gap = abs(
+            float(by_alpha[0.0]["current_topology_proxy_shimmer_db"])
+            - target
+        ) / scale_value
+        attempts = []
+        for backtrack_index, alpha in enumerate(ALPHA_LADDER):
+            row = by_alpha[float(alpha)]
+            proxy_gap = abs(
+                float(row["current_topology_proxy_shimmer_db"]) - target
+            ) / scale_value
+            finite = finite_safety(
+                read_waveform(Path(row["base_path"])).numpy(),
+                read_waveform(Path(row["candidate_path"])).numpy(),
+            )
+            pcm24 = pcm24_effective_step(
+                Path(row["base_path"]),
+                Path(row["candidate_path"]),
+            )
+            routing = {
+                "proxy_strict_improvement_pass": proxy_gap < base_proxy_gap,
+                "finite_safety_pass": bool(finite["finite_safety_pass"]),
+                "pcm24_effective_step_pass": bool(
+                    pcm24["pcm24_effective_step_pass"]
+                ),
+                "topology_stability_pass": bool(
+                    row["topology_stability_pass"]
+                ),
+                "paired_peak_certificate_pass": bool(
+                    row["paired_candidate_sinc70_search_may_be_skipped"]
+                ),
+            }
+            eligible = all(routing.values())
+            attempts.append(
+                {
+                    "backtrack_index": backtrack_index,
+                    "alpha": float(alpha),
+                    "candidate_path": row["candidate_path"],
+                    "candidate_sha256": row["candidate_sha256"],
+                    "current_topology_sha256": row[
+                        "current_topology_sha256"
+                    ],
+                    "base_normalized_proxy_gap": base_proxy_gap,
+                    "candidate_normalized_proxy_gap": proxy_gap,
+                    "normalized_proxy_gap_reduction": (
+                        base_proxy_gap - proxy_gap
+                    ),
+                    **routing,
+                    "eligible": eligible,
+                    "exact_candidate_outcome_present": False,
+                }
+            )
+        selected = next(
+            (attempt for attempt in attempts if attempt["eligible"]),
+            None,
+        )
+        selected_rows.append(
+            {
+                "case_id": case_id,
+                "case_id_used_for_routing": False,
+                "attempts": attempts,
+                "selected": selected,
+                "selected_candidate_present": selected is not None,
+            }
+        )
+    return {
+        "schema_version": (
+            "avqi-route-c-shimmer-db-candidate-e-current-topology-selector-v27"
+        ),
+        "selector": (
+            "largest_frozen_alpha_with_current_topology_proxy_strict_improvement"
+        ),
+        "alpha_ladder": list(ALPHA_LADDER),
+        "selector_inputs": [
+            "waveform",
+            "current_output_pulse_topology",
+            "candidate_e_proxy",
+            "paired_peak_certificate",
+            "pcm24_effective_step_certificate",
+            "waveform_safety_certificate",
+        ],
+        "candidate_exact_outcomes_present": False,
+        "candidate_exact_outcomes_used_for_selection": False,
+        "speaker_or_case_identity_used_for_routing": False,
+        "rows": selected_rows,
+        "generator_optimizer_steps": 0,
+        "formal_generator_training_authorized": False,
+        "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
+    }
 
 
 def directional_summary(
@@ -449,6 +619,9 @@ def directional_summary(
     scale_value: float,
     primary_alpha: float,
     legacy_alpha: float,
+    proxy_field: str,
+    exact_field: str,
+    topology_role: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows = []
     for case_id in case_ids:
@@ -457,11 +630,11 @@ def directional_summary(
         plus = merged_by_key[(case_id, variant, primary_alpha)]
         target = target_by_case[case_id]
         proxy_gaps = [
-            abs(float(row["proxy_shimmer_db"]) - target) / scale_value
+            abs(float(row[proxy_field]) - target) / scale_value
             for row in (minus, zero, plus)
         ]
         exact_gaps = [
-            abs(float(row["exact_shimmer_db"]) - target) / scale_value
+            abs(float(row[exact_field]) - target) / scale_value
             for row in (minus, zero, plus)
         ]
         proxy_slope = (proxy_gaps[2] - proxy_gaps[0]) / (
@@ -474,16 +647,17 @@ def directional_summary(
         legacy_reduction = None
         if legacy is not None:
             legacy_reduction = (
-                abs(float(zero["exact_shimmer_db"]) - target)
-                - abs(float(legacy["exact_shimmer_db"]) - target)
+                abs(float(zero[exact_field]) - target)
+                - abs(float(legacy[exact_field]) - target)
             ) / scale_value
         rows.append(
             {
                 "case_id": case_id,
                 "variant": variant,
+                "topology_role": topology_role,
                 "target_shimmer_db": target,
-                "proxy_before": float(zero["proxy_shimmer_db"]),
-                "exact_before_fixed_topology": float(zero["exact_shimmer_db"]),
+                "proxy_before": float(zero[proxy_field]),
+                "exact_before": float(zero[exact_field]),
                 "proxy_normalized_gap_slope": proxy_slope,
                 "exact_normalized_gap_slope": exact_slope,
                 "proxy_slope_sign": exact_sign(proxy_slope),
@@ -495,7 +669,7 @@ def directional_summary(
                 "positive_primary_exact_improves": exact_gaps[2] < exact_gaps[1],
                 "negative_primary_exact_improves": exact_gaps[0] < exact_gaps[1],
                 "material_exact_gap": (
-                    abs(float(zero["exact_shimmer_db"]) - target)
+                    abs(float(zero[exact_field]) - target) / scale_value
                     > MATERIAL_GAP_THRESHOLD
                 ),
                 "legacy_alpha_exact_normalized_gap_reduction": legacy_reduction,
@@ -509,6 +683,7 @@ def directional_summary(
     ]
     return rows, {
         "variant": variant,
+        "topology_role": topology_role,
         "case_count": len(rows),
         "direction_sign_match_count": sum(
             bool(row["direction_sign_match"]) for row in rows
@@ -620,6 +795,7 @@ def main() -> None:
     exact_items: list[dict[str, Any]] = []
     proxy_evidence_by_item: dict[str, dict[str, Any]] = {}
     case_diagnostics: list[dict[str, Any]] = []
+    base_topology_by_case: dict[str, dict[str, Any]] = {}
     try:
         topology_rows, topology_wall_ms = topology_worker.refresh(
             [
@@ -632,6 +808,7 @@ def main() -> None:
         )
         for panel_row, topology in zip(panel_rows, topology_rows, strict=True):
             case_id = str(panel_row["case_id"])
+            base_topology_by_case[case_id] = dict(topology)
             base_float = read_waveform(Path(panel_row["base_path"])).to(device)
             source_indices = torch.as_tensor(
                 metric_source_indices_from_topology(
@@ -749,6 +926,8 @@ def main() -> None:
             for variant, (base, direction, alphas) in variant_directions.items():
                 rows, items, evidence = materialize_direction(
                     case_id,
+                    str(panel_row["view"]),
+                    Path(panel_row["base_path"]),
                     variant,
                     alphas,
                     base,
@@ -770,8 +949,113 @@ def main() -> None:
     finally:
         topology_worker.close()
 
-    exact_request_path = output_dir / "exact_fixed_topology_request.json"
-    exact_output_path = output_dir / "exact_fixed_topology_results.json"
+    current_items = [
+        {
+            "id": f"current_topology:{row['item_id']}",
+            "case_id": row["case_id"],
+            "role": "current_output_topology",
+            "path": row["candidate_path"],
+            "view": row["view"],
+            "score_components": False,
+            "exact_metric_topology": True,
+            "highpass_mode": NUMPY_HIGHPASS_MODE,
+        }
+        for row in candidate_rows
+    ]
+    current_topology_rows: list[dict[str, Any]] = []
+    current_topology_wall_ms = 0.0
+    current_worker = ExactShimmerTopologyWorker(
+        args.exact_python,
+        args.runtime_worker_script,
+        args.avqi_code_root,
+        args.avqi_code_tree_sha256,
+    )
+    try:
+        for start_index in range(0, len(current_items), 24):
+            batch_rows, batch_wall_ms = current_worker.refresh(
+                current_items[start_index : start_index + 24]
+            )
+            current_topology_rows.extend(dict(row) for row in batch_rows)
+            current_topology_wall_ms += batch_wall_ms
+    finally:
+        current_worker.close()
+    if len(current_topology_rows) != len(candidate_rows):
+        raise ValueError("Candidate-E current-topology coverage drift")
+
+    current_proxy_evidence_by_item: dict[str, dict[str, Any]] = {}
+    for candidate, current_topology in zip(
+        candidate_rows,
+        current_topology_rows,
+        strict=True,
+    ):
+        case_id = str(candidate["case_id"])
+        waveform = read_waveform(Path(candidate["candidate_path"])).to(device)
+        if str(candidate["variant"]).startswith("candidate_e_"):
+            waveform = waveform.to(dtype=torch.float64)
+        source_indices = torch.as_tensor(
+            metric_source_indices_from_topology(
+                current_topology,
+                source_sample_count=waveform.numel(),
+            ),
+            dtype=torch.long,
+            device=device,
+        )
+        pulses = waveform.new_tensor(
+            current_topology["pulse_positions_samples"]
+        )
+        current_proxy, current_evidence = proxy_evidence(
+            str(candidate["variant"]),
+            predictor,
+            waveform,
+            pulses,
+            source_indices,
+            int(current_topology["metric_constant_prefix_samples"]),
+        )
+        stability = topology_stability(
+            base_topology_by_case[case_id],
+            current_topology,
+        )
+        drift = pulse_position_drift(
+            base_topology_by_case[case_id],
+            current_topology,
+        )
+        candidate.update(
+            {
+                "current_topology_proxy_shimmer_db": current_proxy,
+                "current_topology_sha256": topology_sha256(current_topology),
+                "current_topology_pulse_count": int(
+                    current_topology["pulse_count"]
+                ),
+                **stability,
+                **drift,
+            }
+        )
+        alpha = float(candidate["alpha"])
+        include_pulse = alpha in {-primary_alpha, 0.0, primary_alpha}
+        if include_pulse:
+            current_proxy_evidence_by_item[
+                str(candidate["item_id"])
+            ] = current_evidence
+        exact_items.append(
+            {
+                "item_id": f"{candidate['item_id']}:current_topology",
+                "case_id": case_id,
+                "variant": candidate["variant"],
+                "alpha": alpha,
+                "topology_role": "refreshed_candidate_topology",
+                "waveform_path": candidate["candidate_path"],
+                "topology": current_topology,
+                "include_pulse_evidence": include_pulse,
+            }
+        )
+
+    selector = selector_seal(candidate_rows, target_by_case, scale_value)
+    selector_path = output_dir / "candidate_e_selector_seal_pre_exact_v27.json"
+    write_json(selector_path, selector)
+    selector_sha256 = sha256_file(selector_path)
+
+    exact_request_path = output_dir / "exact_dual_topology_request.json"
+    exact_output_path = output_dir / "exact_dual_topology_results.json"
     write_json(
         exact_request_path,
         {
@@ -798,19 +1082,36 @@ def main() -> None:
     exact_by_item = {
         str(row["item_id"]): dict(row) for row in exact_output["rows"]
     }
-    if set(exact_by_item) != {str(row["item_id"]) for row in candidate_rows}:
+    expected_exact_ids = {str(item["item_id"]) for item in exact_items}
+    if set(exact_by_item) != expected_exact_ids:
         raise ValueError("Candidate-E exact adjudication coverage drift")
 
     merged_rows: list[dict[str, Any]] = []
     merged_by_key: dict[tuple[str, str, float], dict[str, Any]] = {}
     parity_rows: list[dict[str, Any]] = []
     for candidate in candidate_rows:
-        exact = exact_by_item[str(candidate["item_id"])]
+        frozen_exact = exact_by_item[
+            f"{candidate['item_id']}:frozen_topology"
+        ]
+        current_exact = exact_by_item[
+            f"{candidate['item_id']}:current_topology"
+        ]
         merged = {
             **candidate,
-            "exact_shimmer_db": float(exact["exact_shimmer_db"]),
-            "exact_metric_pcm16_sha256": exact["metric_pcm16_sha256"],
-            "exact_wall_ms": float(exact["wall_ms"]),
+            "frozen_topology_exact_shimmer_db": float(
+                frozen_exact["exact_shimmer_db"]
+            ),
+            "current_topology_exact_shimmer_db": float(
+                current_exact["exact_shimmer_db"]
+            ),
+            "frozen_topology_exact_metric_pcm16_sha256": frozen_exact[
+                "metric_pcm16_sha256"
+            ],
+            "current_topology_exact_metric_pcm16_sha256": current_exact[
+                "metric_pcm16_sha256"
+            ],
+            "frozen_topology_exact_wall_ms": float(frozen_exact["wall_ms"]),
+            "current_topology_exact_wall_ms": float(current_exact["wall_ms"]),
         }
         merged_rows.append(merged)
         key = (
@@ -819,16 +1120,32 @@ def main() -> None:
             float(candidate["alpha"]),
         )
         merged_by_key[key] = merged
-        evidence = proxy_evidence_by_item.get(str(candidate["item_id"]))
-        if evidence is not None:
+        parity_specs = (
+            (
+                "frozen_base_topology",
+                proxy_evidence_by_item.get(str(candidate["item_id"])),
+                frozen_exact,
+                "proxy_shimmer_db",
+            ),
+            (
+                "refreshed_candidate_topology",
+                current_proxy_evidence_by_item.get(str(candidate["item_id"])),
+                current_exact,
+                "current_topology_proxy_shimmer_db",
+            ),
+        )
+        for topology_role, evidence, exact, proxy_field in parity_specs:
+            if evidence is None:
+                continue
             parity_rows.append(
                 {
                     "item_id": candidate["item_id"],
                     "case_id": candidate["case_id"],
                     "variant": candidate["variant"],
                     "alpha": float(candidate["alpha"]),
+                    "topology_role": topology_role,
                     "scalar_absolute_error": abs(
-                        float(candidate["proxy_shimmer_db"])
+                        float(candidate[proxy_field])
                         - float(exact["exact_shimmer_db"])
                     ),
                     "amplitude_position_max_absolute_error_samples": (
@@ -857,9 +1174,10 @@ def main() -> None:
 
     case_ids = [str(row["case_id"]) for row in panel_rows]
     directional_rows: list[dict[str, Any]] = []
-    summaries: dict[str, Any] = {}
+    frozen_summaries: dict[str, Any] = {}
+    current_summaries: dict[str, Any] = {}
     for variant in (*PROJECTED_VARIANTS, *ABLATION_VARIANTS):
-        variant_rows, variant_summary = directional_summary(
+        frozen_rows, frozen_summary = directional_summary(
             variant,
             case_ids,
             merged_by_key,
@@ -867,15 +1185,112 @@ def main() -> None:
             scale_value,
             primary_alpha,
             legacy_alpha,
+            "proxy_shimmer_db",
+            "frozen_topology_exact_shimmer_db",
+            "frozen_base_topology",
         )
-        directional_rows.extend(variant_rows)
-        summaries[variant] = variant_summary
+        current_rows, current_summary = directional_summary(
+            variant,
+            case_ids,
+            merged_by_key,
+            target_by_case,
+            scale_value,
+            primary_alpha,
+            legacy_alpha,
+            "current_topology_proxy_shimmer_db",
+            "current_topology_exact_shimmer_db",
+            "refreshed_candidate_topology",
+        )
+        directional_rows.extend(frozen_rows)
+        directional_rows.extend(current_rows)
+        frozen_summaries[variant] = frozen_summary
+        current_summaries[variant] = current_summary
+
+    selected_exact_rows = []
+    for selector_row in selector["rows"]:
+        case_id = str(selector_row["case_id"])
+        selected = selector_row["selected"]
+        zero = merged_by_key[(case_id, VARIANT_E_PROJECTED, 0.0)]
+        target = target_by_case[case_id]
+        before_gap = abs(
+            float(zero["current_topology_exact_shimmer_db"]) - target
+        )
+        material = before_gap / scale_value > MATERIAL_GAP_THRESHOLD
+        if selected is None:
+            selected_exact_rows.append(
+                {
+                    "case_id": case_id,
+                    "material_exact_gap": material,
+                    "selected_candidate_present": False,
+                    "selected_alpha": None,
+                    "exact_normalized_gap_reduction": None,
+                    "exact_improves": False,
+                }
+            )
+            continue
+        selected_row = merged_by_key[
+            (case_id, VARIANT_E_PROJECTED, float(selected["alpha"]))
+        ]
+        after_gap = abs(
+            float(selected_row["current_topology_exact_shimmer_db"])
+            - target
+        )
+        selected_exact_rows.append(
+            {
+                "case_id": case_id,
+                "material_exact_gap": material,
+                "selected_candidate_present": True,
+                "selected_alpha": float(selected["alpha"]),
+                "selected_candidate_path": selected["candidate_path"],
+                "selected_candidate_sha256": selected["candidate_sha256"],
+                "exact_before_shimmer_db": float(
+                    zero["current_topology_exact_shimmer_db"]
+                ),
+                "exact_after_shimmer_db": float(
+                    selected_row["current_topology_exact_shimmer_db"]
+                ),
+                "exact_normalized_gap_reduction": (
+                    before_gap - after_gap
+                )
+                / scale_value,
+                "exact_improves": after_gap < before_gap,
+            }
+        )
+    selected_material = [
+        row for row in selected_exact_rows if row["material_exact_gap"]
+    ]
+    selected_material_reductions = [
+        float(row["exact_normalized_gap_reduction"])
+        for row in selected_material
+        if row["exact_normalized_gap_reduction"] is not None
+    ]
+    selected_summary = {
+        "case_count": len(selected_exact_rows),
+        "selected_candidate_count": sum(
+            bool(row["selected_candidate_present"])
+            for row in selected_exact_rows
+        ),
+        "material_case_count": len(selected_material),
+        "material_exact_improvement_count": sum(
+            bool(row["exact_improves"]) for row in selected_material
+        ),
+        "material_exact_improvement_fraction": sum(
+            bool(row["exact_improves"]) for row in selected_material
+        )
+        / max(len(selected_material), 1),
+        "material_median_exact_normalized_gap_reduction": (
+            median(selected_material_reductions)
+            if selected_material_reductions
+            else None
+        ),
+        "selection_used_candidate_exact_outcomes": False,
+    }
 
     gates = config["development_gates"]
     e_parity = [
         row for row in parity_rows if str(row["variant"]).startswith("candidate_e_")
     ]
-    e_projected_summary = summaries[VARIANT_E_PROJECTED]
+    e_projected_summary = current_summaries[VARIANT_E_PROJECTED]
     required_peak_alphas = {
         -primary_alpha,
         0.0,
@@ -908,15 +1323,24 @@ def main() -> None:
             float(e_projected_summary["direction_sign_match_fraction"])
             >= float(gates["primary_local_direction_sign_match_fraction_min"])
         ),
-        "candidate_e_legacy_improvement_fraction": (
-            float(e_projected_summary["legacy_alpha_material_improvement_fraction"])
+        "candidate_e_selector_all_cases_selected": (
+            int(selected_summary["selected_candidate_count"])
+            == len(case_ids)
+        ),
+        "candidate_e_selector_exact_improvement_fraction": (
+            float(selected_summary["material_exact_improvement_fraction"])
             >= float(gates["legacy_alpha_exact_improvement_fraction_min"])
         ),
-        "candidate_e_legacy_median_reduction": (
+        "candidate_e_selector_exact_median_reduction": (
             float(
-                e_projected_summary[
-                    "legacy_alpha_material_median_normalized_gap_reduction"
+                selected_summary[
+                    "material_median_exact_normalized_gap_reduction"
                 ]
+                if selected_summary[
+                    "material_median_exact_normalized_gap_reduction"
+                ]
+                is not None
+                else -math.inf
             )
             >= float(gates["legacy_alpha_median_exact_normalized_gap_reduction_min"])
         ),
@@ -933,6 +1357,7 @@ def main() -> None:
     write_csv(output_dir / "candidate_grid_results.csv", merged_rows)
     write_csv(output_dir / "directional_sign_audit.csv", directional_rows)
     write_csv(output_dir / "pulse_forward_parity.csv", parity_rows)
+    write_csv(output_dir / "selector_exact_adjudication.csv", selected_exact_rows)
     report = {
         "schema_version": "avqi-route-c-shimmer-db-candidate-e-diagnostic-v27",
         "decision": decision,
@@ -953,7 +1378,13 @@ def main() -> None:
         "primary_local_alpha": primary_alpha,
         "legacy_operating_alpha": legacy_alpha,
         "case_diagnostics": case_diagnostics,
-        "variant_summaries": summaries,
+        "frozen_topology_variant_summaries": frozen_summaries,
+        "current_topology_variant_summaries": current_summaries,
+        "current_topology_refresh_wall_ms": current_topology_wall_ms,
+        "selector_seal_pre_exact_path": str(selector_path),
+        "selector_seal_pre_exact_sha256": selector_sha256,
+        "selector_exact_rows": selected_exact_rows,
+        "selector_exact_summary": selected_summary,
         "pulse_forward_parity": {
             "row_count": len(parity_rows),
             "candidate_e_scalar_error_max": max(
@@ -971,6 +1402,7 @@ def main() -> None:
         },
         "gates": diagnostic_gates,
         "candidate_e_runtime_selector_uses_exact_outcomes": False,
+        "candidate_e_selector_sealed_before_exact_scoring": True,
         "exact_outcomes_used_for_development_adjudication_only": True,
         "generator_optimizer_steps": 0,
         "formal_generator_training_authorized": False,
@@ -991,6 +1423,10 @@ def main() -> None:
         ),
         "pulse_forward_parity_sha256": sha256_file(
             output_dir / "pulse_forward_parity.csv"
+        ),
+        "selector_seal_pre_exact_sha256": selector_sha256,
+        "selector_exact_adjudication_sha256": sha256_file(
+            output_dir / "selector_exact_adjudication.csv"
         ),
         "exact_results_sha256": sha256_file(exact_output_path),
         "config_sha256": args.config_sha256,

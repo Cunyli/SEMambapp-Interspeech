@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import io
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 import torch
 
 from scripts.avqi_shimmer_db_candidate_e_proxy_v27 import (
@@ -15,13 +17,18 @@ from scripts.avqi_shimmer_db_candidate_e_proxy_v27 import (
     pcm16_ste,
     project_cycle_gain_gradient_fixed_order,
 )
+from scripts.diagnose_avqi_shimmer_db_candidate_e_direction_v27 import (
+    VARIANT_E_PROJECTED,
+    selector_seal,
+)
+from scripts.evaluate_avqi_shimmer_db_trust_region_v16 import ALPHA_LADDER
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = (
     REPO_ROOT
     / "configs"
-    / "avqi_route_c_shimmer_db_candidate_e_directional_diagnostic_v27.json"
+    / "avqi_route_c_shimmer_db_candidate_e_current_topology_selector_v27r2.json"
 )
 
 
@@ -32,7 +39,7 @@ def test_pcm16_ste_has_exact_forward_grid_and_identity_backward() -> None:
         requires_grad=True,
     )
     observed = pcm16_ste(waveform)
-    expected = torch.round(waveform.detach() * 32768.0) / 32768.0
+    expected = torch.floor(waveform.detach() * 32768.0) / 32768.0
     torch.testing.assert_close(observed.detach(), expected, rtol=0.0, atol=0.0)
     observed.sum().backward()
     torch.testing.assert_close(
@@ -41,6 +48,24 @@ def test_pcm16_ste_has_exact_forward_grid_and_identity_backward() -> None:
         rtol=0.0,
         atol=0.0,
     )
+
+
+def test_pcm16_ste_forward_matches_soundfile_roundtrip() -> None:
+    generator = np.random.default_rng(27)
+    values = generator.uniform(-0.95, 0.95, 10_000).astype(np.float64)
+    buffer = io.BytesIO()
+    sf.write(
+        buffer,
+        values,
+        SAMPLE_RATE,
+        format="WAV",
+        subtype="PCM_16",
+    )
+    buffer.seek(0)
+    exact, sample_rate = sf.read(buffer, dtype="float64", always_2d=False)
+    observed = pcm16_ste(torch.from_numpy(values)).detach().numpy()
+    assert sample_rate == SAMPLE_RATE
+    np.testing.assert_array_equal(observed, exact)
 
 
 def test_official_stop_hann_matches_frozen_numpy_exact_worker_formula() -> None:
@@ -176,3 +201,49 @@ def test_v27_config_is_v14_only_symmetric_and_fail_closed() -> None:
     assert boundaries["authoritative_training_decision"] == (
         "NO_GO_AVQI_T2_TRAINING"
     )
+    assert config["predecessor"]["decision"] == (
+        "NO_GO_CANDIDATE_E_EXACT_PATH_DIRECTIONAL_MECHANISM_V27"
+    )
+    assert config["frozen_selector"]["seal_before_any_candidate_exact_scoring"]
+
+
+def test_current_topology_selector_backtracks_without_exact_outcomes(
+    tmp_path: Path,
+) -> None:
+    samples = np.arange(32_000, dtype=np.float64)
+    base = 0.12 * np.sin(2.0 * np.pi * 120.0 * samples / SAMPLE_RATE)
+    base_path = tmp_path / "base.wav"
+    sf.write(base_path, base, SAMPLE_RATE, subtype="PCM_24")
+    proxy_by_alpha = {
+        0.0: 1.30,
+        0.001: 1.31,
+        0.0005: 1.28,
+        0.00025: 1.285,
+        0.000125: 1.29,
+    }
+    rows = []
+    for alpha in (0.0, *ALPHA_LADDER):
+        candidate = base + alpha * base
+        candidate_path = tmp_path / f"candidate_{alpha}.wav"
+        sf.write(candidate_path, candidate, SAMPLE_RATE, subtype="PCM_24")
+        rows.append(
+            {
+                "case_id": "synthetic",
+                "variant": VARIANT_E_PROJECTED,
+                "alpha": alpha,
+                "base_path": str(base_path),
+                "candidate_path": str(candidate_path),
+                "candidate_sha256": f"synthetic-{alpha}",
+                "current_topology_sha256": f"topology-{alpha}",
+                "current_topology_proxy_shimmer_db": proxy_by_alpha[alpha],
+                "topology_stability_pass": True,
+                "paired_candidate_sinc70_search_may_be_skipped": True,
+            }
+        )
+    seal = selector_seal(rows, {"synthetic": 1.0}, 1.0)
+    selected = seal["rows"][0]["selected"]
+    assert selected is not None
+    assert selected["alpha"] == 0.0005
+    assert selected["exact_candidate_outcome_present"] is False
+    assert seal["candidate_exact_outcomes_present"] is False
+    assert seal["candidate_exact_outcomes_used_for_selection"] is False
