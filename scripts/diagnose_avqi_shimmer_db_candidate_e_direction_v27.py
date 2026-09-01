@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import math
 import subprocess
@@ -36,7 +37,6 @@ from scripts.avqi_shimmer_exact_topology_runtime import (
     ExactShimmerTopologyWorker,
     topology_sha256,
 )
-from scripts.avqi_shimmer_exact_topology_worker import pcm16_roundtrip
 from scripts.avqi_shimmer_peak_certificate_v19 import (
     paired_candidate_peak_certificate,
     pcm16_roundtrip_values_to_codes,
@@ -315,6 +315,22 @@ def impulse_certificate(sample_count: int) -> dict[str, Any]:
     )
     response.setflags(write=False)
     return stop_hann_impulse_l1_certificate(response, fft_length)
+
+
+def pcm16_roundtrip(values: np.ndarray) -> np.ndarray:
+    buffer = io.BytesIO()
+    sf.write(
+        buffer,
+        np.asarray(values, dtype=np.float64),
+        SAMPLE_RATE,
+        format="WAV",
+        subtype="PCM_16",
+    )
+    buffer.seek(0)
+    result, sample_rate = sf.read(buffer, dtype="float64", always_2d=False)
+    if sample_rate != SAMPLE_RATE or result.ndim != 1:
+        raise ValueError("Candidate-E PCM16 roundtrip shape drift")
+    return result
 
 
 def materialize_direction(
