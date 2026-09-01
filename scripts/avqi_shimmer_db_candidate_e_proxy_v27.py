@@ -46,11 +46,18 @@ class CandidateEProxyResult:
 
 
 def pcm16_ste(values: torch.Tensor) -> torch.Tensor:
-    """Return exact PCM16 grid values with identity straight-through gradient."""
+    """Mirror libsndfile input PCM16 with identity straight-through gradient."""
     bounded = values.clamp(-1.0, 1.0 - 1.0 / 32768.0)
     # libsndfile's float-to-PCM16 conversion uses floor semantics for the
     # noninteger code values exercised by the exact Praat WAV roundtrip.
     quantized = torch.floor(bounded * 32768.0) / 32768.0
+    return bounded + (quantized - bounded).detach()
+
+
+def praat_pcm16_ste(values: torch.Tensor) -> torch.Tensor:
+    """Mirror Praat WAV-save PCM16 with identity straight-through gradient."""
+    bounded = values.clamp(-1.0, 1.0 - 1.0 / 32768.0)
+    quantized = torch.round(bounded * 32768.0) / 32768.0
     return bounded + (quantized - bounded).detach()
 
 
@@ -123,7 +130,7 @@ def exact_metric_branch_ste(
     sample_abs_max = float(filtered.detach().abs().max().cpu())
     sinc70_peak_upper_bound = sample_abs_max * SINC70_ABSOLUTE_WEIGHT_BOUND
     peak_scale_abstention_pass = sinc70_peak_upper_bound < PEAK_SCALE_TRIGGER
-    metric_pcm16_full = pcm16_ste(filtered)
+    metric_pcm16_full = praat_pcm16_ste(filtered)
     mapped = metric_pcm16_full.index_select(0, source_indices)
     if metric_constant_prefix_samples:
         mapped = torch.cat(

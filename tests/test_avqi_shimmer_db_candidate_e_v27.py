@@ -15,6 +15,7 @@ from scripts.avqi_shimmer_db_candidate_e_proxy_v27 import (
     fixed_pulse_shimmer_db,
     official_stop_hann,
     pcm16_ste,
+    praat_pcm16_ste,
     project_cycle_gain_gradient_fixed_order,
 )
 from scripts.diagnose_avqi_shimmer_db_candidate_e_direction_v27 import (
@@ -28,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = (
     REPO_ROOT
     / "configs"
-    / "avqi_route_c_shimmer_db_candidate_e_current_topology_selector_v27r2.json"
+    / "avqi_route_c_shimmer_db_candidate_e_dual_pcm16_selector_v27r3.json"
 )
 
 
@@ -66,6 +67,14 @@ def test_pcm16_ste_forward_matches_soundfile_roundtrip() -> None:
     observed = pcm16_ste(torch.from_numpy(values)).detach().numpy()
     assert sample_rate == SAMPLE_RATE
     np.testing.assert_array_equal(observed, exact)
+
+
+def test_praat_pcm16_ste_uses_round_to_nearest_forward() -> None:
+    generator = np.random.default_rng(28)
+    values = generator.uniform(-0.95, 0.95, 10_000).astype(np.float64)
+    observed = praat_pcm16_ste(torch.from_numpy(values)).detach().numpy()
+    expected = np.rint(values * 32768.0) / 32768.0
+    np.testing.assert_array_equal(observed, expected)
 
 
 def test_official_stop_hann_matches_frozen_numpy_exact_worker_formula() -> None:

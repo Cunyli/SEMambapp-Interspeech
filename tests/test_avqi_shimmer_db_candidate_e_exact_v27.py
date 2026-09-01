@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import numpy as np
+import parselmouth
 import soundfile as sf
+from parselmouth.praat import call
 
 from scripts.avqi_shimmer_exact_topology_worker import ExactTopologyEngine
 from scripts.score_avqi_shimmer_db_candidate_e_fixed_topology_v27 import (
@@ -58,3 +61,19 @@ def test_exact_fixed_topology_scalar_reconstructs_from_amplitude_tier(
         rtol=0.0,
         atol=1e-12,
     )
+
+
+def test_praat_wav_save_uses_round_to_nearest_pcm16() -> None:
+    generator = np.random.default_rng(29)
+    values = generator.uniform(-0.95, 0.95, 10_000).astype(np.float64)
+    with tempfile.TemporaryDirectory(prefix="praat-pcm16-test-") as directory:
+        path = Path(directory) / "values.wav"
+        call(
+            parselmouth.Sound(values, SAMPLE_RATE),
+            "Save as WAV file",
+            str(path),
+        )
+        observed, sample_rate = sf.read(path, dtype="float64")
+    expected = np.rint(values * 32768.0) / 32768.0
+    assert sample_rate == SAMPLE_RATE
+    np.testing.assert_array_equal(observed, expected)
