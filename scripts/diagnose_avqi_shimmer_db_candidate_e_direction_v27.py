@@ -36,6 +36,13 @@ from scripts.avqi_shimmer_exact_topology_runtime import (
     ExactShimmerTopologyWorker,
     topology_sha256,
 )
+from scripts.avqi_shimmer_exact_topology_worker import pcm16_roundtrip
+from scripts.avqi_shimmer_peak_certificate_v19 import (
+    paired_candidate_peak_certificate,
+    pcm16_roundtrip_values_to_codes,
+    power_of_two_fft_length,
+    stop_hann_impulse_l1_certificate,
+)
 from scripts.evaluate_avqi_shimmer_db_candidate_c_fresh_panel import (
     MATERIAL_GAP_THRESHOLD,
     SAMPLE_RATE,
@@ -293,6 +300,23 @@ def mask_equal(left: list[Any], right: list[Any]) -> bool:
     )
 
 
+def impulse_certificate(sample_count: int) -> dict[str, Any]:
+    fft_length = power_of_two_fft_length(sample_count)
+    frequencies = (
+        np.arange(fft_length // 2 + 1, dtype=np.float64)
+        * SAMPLE_RATE
+        / fft_length
+    )
+    response = np.ones(frequencies.size, dtype=np.float64)
+    response[frequencies <= 33.9] = 0.0
+    transition = (frequencies > 33.9) & (frequencies <= 34.1)
+    response[transition] = 0.5 - 0.5 * np.cos(
+        np.pi / 0.2 * (frequencies[transition] - 33.9)
+    )
+    response.setflags(write=False)
+    return stop_hann_impulse_l1_certificate(response, fft_length)
+
+
 def materialize_direction(
     case_id: str,
     variant: str,
@@ -304,6 +328,9 @@ def materialize_direction(
     source_indices: torch.Tensor,
     prefix: int,
     topology: dict[str, Any],
+    base_pcm16_codes: np.ndarray,
+    base_highpass_timing: dict[str, Any],
+    stop_hann_impulse_certificate: dict[str, Any],
     primary_alpha: float,
     waveform_root: Path,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
@@ -338,6 +365,15 @@ def materialize_direction(
             source_indices,
             prefix,
         )
+        candidate_pcm16_codes = pcm16_roundtrip_values_to_codes(
+            pcm16_roundtrip(stored.detach().cpu().numpy())
+        )
+        peak_certificate = paired_candidate_peak_certificate(
+            base_pcm16_codes,
+            candidate_pcm16_codes,
+            base_highpass_timing,
+            stop_hann_impulse_certificate,
+        )
         item_id = f"{case_id}:{variant}:{alpha_label(alpha)}"
         include_pulse = alpha in {-primary_alpha, 0.0, primary_alpha}
         if include_pulse:
@@ -355,6 +391,23 @@ def materialize_direction(
                 "candidate_path": str(path.resolve()),
                 "candidate_sha256": sha256_file(path),
                 "proxy_shimmer_db": proxy_value,
+                "base_peak_check_mode": peak_certificate[
+                    "base_peak_check_mode"
+                ],
+                "base_highpass_peak_scaled": peak_certificate[
+                    "base_highpass_peak_scaled"
+                ],
+                "paired_candidate_sinc70_peak_upper_bound": peak_certificate[
+                    "candidate_sinc70_peak_upper_bound"
+                ],
+                "paired_candidate_sinc70_search_may_be_skipped": (
+                    peak_certificate[
+                        "candidate_sinc70_search_may_be_skipped"
+                    ]
+                ),
+                "paired_peak_certificate_failure_mode": peak_certificate[
+                    "failure_mode"
+                ],
                 **safety,
             }
         )
@@ -599,8 +652,13 @@ def main() -> None:
             )
             e_loss = ((e_result.shimmer_db - target) / scale_value).square()
             e_raw = torch.autograd.grad(e_loss, e_waveform)[0]
-            if not e_result.peak_scale_abstention_pass:
-                raise ValueError(f"Candidate-E peak-scale abstention failed: {case_id}")
+            base_highpass_timing = dict(topology["timing_ms"])
+            if base_highpass_timing.get("highpass_peak_scaled") is not False:
+                raise ValueError(f"Candidate-E base exact highpass scaled: {case_id}")
+            base_pcm16_codes = pcm16_roundtrip_values_to_codes(
+                pcm16_roundtrip(base_float.detach().cpu().numpy())
+            )
+            stop_hann_certificate = impulse_certificate(base_float.numel())
 
             plan = build_zero_crossing_cycle_plan_vectorized(
                 base_float.detach().cpu().numpy(),
@@ -651,6 +709,15 @@ def main() -> None:
                     "candidate_e_peak_scale_abstention_pass": (
                         e_result.peak_scale_abstention_pass
                     ),
+                    "candidate_e_base_peak_check_mode": base_highpass_timing[
+                        "highpass_peak_check_mode"
+                    ],
+                    "candidate_e_base_exact_sinc70_peak": base_highpass_timing[
+                        "highpass_peak_value"
+                    ],
+                    "candidate_e_base_highpass_peak_scaled": (
+                        base_highpass_timing["highpass_peak_scaled"]
+                    ),
                     "candidate_e_fft_sample_count": e_result.fft_sample_count,
                     "base_topology_sha256": topology_sha256(topology),
                     "candidate_d_projection": d_projection,
@@ -675,6 +742,9 @@ def main() -> None:
                     source_indices,
                     int(topology["metric_constant_prefix_samples"]),
                     topology,
+                    base_pcm16_codes,
+                    base_highpass_timing,
+                    stop_hann_certificate,
                     primary_alpha,
                     waveform_root,
                 )
@@ -790,6 +860,18 @@ def main() -> None:
         row for row in parity_rows if str(row["variant"]).startswith("candidate_e_")
     ]
     e_projected_summary = summaries[VARIANT_E_PROJECTED]
+    required_peak_alphas = {
+        -primary_alpha,
+        0.0,
+        primary_alpha,
+        legacy_alpha,
+    }
+    e_projected_required_peak_rows = [
+        row
+        for row in merged_rows
+        if row["variant"] == VARIANT_E_PROJECTED
+        and float(row["alpha"]) in required_peak_alphas
+    ]
     diagnostic_gates = {
         "candidate_e_scalar_forward_parity": max(
             float(row["scalar_absolute_error"]) for row in e_parity
@@ -801,6 +883,10 @@ def main() -> None:
         <= float(gates["proxy_exact_pulse_amplitude_absolute_error_max"]),
         "candidate_e_pair_mask_parity": all(
             bool(row["valid_pair_mask_match"]) for row in e_parity
+        ),
+        "candidate_e_required_steps_paired_peak_certified": all(
+            bool(row["paired_candidate_sinc70_search_may_be_skipped"])
+            for row in e_projected_required_peak_rows
         ),
         "candidate_e_primary_direction_sign": (
             float(e_projected_summary["direction_sign_match_fraction"])
