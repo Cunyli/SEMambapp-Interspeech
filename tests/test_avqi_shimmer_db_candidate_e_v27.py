@@ -20,6 +20,8 @@ from scripts.avqi_shimmer_db_candidate_e_proxy_v27 import (
 )
 from scripts.diagnose_avqi_shimmer_db_candidate_e_direction_v27 import (
     VARIANT_E_PROJECTED,
+    VARIANT_E_RAW,
+    dual_direction_selector_seal,
     selector_seal,
 )
 from scripts.evaluate_avqi_shimmer_db_trust_region_v16 import ALPHA_LADDER
@@ -30,6 +32,11 @@ CONFIG_PATH = (
     REPO_ROOT
     / "configs"
     / "avqi_route_c_shimmer_db_candidate_e_dual_pcm16_selector_v27r3.json"
+)
+DUAL_DIRECTION_CONFIG_PATH = (
+    REPO_ROOT
+    / "configs"
+    / "avqi_route_c_shimmer_db_candidate_e_dual_direction_selector_v27r4.json"
 )
 
 
@@ -216,6 +223,24 @@ def test_v27_config_is_v14_only_symmetric_and_fail_closed() -> None:
     assert config["frozen_selector"]["seal_before_any_candidate_exact_scoring"]
 
 
+def test_v27r4_config_keeps_thresholds_and_alpha_upper_bound() -> None:
+    predecessor = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    config = json.loads(DUAL_DIRECTION_CONFIG_PATH.read_text(encoding="utf-8"))
+    assert config["dataset_contract"]["opened_v15_access_authorized"] is False
+    assert config["dataset_contract"]["external_panel_access_authorized"] is False
+    assert config["frozen_directional_grid"]["alphas"] == predecessor[
+        "frozen_directional_grid"
+    ]["alphas"]
+    assert config["development_gates"] == predecessor["development_gates"]
+    assert config["frozen_selector"]["alpha_ladder"] == list(ALPHA_LADDER)
+    assert config["frozen_selector"]["alpha_upper_bound_unchanged"] is True
+    assert config["frozen_selector"][
+        "seal_before_any_candidate_exact_scoring"
+    ] is True
+    assert config["immutable_boundaries"]["no_historical_threshold_change"]
+    assert config["immutable_boundaries"]["generator_optimizer_steps"] == 0
+
+
 def test_current_topology_selector_backtracks_without_exact_outcomes(
     tmp_path: Path,
 ) -> None:
@@ -256,3 +281,61 @@ def test_current_topology_selector_backtracks_without_exact_outcomes(
     assert selected["exact_candidate_outcome_present"] is False
     assert seal["candidate_exact_outcomes_present"] is False
     assert seal["candidate_exact_outcomes_used_for_selection"] is False
+
+
+def test_dual_direction_selector_uses_best_proxy_candidate_without_exact(
+    tmp_path: Path,
+) -> None:
+    samples = np.arange(32_000, dtype=np.float64)
+    base = 0.12 * np.sin(2.0 * np.pi * 120.0 * samples / SAMPLE_RATE)
+    base_path = tmp_path / "base.wav"
+    sf.write(base_path, base, SAMPLE_RATE, subtype="PCM_24")
+    proxy = {
+        VARIANT_E_PROJECTED: {
+            0.0: 1.30,
+            0.001: 1.28,
+            0.0005: 1.285,
+            0.00025: 1.29,
+            0.000125: 1.295,
+        },
+        VARIANT_E_RAW: {
+            0.0: 1.30,
+            0.001: 1.31,
+            0.0005: 1.26,
+            0.00025: 1.27,
+            0.000125: 1.28,
+        },
+    }
+    rows = []
+    for family_index, (variant, by_alpha) in enumerate(proxy.items(), start=1):
+        for alpha in (0.0, *ALPHA_LADDER):
+            candidate = base + family_index * alpha * base
+            candidate_path = tmp_path / f"candidate_{variant}_{alpha}.wav"
+            sf.write(candidate_path, candidate, SAMPLE_RATE, subtype="PCM_24")
+            rows.append(
+                {
+                    "case_id": "synthetic",
+                    "variant": variant,
+                    "alpha": alpha,
+                    "base_path": str(base_path),
+                    "candidate_path": str(candidate_path),
+                    "candidate_sha256": f"synthetic-{variant}-{alpha}",
+                    "current_topology_sha256": f"topology-{variant}-{alpha}",
+                    "current_topology_proxy_shimmer_db": by_alpha[alpha],
+                    "topology_stability_pass": True,
+                    "paired_candidate_sinc70_search_may_be_skipped": True,
+                }
+            )
+    seal = dual_direction_selector_seal(
+        rows,
+        {"synthetic": 1.0},
+        1.0,
+    )
+    selected = seal["rows"][0]["selected"]
+    assert selected is not None
+    assert selected["direction_family"] == VARIANT_E_RAW
+    assert selected["alpha"] == 0.0005
+    assert selected["exact_candidate_outcome_present"] is False
+    assert seal["candidate_exact_outcomes_present"] is False
+    assert seal["candidate_exact_outcomes_used_for_selection"] is False
+    assert seal["speaker_or_case_identity_used_for_routing"] is False

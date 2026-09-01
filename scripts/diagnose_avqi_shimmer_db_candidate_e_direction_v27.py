@@ -80,6 +80,14 @@ VARIANT_D_RAW = "candidate_d_frozen_raw_ablation"
 VARIANT_E_RAW = "candidate_e_exact_path_raw_ablation"
 PROJECTED_VARIANTS = (VARIANT_D_PROJECTED, VARIANT_E_PROJECTED)
 ABLATION_VARIANTS = (VARIANT_D_RAW, VARIANT_E_RAW)
+CANDIDATE_E_VARIANTS = (VARIANT_E_PROJECTED, VARIANT_E_RAW)
+LEGACY_SELECTOR_NAME = (
+    "largest_frozen_alpha_with_current_topology_proxy_strict_improvement"
+)
+DUAL_DIRECTION_SELECTOR_NAME = (
+    "maximum_current_topology_proxy_gap_reduction_across_"
+    "projected_and_raw_exact_path_directions"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -201,6 +209,16 @@ def validate_config(
         raise ValueError("Candidate-E backtrack ladder drift")
     if selector.get("seal_before_any_candidate_exact_scoring") is not True:
         raise ValueError("Candidate-E selector/exact ordering is not frozen")
+    selector_name = str(selector.get("name"))
+    allowed_selectors = {
+        LEGACY_SELECTOR_NAME,
+        DUAL_DIRECTION_SELECTOR_NAME,
+    }
+    if selector_name not in allowed_selectors:
+        raise ValueError("Candidate-E selector name drift")
+    if selector_name == DUAL_DIRECTION_SELECTOR_NAME:
+        if selector.get("direction_families") != list(CANDIDATE_E_VARIANTS):
+            raise ValueError("Candidate-E dual-direction family drift")
     boundaries = config["immutable_boundaries"]
     if boundaries.get("generator_optimizer_steps") != 0:
         raise ValueError("Candidate-E diagnostic may not contain optimizer steps")
@@ -611,6 +629,170 @@ def selector_seal(
     }
 
 
+def dual_direction_selector_seal(
+    candidate_rows: list[dict[str, Any]],
+    target_by_case: dict[str, float],
+    scale_value: float,
+) -> dict[str, Any]:
+    """Seal the best proxy-improving projected/raw candidate per case.
+
+    The ranking is result-blind: it uses only the current-output-topology
+    Candidate-E proxy and the existing waveform/topology certificates.  Exact
+    candidate outcomes are not available until after this payload is written.
+    """
+
+    selected_rows = []
+    case_ids = sorted(
+        {
+            str(row["case_id"])
+            for row in candidate_rows
+            if row["variant"] in CANDIDATE_E_VARIANTS
+        }
+    )
+    for case_id in case_ids:
+        case_rows = [
+            row
+            for row in candidate_rows
+            if row["case_id"] == case_id
+            and row["variant"] in CANDIDATE_E_VARIANTS
+        ]
+        by_key = {
+            (str(row["variant"]), float(row["alpha"])): row
+            for row in case_rows
+        }
+        expected = {
+            (variant, alpha)
+            for variant in CANDIDATE_E_VARIANTS
+            for alpha in (0.0, *ALPHA_LADDER)
+        }
+        if expected - set(by_key):
+            raise ValueError(
+                f"Candidate-E dual-direction coverage drift: {case_id}"
+            )
+        target = target_by_case[case_id]
+        base_proxy_values = {
+            float(
+                by_key[(variant, 0.0)][
+                    "current_topology_proxy_shimmer_db"
+                ]
+            )
+            for variant in CANDIDATE_E_VARIANTS
+        }
+        if len(base_proxy_values) != 1:
+            raise ValueError(
+                f"Candidate-E zero-step proxy differs by direction: {case_id}"
+            )
+        base_proxy_gap = abs(base_proxy_values.pop() - target) / scale_value
+        attempts = []
+        for family_rank, variant in enumerate(CANDIDATE_E_VARIANTS):
+            for alpha_rank, alpha in enumerate(ALPHA_LADDER):
+                row = by_key[(variant, float(alpha))]
+                proxy_gap = abs(
+                    float(row["current_topology_proxy_shimmer_db"])
+                    - target
+                ) / scale_value
+                finite = finite_safety(
+                    read_waveform(Path(row["base_path"])).numpy(),
+                    read_waveform(Path(row["candidate_path"])).numpy(),
+                )
+                pcm24 = pcm24_effective_step(
+                    Path(row["base_path"]),
+                    Path(row["candidate_path"]),
+                )
+                routing = {
+                    "proxy_strict_improvement_pass": proxy_gap < base_proxy_gap,
+                    "finite_safety_pass": bool(finite["finite_safety_pass"]),
+                    "pcm24_effective_step_pass": bool(
+                        pcm24["pcm24_effective_step_pass"]
+                    ),
+                    "topology_stability_pass": bool(
+                        row["topology_stability_pass"]
+                    ),
+                    "paired_peak_certificate_pass": bool(
+                        row[
+                            "paired_candidate_sinc70_search_may_be_skipped"
+                        ]
+                    ),
+                }
+                eligible = all(routing.values())
+                attempts.append(
+                    {
+                        "direction_family": variant,
+                        "direction_family_rank": family_rank,
+                        "alpha_rank": alpha_rank,
+                        "alpha": float(alpha),
+                        "candidate_path": row["candidate_path"],
+                        "candidate_sha256": row["candidate_sha256"],
+                        "current_topology_sha256": row[
+                            "current_topology_sha256"
+                        ],
+                        "base_normalized_proxy_gap": base_proxy_gap,
+                        "candidate_normalized_proxy_gap": proxy_gap,
+                        "normalized_proxy_gap_reduction": (
+                            base_proxy_gap - proxy_gap
+                        ),
+                        **routing,
+                        "eligible": eligible,
+                        "exact_candidate_outcome_present": False,
+                    }
+                )
+        eligible_attempts = [
+            attempt for attempt in attempts if attempt["eligible"]
+        ]
+        selected = (
+            min(
+                eligible_attempts,
+                key=lambda attempt: (
+                    -float(attempt["normalized_proxy_gap_reduction"]),
+                    int(attempt["direction_family_rank"]),
+                    int(attempt["alpha_rank"]),
+                ),
+            )
+            if eligible_attempts
+            else None
+        )
+        selected_rows.append(
+            {
+                "case_id": case_id,
+                "case_id_used_for_routing": False,
+                "attempts": attempts,
+                "selected": selected,
+                "selected_candidate_present": selected is not None,
+            }
+        )
+    return {
+        "schema_version": (
+            "avqi-route-c-shimmer-db-candidate-e-dual-direction-selector-v27r4"
+        ),
+        "selector": (
+            "maximum_current_topology_proxy_gap_reduction_across_"
+            "projected_and_raw_exact_path_directions"
+        ),
+        "direction_families": list(CANDIDATE_E_VARIANTS),
+        "alpha_ladder": list(ALPHA_LADDER),
+        "deterministic_tie_break": [
+            "projected_before_raw",
+            "larger_alpha_before_smaller_alpha",
+        ],
+        "selector_inputs": [
+            "waveform",
+            "current_output_pulse_topology",
+            "candidate_e_proxy",
+            "direction_family",
+            "paired_peak_certificate",
+            "pcm24_effective_step_certificate",
+            "waveform_safety_certificate",
+        ],
+        "candidate_exact_outcomes_present": False,
+        "candidate_exact_outcomes_used_for_selection": False,
+        "speaker_or_case_identity_used_for_routing": False,
+        "rows": selected_rows,
+        "generator_optimizer_steps": 0,
+        "formal_generator_training_authorized": False,
+        "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING",
+    }
+
+
 def directional_summary(
     variant: str,
     case_ids: list[str],
@@ -763,6 +945,10 @@ def main() -> None:
     grid, ablation_grid, primary_alpha, legacy_alpha = validate_config(
         config,
         panel_rows,
+    )
+    selector_name = str(config["frozen_selector"]["name"])
+    dual_direction_selector = selector_name.startswith(
+        "maximum_current_topology_proxy_gap_reduction"
     )
     if panel.get("speaker_split_before_simulation") is not True:
         raise ValueError("v14 speaker split was not sealed before simulation")
@@ -921,7 +1107,11 @@ def main() -> None:
                 VARIANT_D_PROJECTED: (d_waveform, d_projected, grid),
                 VARIANT_E_PROJECTED: (e_waveform, e_projected, grid),
                 VARIANT_D_RAW: (d_waveform, d_raw, ablation_grid),
-                VARIANT_E_RAW: (e_waveform, e_raw, ablation_grid),
+                VARIANT_E_RAW: (
+                    e_waveform,
+                    e_raw,
+                    grid if dual_direction_selector else ablation_grid,
+                ),
             }
             for variant, (base, direction, alphas) in variant_directions.items():
                 rows, items, evidence = materialize_direction(
@@ -1049,7 +1239,15 @@ def main() -> None:
             }
         )
 
-    selector = selector_seal(candidate_rows, target_by_case, scale_value)
+    selector = (
+        dual_direction_selector_seal(
+            candidate_rows,
+            target_by_case,
+            scale_value,
+        )
+        if dual_direction_selector
+        else selector_seal(candidate_rows, target_by_case, scale_value)
+    )
     selector_path = output_dir / "candidate_e_selector_seal_pre_exact_v27.json"
     write_json(selector_path, selector)
     selector_sha256 = sha256_file(selector_path)
@@ -1228,8 +1426,11 @@ def main() -> None:
                 }
             )
             continue
+        selected_variant = str(
+            selected.get("direction_family", VARIANT_E_PROJECTED)
+        )
         selected_row = merged_by_key[
-            (case_id, VARIANT_E_PROJECTED, float(selected["alpha"]))
+            (case_id, selected_variant, float(selected["alpha"]))
         ]
         after_gap = abs(
             float(selected_row["current_topology_exact_shimmer_db"])
@@ -1240,6 +1441,7 @@ def main() -> None:
                 "case_id": case_id,
                 "material_exact_gap": material,
                 "selected_candidate_present": True,
+                "selected_direction_family": selected_variant,
                 "selected_alpha": float(selected["alpha"]),
                 "selected_candidate_path": selected["candidate_path"],
                 "selected_candidate_sha256": selected["candidate_sha256"],
@@ -1290,17 +1492,21 @@ def main() -> None:
     e_parity = [
         row for row in parity_rows if str(row["variant"]).startswith("candidate_e_")
     ]
-    e_projected_summary = current_summaries[VARIANT_E_PROJECTED]
+    selector_variants = (
+        CANDIDATE_E_VARIANTS
+        if dual_direction_selector
+        else (VARIANT_E_PROJECTED,)
+    )
     required_peak_alphas = {
         -primary_alpha,
         0.0,
         primary_alpha,
         legacy_alpha,
     }
-    e_projected_required_peak_rows = [
+    e_required_peak_rows = [
         row
         for row in merged_rows
-        if row["variant"] == VARIANT_E_PROJECTED
+        if row["variant"] in selector_variants
         and float(row["alpha"]) in required_peak_alphas
     ]
     diagnostic_gates = {
@@ -1317,11 +1523,22 @@ def main() -> None:
         ),
         "candidate_e_required_steps_paired_peak_certified": all(
             bool(row["paired_candidate_sinc70_search_may_be_skipped"])
-            for row in e_projected_required_peak_rows
+            for row in e_required_peak_rows
         ),
         "candidate_e_primary_direction_sign": (
-            float(e_projected_summary["direction_sign_match_fraction"])
-            >= float(gates["primary_local_direction_sign_match_fraction_min"])
+            all(
+                float(
+                    current_summaries[variant][
+                        "direction_sign_match_fraction"
+                    ]
+                )
+                >= float(
+                    gates[
+                        "primary_local_direction_sign_match_fraction_min"
+                    ]
+                )
+                for variant in selector_variants
+            )
         ),
         "candidate_e_selector_all_cases_selected": (
             int(selected_summary["selected_candidate_count"])
@@ -1348,18 +1565,35 @@ def main() -> None:
         "formal_generator_training_remains_no_go": True,
     }
     diagnostic_pass = all(diagnostic_gates.values())
-    decision = (
-        "PASS_CANDIDATE_E_EXACT_PATH_DIRECTIONAL_MECHANISM_V27"
-        if diagnostic_pass
-        else "NO_GO_CANDIDATE_E_EXACT_PATH_DIRECTIONAL_MECHANISM_V27"
-    )
+    if dual_direction_selector:
+        decision = (
+            "PASS_CANDIDATE_E_DUAL_DIRECTION_MECHANISM_V27R4"
+            if diagnostic_pass
+            else "NO_GO_CANDIDATE_E_DUAL_DIRECTION_MECHANISM_V27R4"
+        )
+        report_schema = (
+            "avqi-route-c-shimmer-db-candidate-e-diagnostic-v27r4"
+        )
+        receipt_schema = (
+            "avqi-route-c-shimmer-db-candidate-e-diagnostic-receipt-v27r4"
+        )
+    else:
+        decision = (
+            "PASS_CANDIDATE_E_EXACT_PATH_DIRECTIONAL_MECHANISM_V27"
+            if diagnostic_pass
+            else "NO_GO_CANDIDATE_E_EXACT_PATH_DIRECTIONAL_MECHANISM_V27"
+        )
+        report_schema = "avqi-route-c-shimmer-db-candidate-e-diagnostic-v27"
+        receipt_schema = (
+            "avqi-route-c-shimmer-db-candidate-e-diagnostic-receipt-v27"
+        )
 
     write_csv(output_dir / "candidate_grid_results.csv", merged_rows)
     write_csv(output_dir / "directional_sign_audit.csv", directional_rows)
     write_csv(output_dir / "pulse_forward_parity.csv", parity_rows)
     write_csv(output_dir / "selector_exact_adjudication.csv", selected_exact_rows)
     report = {
-        "schema_version": "avqi-route-c-shimmer-db-candidate-e-diagnostic-v27",
+        "schema_version": report_schema,
         "decision": decision,
         "scientific_role": "development_calibration_mechanism_diagnosis_only",
         "source_commit": args.source_commit,
@@ -1412,7 +1646,7 @@ def main() -> None:
     report_path = output_dir / "candidate_e_directional_diagnostic_report_v27.json"
     write_json(report_path, report)
     receipt = {
-        "schema_version": "avqi-route-c-shimmer-db-candidate-e-diagnostic-receipt-v27",
+        "schema_version": receipt_schema,
         "decision": decision,
         "report_sha256": sha256_file(report_path),
         "candidate_grid_results_sha256": sha256_file(
