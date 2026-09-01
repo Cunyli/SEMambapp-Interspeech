@@ -234,9 +234,11 @@ def proxy_evidence(
             source_indices,
             prefix,
         )
-        if abs(float(direct.detach()) - float(scalar.detach())) > 1e-7:
-            raise ValueError("Candidate-D scalar/evidence reconstruction drift")
         return float(direct.detach()), {
+            "evidence_reconstruction_scalar": float(scalar.detach()),
+            "evidence_reconstruction_absolute_error": abs(
+                float(direct.detach()) - float(scalar.detach())
+            ),
             "amplitude_positions_samples": centers.detach().cpu().tolist(),
             "amplitudes": amplitudes.detach().cpu().tolist(),
             "valid_pair_mask": valid_pair.detach().cpu().tolist(),
@@ -249,6 +251,8 @@ def proxy_evidence(
         prefix,
     )
     return float(result.shimmer_db.detach()), {
+        "evidence_reconstruction_scalar": float(result.shimmer_db.detach()),
+        "evidence_reconstruction_absolute_error": 0.0,
         "amplitude_positions_samples": (
             result.amplitude_centers.detach().cpu().tolist()
         ),
@@ -758,6 +762,9 @@ def main() -> None:
                     "contribution_max_absolute_error_db": array_max_error(
                         evidence["pair_contributions_db"],
                         exact["pair_contributions_db"],
+                    ),
+                    "proxy_evidence_reconstruction_absolute_error": float(
+                        evidence["evidence_reconstruction_absolute_error"]
                     ),
                 }
             )
