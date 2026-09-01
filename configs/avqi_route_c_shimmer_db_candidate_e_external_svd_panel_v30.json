@@ -1,0 +1,74 @@
+{
+  "schema_version": "avqi-route-c-shimmer-db-candidate-e-external-svd-panel-v30",
+  "scientific_stage_mapping": "Candidate-E successor of v24 prepare/seal",
+  "authorization": {
+    "decision": "PASS_CANDIDATE_E_OPENED_V15_CONFIRMATION_EXTERNAL_PREP_AUTHORIZED_V29",
+    "report_sha256": "0a52b7f329f30f2a369037dc0c008b0a79cbf730ecbbff5360d8afd75f171d9a",
+    "receipt_sha256": "02651f5e1757ce327966cb0f44bcb590988240328f1058c576892f6006970b15",
+    "candidate_e_frozen": true,
+    "retuning_authorized": false
+  },
+  "panel_selection": {
+    "dataset": "SVD",
+    "patient_only": true,
+    "speaker_split_before_simulation": true,
+    "speakers_per_sex": 3,
+    "sex_coverage": [
+      "female",
+      "male"
+    ],
+    "views_per_speaker": [
+      "cs",
+      "sv"
+    ],
+    "conditions": [
+      "rir_only",
+      "snr20",
+      "snr10"
+    ],
+    "selection_salt": "avqi-route-c-shimmer-db-external-svd-v24-20260830",
+    "selection_algorithm_inherited_unchanged_from_v24": true,
+    "prior_speaker_ledger_sha256": "3063ae0f0dae971787d2c4aca1a3f4558e077c6aa9116052c8d10c1564f6799d",
+    "exclude_all_historical_tau_speakers": true,
+    "exact_outcomes_used_for_selection": false
+  },
+  "recipe_contract": {
+    "indices": [
+      936,
+      937,
+      938,
+      939,
+      940,
+      941,
+      942,
+      943,
+      944,
+      945,
+      946,
+      947
+    ],
+    "assignment_inherited_unchanged_from_v24": true,
+    "speaker_selection_before_simulation_required": true
+  },
+  "generator_contract": {
+    "candidate": "S3_500",
+    "mode": "frozen_inference_only",
+    "optimizer_created": false,
+    "optimizer_steps": 0
+  },
+  "exact_contract": {
+    "target_shimmer_values_opened": false,
+    "base_exact_outcomes_opened": false,
+    "candidate_exact_outcomes_opened": false,
+    "next_stage": "seal_same_speaker_clean_pathological_target_scalar_v31"
+  },
+  "immutable_boundaries": {
+    "old_v23_no_go_receipt_preserved": true,
+    "old_v24_v25_v26_scripts_not_used_as_authorization": true,
+    "candidate_e_source_config_alpha_selector_frozen": true,
+    "no_final_waveform_highpass": true,
+    "generator_optimizer_steps": 0,
+    "formal_generator_training_authorized": false,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  }
+}
