@@ -84,12 +84,22 @@ def test_v32r8_runtime_config_freezes_science_and_binds_v32r7_no_go() -> None:
     assert runtime["batched_metric_reused_for_frozen_and_current_proxy"] is True
     assert runtime["batched_proxy_single_device_to_host_transfer"] is True
     assert runtime["slurm_hint_nomultithread"] is True
-    assert runtime["one_allocated_cpu_per_physical_core_required"] is True
+    assert runtime["one_slurm_cpu_per_physical_core_required"] is True
     assert runtime["allocated_cpu_count_required"] == 10
+    assert runtime["visible_smt_siblings_allowed_but_workers_pinned"] is True
+    assert runtime["topology_workers_pinned_to_distinct_physical_cores"] is True
     assert runtime["zero_step_exact_input_pcm16_identity_asserted"] is True
     assert runtime["zero_step_current_topology_reused_from_base"] is True
     assert runtime["candidate_topology_refresh_count"] == 8
     assert runtime["serial_oracle_required"] is True
+    failed = config["failed_preflight"]
+    assert failed["job_id"] == "20044455"
+    assert failed["output_directory_created"] is False
+    assert failed["candidate_exact_outcomes_opened"] is False
+    diagnostic = config["slurm_cpu_layout_diagnostic"]
+    assert diagnostic["job_id"] == "20044479"
+    assert diagnostic["visible_logical_cpu_count"] == 20
+    assert diagnostic["distinct_physical_core_count"] == 10
     scientific = config["frozen_scientific_contract"]
     assert scientific["direction_families"] == list(v32.CANDIDATE_E_VARIANTS)
     assert scientific["alpha_ladder"] == list(v32.ALPHA_LADDER)
@@ -99,7 +109,7 @@ def test_v32r8_runtime_config_freezes_science_and_binds_v32r7_no_go() -> None:
     assert scientific["exact_praat_remains_final_judge"] is True
 
 
-def test_v32r8_physical_cpu_certificate_rejects_smt_siblings(
+def test_v32r8_physical_cpu_certificate_rejects_insufficient_physical_cores(
     tmp_path: Path,
 ) -> None:
     cpu_ids = list(range(10))
@@ -111,8 +121,12 @@ def test_v32r8_physical_cpu_certificate_rejects_smt_siblings(
             f"{cpu_id // 2}\n",
             encoding="utf-8",
         )
-    with pytest.raises(ValueError, match="SMT siblings"):
-        v32.physical_cpu_allocation_certificate(cpu_ids, tmp_path)
+    with pytest.raises(ValueError, match="ten distinct physical CPU cores"):
+        v32.physical_cpu_allocation_certificate(
+            cpu_ids,
+            tmp_path,
+            requested_cpu_count=10,
+        )
 
 
 def test_v32r8_physical_cpu_certificate_accepts_distinct_cores(
@@ -127,11 +141,41 @@ def test_v32r8_physical_cpu_certificate_accepts_distinct_cores(
             f"{cpu_id}\n",
             encoding="utf-8",
         )
-    certificate = v32.physical_cpu_allocation_certificate(cpu_ids, tmp_path)
-    assert certificate["allocated_cpu_count"] == 10
+    certificate = v32.physical_cpu_allocation_certificate(
+        cpu_ids,
+        tmp_path,
+        requested_cpu_count=10,
+    )
+    assert certificate["visible_logical_cpu_count"] == 10
+    assert certificate["slurm_cpus_per_task"] == 10
     assert certificate["distinct_physical_core_count"] == 10
-    assert certificate["one_allocated_cpu_per_physical_core"] is True
+    assert certificate["one_slurm_cpu_per_physical_core"] is True
+    assert len(certificate["physical_core_representative_cpu_ids"]) == 10
     assert certificate["waveform_or_case_identity_used"] is False
+
+
+def test_v32r8_physical_cpu_certificate_accepts_visible_smt_siblings(
+    tmp_path: Path,
+) -> None:
+    cpu_ids = list(range(20))
+    for cpu_id in cpu_ids:
+        topology = tmp_path / f"cpu{cpu_id}" / "topology"
+        topology.mkdir(parents=True)
+        (topology / "physical_package_id").write_text("0\n", encoding="utf-8")
+        (topology / "core_id").write_text(
+            f"{cpu_id % 10}\n",
+            encoding="utf-8",
+        )
+    certificate = v32.physical_cpu_allocation_certificate(
+        cpu_ids,
+        tmp_path,
+        requested_cpu_count=10,
+    )
+    assert certificate["visible_logical_cpu_count"] == 20
+    assert certificate["distinct_physical_core_count"] == 10
+    assert certificate["physical_core_representative_cpu_ids"] == list(
+        range(10)
+    )
 
 
 def test_v32r8_candidate_layout_refreshes_only_eight_nonzero_waveforms() -> None:
@@ -443,6 +487,13 @@ def test_v32r8_source_overlaps_result_blind_pipeline_and_keeps_oracle() -> None:
     assert "if index != raw_zero" in pool_source
     assert "materialized_by_index[raw_zero]" in pool_source
     assert "topology_futures" in pool_source
+    assert "os.sched_setaffinity(worker.process.pid" in pool_source
+    assert '"pinned_physical_core"' in pool_source
+    assert '"observed_pinned_affinity"' in pool_source
+    assert (
+        '"topology_workers_pinned_to_distinct_physical_cores": True'
+        in pool_source
+    )
     assert "batched_metric_pcm16_from_waveforms" in pool_source
     assert "topology_proxy_values_from_metric_batch" in pool_source
     assert "candidate_unique_pcm24_count" in pool_source

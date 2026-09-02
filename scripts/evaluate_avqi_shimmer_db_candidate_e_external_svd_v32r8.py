@@ -184,13 +184,20 @@ def require_training_boundary(value: dict[str, Any], label: str) -> None:
 def physical_cpu_allocation_certificate(
     cpu_ids: list[int] | None = None,
     topology_root: Path = Path("/sys/devices/system/cpu"),
+    requested_cpu_count: int | None = None,
 ) -> dict[str, Any]:
     assigned = sorted(
         os.sched_getaffinity(0) if cpu_ids is None else set(cpu_ids)
     )
-    if len(assigned) != TOPOLOGY_WORKER_COUNT + 2:
-        raise ValueError("v32r8 requires ten allocated physical CPUs")
-    physical_cores: list[list[int]] = []
+    requested = (
+        int(os.environ.get("SLURM_CPUS_PER_TASK", "0"))
+        if requested_cpu_count is None
+        else requested_cpu_count
+    )
+    required = TOPOLOGY_WORKER_COUNT + 2
+    if requested != required:
+        raise ValueError("v32r8 requires ten Slurm CPUs per task")
+    physical_core_by_cpu: dict[int, list[int]] = {}
     for cpu_id in assigned:
         topology = topology_root / f"cpu{cpu_id}" / "topology"
         package_id = int(
@@ -201,16 +208,28 @@ def physical_cpu_allocation_certificate(
         core_id = int(
             (topology / "core_id").read_text(encoding="utf-8")
         )
-        physical_cores.append([package_id, core_id])
-    distinct = len({tuple(value) for value in physical_cores})
-    if distinct != len(assigned):
-        raise ValueError("v32r8 Slurm allocation contains SMT siblings")
+        physical_core_by_cpu[cpu_id] = [package_id, core_id]
+    physical_keys = {
+        tuple(value) for value in physical_core_by_cpu.values()
+    }
+    distinct = len(physical_keys)
+    if distinct != required:
+        raise ValueError("v32r8 requires ten distinct physical CPU cores")
+    representative_by_core: dict[tuple[int, int], int] = {}
+    for cpu_id, value in physical_core_by_cpu.items():
+        representative_by_core.setdefault(tuple(value), cpu_id)
+    representatives = [
+        representative_by_core[key] for key in sorted(representative_by_core)
+    ]
     return {
-        "allocated_cpu_ids": assigned,
-        "allocated_cpu_count": len(assigned),
-        "physical_core_keys": physical_cores,
+        "visible_logical_cpu_ids": assigned,
+        "visible_logical_cpu_count": len(assigned),
+        "slurm_cpus_per_task": requested,
+        "physical_core_by_logical_cpu": physical_core_by_cpu,
+        "physical_core_keys": [list(key) for key in sorted(physical_keys)],
+        "physical_core_representative_cpu_ids": representatives,
         "distinct_physical_core_count": distinct,
-        "one_allocated_cpu_per_physical_core": True,
+        "one_slurm_cpu_per_physical_core": True,
         "slurm_hint_nomultithread_required": True,
         "waveform_or_case_identity_used": False,
     }
@@ -426,8 +445,10 @@ def validate_runtime_successor(
         "batched_metric_reused_for_frozen_and_current_proxy": True,
         "batched_proxy_single_device_to_host_transfer": True,
         "slurm_hint_nomultithread": True,
-        "one_allocated_cpu_per_physical_core_required": True,
+        "one_slurm_cpu_per_physical_core_required": True,
         "allocated_cpu_count_required": TOPOLOGY_WORKER_COUNT + 2,
+        "visible_smt_siblings_allowed_but_workers_pinned": True,
+        "topology_workers_pinned_to_distinct_physical_cores": True,
         "zero_step_pcm24_identity_asserted": True,
         "zero_step_exact_input_pcm16_identity_asserted": True,
         "zero_step_current_topology_reused_from_base": True,
@@ -444,6 +465,51 @@ def validate_runtime_successor(
     }
     if runtime != expected_runtime:
         raise ValueError("v32r8 runtime implementation contract drift")
+    failed_preflight = config.get("failed_preflight", {})
+    if failed_preflight != {
+        "job_id": "20044455",
+        "state": "FAILED",
+        "exit_code": "1:0",
+        "source_commit": "52c0e4f2d1c3ad52bc97b8d68d2c687d11b08f05",
+        "runner_sha256": (
+            "7bf29404d7602116923b7283996fa820b0edce0563718f0168658b86ac1127b6"
+        ),
+        "runtime_config_sha256": (
+            "8cce85d35b935fa80ce40cbbc60137e3d65e275b1b54bd98e15a00e8cfee60be"
+        ),
+        "launcher_sha256": (
+            "16e47e6f6eaa187f8849138b26c190a33382284cace6907cca821d4a3798eea4"
+        ),
+        "failure": (
+            "logical_affinity_count_was_mistaken_for_physical_core_count"
+        ),
+        "output_directory_created": False,
+        "candidate_exact_outcomes_opened": False,
+        "scientific_decision_created": False,
+        "generator_optimizer_steps": 0,
+    }:
+        raise ValueError("v32r8 failed preflight evidence drift")
+    cpu_diagnostic = config.get("slurm_cpu_layout_diagnostic", {})
+    if cpu_diagnostic != {
+        "job_id": "20044479",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "script_sha256": (
+            "abfa7e64e5e0ceecfe59bba9ded401049c4c7a053f533b45ced63b6f5f6eec8c"
+        ),
+        "stdout_sha256": (
+            "c27001e10a4c7485c991b93ce2586ce8408a9f3e14ca5cde28378f6313b6b0ed"
+        ),
+        "stderr_sha256": (
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ),
+        "slurm_cpus_per_task": TOPOLOGY_WORKER_COUNT + 2,
+        "visible_logical_cpu_count": 20,
+        "distinct_physical_core_count": TOPOLOGY_WORKER_COUNT + 2,
+        "candidate_or_target_waveforms_read": False,
+        "candidate_exact_outcomes_opened": False,
+    }:
+        raise ValueError("v32r8 Slurm CPU diagnostic evidence drift")
     scientific = config.get("frozen_scientific_contract", {})
     if scientific != {
         "direction_families": list(CANDIDATE_E_VARIANTS),
@@ -1007,6 +1073,11 @@ def build_candidate_pool_pipeline(
 ]:
     del predictor
     cpu_allocation = physical_cpu_allocation_certificate()
+    worker_cpu_ids = cpu_allocation[
+        "physical_core_representative_cpu_ids"
+    ][:TOPOLOGY_WORKER_COUNT]
+    if len(worker_cpu_ids) != TOPOLOGY_WORKER_COUNT:
+        raise ValueError("v32r8 topology worker CPU allocation drift")
     scale_value = float(target_scale[SHIMMER_DB_INDEX].detach().cpu())
     workers: list[ExactShimmerTopologyWorker] = []
     worker_evidence: list[dict[str, Any]] = []
@@ -1030,10 +1101,22 @@ def build_candidate_pool_pipeline(
                 args.avqi_code_tree_sha256,
             )
             workers.append(worker)
+            worker_cpu_id = int(worker_cpu_ids[worker_index])
+            os.sched_setaffinity(worker.process.pid, {worker_cpu_id})
+            observed_affinity = sorted(
+                os.sched_getaffinity(worker.process.pid)
+            )
+            if observed_affinity != [worker_cpu_id]:
+                raise ValueError("v32r8 topology worker CPU pinning drift")
             warmup, warmup_ms = worker.warmup()
             worker_evidence.append(
                 {
                     "worker_index": worker_index,
+                    "pinned_logical_cpu_id": worker_cpu_id,
+                    "pinned_physical_core": cpu_allocation[
+                        "physical_core_by_logical_cpu"
+                    ][worker_cpu_id],
+                    "observed_pinned_affinity": observed_affinity,
                     "startup_ms": worker.startup_ms,
                     "warmup_request_wall_ms": warmup_ms,
                     "startup": worker.startup,
@@ -1474,6 +1557,8 @@ def build_candidate_pool_pipeline(
         "batched_metric_reused_for_frozen_and_current_proxy": True,
         "batched_proxy_single_device_to_host_transfer": True,
         "slurm_hint_nomultithread": True,
+        "visible_smt_siblings_allowed_but_workers_pinned": True,
+        "topology_workers_pinned_to_distinct_physical_cores": True,
         "physical_cpu_allocation": cpu_allocation,
         "zero_step_pcm24_identity_asserted": True,
         "zero_step_exact_input_pcm16_identity_asserted": True,
