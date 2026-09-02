@@ -43,12 +43,15 @@ TRAINING_DECISION = "NO_GO_AVQI_T2_TRAINING"
 EXACT_MARKER = "AVQI_CANDIDATE_E_TARGET_SHIMMER_JSON="
 EXACT_TARGET_SCORER = r"""
 import json
+import os
 import sys
+import tempfile
 
 sys.path.insert(0, sys.argv[1])
 import parselmouth
+import soundfile as sf
+from parselmouth.praat import call
 from avqi_code.main import (
-    get_shimmers,
     get_voiced_segments,
     highpass_filter,
     length_normalize_sv,
@@ -66,7 +69,24 @@ for item in request["items"]:
         metric = get_voiced_segments("praat", highpassed, 16000)
     else:
         raise ValueError(f"unsupported view: {item['view']}")
-    _, shimmer_db = get_shimmers("praat", metric, 16000)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as handle:
+        metric_path = handle.name
+    try:
+        sf.write(metric_path, metric, 16000)
+        sound = parselmouth.Sound(metric_path)
+        point_process = call(sound, "To PointProcess (periodic, cc)", 50, 400)
+        shimmer_db = call(
+            [sound, point_process],
+            "Get shimmer (local_dB)",
+            0,
+            0,
+            0.0001,
+            0.02,
+            1.3,
+            1.6,
+        )
+    finally:
+        os.unlink(metric_path)
     rows.append({"id": item["id"], "shimmer_db": float(shimmer_db)})
 print(
     "AVQI_CANDIDATE_E_TARGET_SHIMMER_JSON="
