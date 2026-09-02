@@ -187,7 +187,7 @@ def test_v31r2_rejects_unbound_or_runtime_retained_rerun() -> None:
 
     panel, receipt = sealed_panel()
     receipt["failed_v30r2_evidence"]["state"] = "COMPLETED"
-    with pytest.raises(ValueError, match="failed-run evidence drift"):
+    with pytest.raises(ValueError, match="failed-run evidence .*drift"):
         v31r2.validate_panel_binding(panel, receipt, panel_sha256="e" * 64)
 
 
