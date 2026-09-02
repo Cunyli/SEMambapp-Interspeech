@@ -5,7 +5,6 @@ from copy import deepcopy
 
 import pytest
 
-from model.avqi_components import AVQI_COMPONENT_NAMES
 import scripts.seal_avqi_shimmer_db_candidate_e_external_svd_target_v31 as v31
 
 
@@ -128,14 +127,10 @@ def test_v31_contract_retains_only_supervised_target_scalar() -> None:
     rows = v31.validate_panel_binding(panel, receipt, panel_sha256="e" * 64)
     exact_rows = []
     for index, row in enumerate(rows):
-        components = {
-            name: float(index + component)
-            for component, name in enumerate(AVQI_COMPONENT_NAMES)
-        }
         exact_rows.append(
             {
                 "id": f"target:{row['case_id']}",
-                "components": components,
+                "shimmer_db": float(index + 1),
             }
         )
     exact = {

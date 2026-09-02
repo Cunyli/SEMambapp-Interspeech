@@ -10,20 +10,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from scripts import prepare_avqi_shimmer_db_candidate_e_external_svd_panel_v30 as v30
-from scripts.evaluate_avqi_shimmer_db_candidate_c_fresh_panel import (
-    SHIMMER_DB_INDEX,
-)
-from scripts.evaluate_avqi_shimmer_fresh_panel import (
-    avqi_code_tree_sha256,
-    exact_index,
-    run_exact_batch,
-)
+from scripts.evaluate_avqi_shimmer_fresh_panel import avqi_code_tree_sha256
 from scripts.prepare_avqi_shimmer_db_external_svd_panel_v24 import (
     CONDITIONS,
     EXPECTED_CASES,
@@ -46,6 +40,46 @@ TARGET_DECISION = (
     "SEALED_CANDIDATE_E_EXTERNAL_SVD_TARGET_SCALARS_SELECTOR_AUTHORIZED_V31"
 )
 TRAINING_DECISION = "NO_GO_AVQI_T2_TRAINING"
+EXACT_MARKER = "AVQI_CANDIDATE_E_TARGET_SHIMMER_JSON="
+EXACT_TARGET_SCORER = r"""
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import parselmouth
+from avqi_code.main import (
+    get_shimmers,
+    get_voiced_segments,
+    highpass_filter,
+    length_normalize_sv,
+    read_and_resample_signal,
+)
+
+request = json.load(sys.stdin)
+rows = []
+for item in request["items"]:
+    signal = read_and_resample_signal(item["path"], 16000)
+    highpassed = highpass_filter("praat", signal, 16000)
+    if item["view"] == "sv":
+        metric = length_normalize_sv("praat", highpassed, 16000)
+    elif item["view"] == "cs":
+        metric = get_voiced_segments("praat", highpassed, 16000)
+    else:
+        raise ValueError(f"unsupported view: {item['view']}")
+    _, shimmer_db = get_shimmers("praat", metric, 16000)
+    rows.append({"id": item["id"], "shimmer_db": float(shimmer_db)})
+print(
+    "AVQI_CANDIDATE_E_TARGET_SHIMMER_JSON="
+    + json.dumps(
+        {
+            "parselmouth_version": parselmouth.__version__,
+            "praat_version": parselmouth.PRAAT_VERSION,
+            "rows": rows,
+        },
+        sort_keys=True,
+    )
+)
+"""
 
 
 def add_hashed_path(parser: argparse.ArgumentParser, option: str) -> None:
@@ -236,6 +270,42 @@ def target_exact_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def run_target_shimmer_exact(
+    items: list[dict[str, Any]],
+    exact_python: Path,
+    avqi_code_root: Path,
+) -> dict[str, Any]:
+    completed = subprocess.run(
+        [str(exact_python), "-c", EXACT_TARGET_SCORER, str(avqi_code_root)],
+        input=json.dumps({"items": items}, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "target-only exact Shimmer scorer failed: "
+            + completed.stderr[-4000:]
+        )
+    lines = [
+        line
+        for line in completed.stdout.splitlines()
+        if line.startswith(EXACT_MARKER)
+    ]
+    if len(lines) != 1:
+        raise RuntimeError("target-only exact Shimmer scorer marker drift")
+    payload = json.loads(lines[0][len(EXACT_MARKER) :])
+    expected_ids = [str(item["id"]) for item in items]
+    observed_ids = [str(row["id"]) for row in payload.get("rows", [])]
+    if observed_ids != expected_ids:
+        raise ValueError("target-only exact Shimmer coverage/order drift")
+    for row in payload["rows"]:
+        if not isinstance(row.get("shimmer_db"), (int, float)):
+            raise ValueError(f"target Shimmer scalar is not numeric: {row['id']}")
+        if not math.isfinite(float(row["shimmer_db"])):
+            raise ValueError(f"target Shimmer scalar is non-finite: {row['id']}")
+    return payload
+
+
 def build_target_contract(
     panel: dict[str, Any],
     rows: list[dict[str, Any]],
@@ -247,7 +317,7 @@ def build_target_contract(
     slurm_job_id: str,
     avqi_tree_sha256: str,
 ) -> dict[str, Any]:
-    exact_by_id = exact_index(exact)
+    exact_by_id = {str(row["id"]): row for row in exact["rows"]}
     expected_ids = {f"target:{row['case_id']}" for row in rows}
     if set(exact_by_id) != expected_ids:
         raise ValueError("Candidate-E external target exact coverage drift")
@@ -284,7 +354,7 @@ def build_target_contract(
                 "condition": row["condition"],
                 "target_sha256": row["target_sha256"],
                 "exact_target_shimmer_db": float(
-                    exact_by_id[f"target:{row['case_id']}"][SHIMMER_DB_INDEX]
+                    exact_by_id[f"target:{row['case_id']}"]["shimmer_db"]
                 ),
             }
             for row in rows
@@ -341,7 +411,7 @@ def main() -> None:
         raise FileNotFoundError(args.exact_python)
 
     args.output_dir.mkdir(parents=True)
-    exact = run_exact_batch(
+    exact = run_target_shimmer_exact(
         target_exact_items(rows),
         args.exact_python,
         args.avqi_code_root,
