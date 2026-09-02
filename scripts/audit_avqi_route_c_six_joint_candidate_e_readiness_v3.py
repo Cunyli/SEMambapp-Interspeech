@@ -418,7 +418,10 @@ def validate_promotion(
         "source_commit": PROMOTION_SOURCE_COMMIT,
         "slurm_job_id": PROMOTION_JOB_ID,
     }
-    if any(receipt.get(key) != value for key, value in expected_receipt_identity.items()):
+    if any(
+        receipt.get(key) != value
+        for key, value in expected_receipt_identity.items()
+    ):
         raise ValueError("Candidate-E promotion receipt identity differs")
     required_receipt_true = (
         "candidate_exact_outcomes_opened_after_selector_seal",

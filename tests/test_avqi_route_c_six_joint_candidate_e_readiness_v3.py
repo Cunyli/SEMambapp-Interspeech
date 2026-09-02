@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
+import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -297,3 +301,51 @@ def test_v3_source_contains_no_training_or_exact_scoring_path() -> None:
     assert "parselmouth" not in source
     assert "run_exact" not in source
     assert "joint_panel_authorized\": True" not in source
+
+
+def test_v3_shell_runner_is_executable_and_requires_every_binding() -> None:
+    path = (
+        Path(v3.__file__).resolve().parent
+        / "run_avqi_route_c_six_joint_candidate_e_readiness_v3.sh"
+    )
+    assert path.stat().st_mode & stat.S_IXUSR
+    source = path.read_text(encoding="utf-8")
+    for flag in (
+        "--contract",
+        "--contract-sha256",
+        "--promotion-report",
+        "--promotion-report-sha256",
+        "--promotion-receipt",
+        "--promotion-receipt-sha256",
+        "--speaker-ledger",
+        "--speaker-ledger-sha256",
+        "--source-root",
+        "--source-commit",
+        "--output-dir",
+    ):
+        assert flag in source
+    assert (
+        "scripts.audit_avqi_route_c_six_joint_candidate_e_readiness_v3"
+        in source
+    )
+    assert "sbatch" not in source
+    assert "parselmouth" not in source
+    assert "optimizer" not in source
+
+
+def test_v3_shell_runner_fails_closed_before_python_without_bindings() -> None:
+    path = (
+        Path(v3.__file__).resolve().parent
+        / "run_avqi_route_c_six_joint_candidate_e_readiness_v3.sh"
+    )
+    environment = dict(os.environ)
+    environment["RUNTIME_PYTHON"] = sys.executable
+    completed = subprocess.run(
+        [str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert completed.returncode == 2
+    assert "Missing required fail-closed argument: --contract" in completed.stderr
