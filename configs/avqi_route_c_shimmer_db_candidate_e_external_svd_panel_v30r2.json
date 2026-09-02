@@ -1,0 +1,91 @@
+{
+  "schema_version": "avqi-route-c-shimmer-db-candidate-e-external-svd-panel-v30r2",
+  "scientific_stage_mapping": "Candidate-E amended successor of v24 prepare/seal",
+  "authorization": {
+    "decision": "PASS_CANDIDATE_E_OPENED_V15_CONFIRMATION_EXTERNAL_PREP_AUTHORIZED_V29",
+    "report_sha256": "0a52b7f329f30f2a369037dc0c008b0a79cbf730ecbbff5360d8afd75f171d9a",
+    "receipt_sha256": "02651f5e1757ce327966cb0f44bcb590988240328f1058c576892f6006970b15",
+    "candidate_e_frozen": true,
+    "retuning_authorized": false
+  },
+  "amendment_trigger": {
+    "original_panel_seal_sha256": "4550cb36e3b8e2c1a2295d9bc70d8a1a1ab08466457d2d55855daf300722e9a6",
+    "original_panel_receipt_sha256": "57c24d4b561b47faf469b50ae3cb1e9b9499a524fa0788519655d68a61b6603e",
+    "original_updated_ledger_sha256": "a0107a7a2fba53505df4a99d0a093b8cd085b192eac86a99e07ef2e49190d7f0",
+    "v31_failed_job_id": "20031054",
+    "v31_failure_log_sha256": "0c891d28e44137fb2687e01f067c2553e36812cbb0f2a6d710eae34816bcc4ba",
+    "failure_class": "same_speaker_target_shimmer_db_non_finite",
+    "old_v30_artifacts_remain_immutable": true
+  },
+  "scorability_amendment": {
+    "ranking_salt_unchanged": "avqi-route-c-shimmer-db-external-svd-v24-20260830",
+    "ranking_algorithm_unchanged": true,
+    "scan_order": "ascending_frozen_rank_within_sex",
+    "selection_rule": "first_three_per_sex_with_paired_cs_sv_target_shimmer_percent_and_db_scorable",
+    "slot_assignment_rule": "retain_each_original_v30_eligible_speaker_in_its_original_recipe_slot_and_fill_each_ineligible_slot_with_the_next_selected_frozen_rank",
+    "raw_clean_preflight_required": true,
+    "prepared_target_confirmation_required": true,
+    "authoritative_metric_preprocessing": "AVQI_Praat_highpass_then_CS_voiced_segments_or_SV_length_normalization_then_PCM16",
+    "authoritative_praat_commands": [
+      "Get shimmer (local)",
+      "Get shimmer (local_dB)"
+    ],
+    "avqi_code_tree_sha256": "46987b3c447cb579aab4d34e87655938e4aa64e1b28c0e2348c4ea3e48f107f2",
+    "target_scalar_values_retained_or_used": false,
+    "target_scorability_boolean_used": true,
+    "target_shimmer_percent_scorability_boolean_used": true,
+    "target_shimmer_db_scorability_boolean_used": true,
+    "base_exact_outcomes_opened": false,
+    "candidate_exact_outcomes_opened": false,
+    "speaker_or_case_identity_hardcoded": false,
+    "diagnosis_or_severity_used": false
+  },
+  "panel_contract": {
+    "dataset": "SVD",
+    "patient_only": true,
+    "speaker_split_before_simulation": true,
+    "speakers_per_sex": 3,
+    "sex_coverage": [
+      "female",
+      "male"
+    ],
+    "views_per_speaker": [
+      "cs",
+      "sv"
+    ],
+    "conditions": [
+      "rir_only",
+      "snr20",
+      "snr10"
+    ],
+    "prior_speaker_ledger_sha256": "3063ae0f0dae971787d2c4aca1a3f4558e077c6aa9116052c8d10c1564f6799d",
+    "exclude_all_historical_tau_speakers": true
+  },
+  "recipe_contract": {
+    "indices": [
+      936,
+      937,
+      938,
+      939,
+      940,
+      941,
+      942,
+      943,
+      944,
+      945,
+      946,
+      947
+    ],
+    "assignment_unchanged": true,
+    "speaker_selection_before_simulation_required": true
+  },
+  "immutable_boundaries": {
+    "old_v23_no_go_receipt_preserved": true,
+    "old_v30_panel_and_v31_failure_artifacts_preserved": true,
+    "candidate_e_source_config_alpha_selector_frozen": true,
+    "no_final_waveform_highpass": true,
+    "generator_optimizer_steps": 0,
+    "formal_generator_training_authorized": false,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  }
+}
