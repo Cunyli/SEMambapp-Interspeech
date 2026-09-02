@@ -1,0 +1,78 @@
+{
+  "schema_version": "avqi-route-c-shimmer-db-candidate-e-external-svd-runtime-successor-v32r3",
+  "scientific_stage_mapping": "runtime-equivalent successor of v26 selector and exact adjudication",
+  "predecessor_no_go": {
+    "job_id": "20041915",
+    "state": "COMPLETED",
+    "exit_code": "0:0",
+    "scientific_decision": "NO_GO_CANDIDATE_E_EXTERNAL_SVD_PREEXACT_V32R2",
+    "source_commit": "defc4deb329fc3272cc65c1ddaf9a21af670195b",
+    "report_sha256": "1d6859503707be3e8565a8273036366caccfe4d989674d3c81e269f4814d8f3f",
+    "receipt_sha256": "88414cb6f76c463693c544aff1263658f37a40f655ec9e66802e13c1ffc66880",
+    "selector_seal_sha256": "224d659dab548f8a3d7ff4cb8a1cee57b569539f2bdafd7224c8aaa2c7c9fec9",
+    "candidate_attempts_sha256": "348b775e224d727c8e241f3e4f135a39529c7615415cf8666146573bf1f70f3c",
+    "candidate_pool_equivalence_sha256": "a2d6cfc5dbff0e1d0eed74b2daa119b247fbd59fb583abcf2989918991f2a4a6",
+    "stdout_sha256": "b87fedadb77c352ee85f68ea6e023a15292df6c4507bfae72aabd979739dc4c4",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "candidate_exact_outcomes_opened": false,
+    "exact_scoring_complete": false,
+    "old_receipt_remains_immutable": true,
+    "no_go_not_reinterpreted_as_pass": true
+  },
+  "runtime_successor": {
+    "failure_class": "implementation_runtime_only_before_candidate_exact",
+    "worker_count": 8,
+    "synthetic_only_warmup": true,
+    "warmup_fft_lengths": [
+      16384,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "batched_candidate_gpu_to_cpu_transfer": true,
+    "concurrent_pcm24_write_read_safety": true,
+    "in_memory_float32_topology_staging": true,
+    "per_case_selector_wall_time": true,
+    "serial_oracle_required": true,
+    "candidate_waveform_byte_equivalence_required": true,
+    "current_topology_hash_equivalence_required": true,
+    "current_proxy_absolute_tolerance": 1e-12,
+    "selector_choice_equivalence_required": true,
+    "uses_candidate_exact_outcomes": false,
+    "uses_speaker_or_case_identity_for_routing": false
+  },
+  "frozen_scientific_contract": {
+    "direction_families": [
+      "candidate_e_exact_path_projected",
+      "candidate_e_exact_path_raw_ablation"
+    ],
+    "alpha_ladder": [
+      0.001,
+      0.0005,
+      0.00025,
+      0.000125
+    ],
+    "selector": "maximum_current_topology_proxy_gap_reduction_across_projected_and_raw_exact_path_directions",
+    "deterministic_tie_break": [
+      "projected_before_raw",
+      "larger_alpha_before_smaller_alpha"
+    ],
+    "formal_total_metric_step_runtime_ms": 500.0,
+    "thresholds_unchanged": true,
+    "candidate_e_math_unchanged": true,
+    "target_scalar_contract_unchanged": true,
+    "exact_praat_remains_final_judge": true,
+    "no_final_waveform_highpass": true
+  },
+  "immutable_boundaries": {
+    "v30r2_panel_seal_unchanged": true,
+    "v31r2_target_scalar_seal_unchanged": true,
+    "v32r2_preexact_no_go_preserved": true,
+    "candidate_exact_must_remain_unopened_until_new_selector_seal": true,
+    "generator_optimizer_steps": 0,
+    "formal_generator_training_authorized": false,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  }
+}
