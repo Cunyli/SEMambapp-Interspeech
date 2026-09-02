@@ -1,0 +1,98 @@
+{
+  "schema_version": "avqi-route-c-shimmer-db-candidate-e-external-svd-runtime-successor-v32r5",
+  "scientific_stage_mapping": "runtime-equivalent successor of v26 selector and exact adjudication",
+  "predecessor_no_go": {
+    "job_id": "20043338",
+    "state": "COMPLETED",
+    "exit_code": "0:0",
+    "scientific_decision": "NO_GO_CANDIDATE_E_EXTERNAL_SVD_PREEXACT_V32R4",
+    "source_commit": "318f545aae0ebf3a1c0775f6f51f2e0395ff7553",
+    "report_sha256": "00d56c314105b4a1d1d092cb06bb31b32189fb45248d126b047477f2208d2856",
+    "receipt_sha256": "6898b8370aa1dbb0944b74528d0c2cbbfdb02e083d0c58682c4d992f584c129b",
+    "selector_seal_sha256": "1b0fa0b7b929faa53d1e900be3bc64034262ebd26a9d16fdcf3ba4a6f5d7ded3",
+    "candidate_attempts_sha256": "30e2cb56a9377665d66ac654341098572db91c30e53e1c75d1d6134309c02601",
+    "candidate_pool_equivalence_sha256": "a2d6cfc5dbff0e1d0eed74b2daa119b247fbd59fb583abcf2989918991f2a4a6",
+    "stdout_sha256": "ab971e8887723f15cee13123946a2daa1dee148c4f87aafd7431a0744fb63c46",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "candidate_exact_outcomes_opened": false,
+    "exact_scoring_complete": false,
+    "failed_gate": "total_metric_step_runtime_le_500ms",
+    "failed_case_count": 6,
+    "maximum_total_metric_step_runtime_ms": 859.4629579456523,
+    "old_receipt_remains_immutable": true,
+    "no_go_not_reinterpreted_as_pass": true
+  },
+  "runtime_successor": {
+    "failure_class": "implementation_runtime_only_before_candidate_exact",
+    "topology_worker_count": 8,
+    "executor_worker_count": 8,
+    "synthetic_only_warmup": true,
+    "warmup_fft_lengths": [
+      16384,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "pcm24_in_memory_encoding": true,
+    "pcm24_in_memory_decode_for_certificates": true,
+    "durable_single_write_without_disk_readback": true,
+    "serial_candidate_materialization": true,
+    "sealed_pcm24_reencoding_byte_audit": {
+      "candidate_count": 120,
+      "byte_identical_count": 120,
+      "zero_step_exact_input_pcm16_identity_count": 24,
+      "candidate_exact_outcomes_used": false,
+      "audit_script_sha256": "8346faabd258d3d1f06fd46d2191aa2416c2f571b416fee7669a4184ef82f2a7"
+    },
+    "zero_step_pcm24_identity_asserted": true,
+    "zero_step_exact_input_pcm16_identity_asserted": true,
+    "zero_step_current_topology_reused_from_base": true,
+    "nonzero_unique_pcm24_topology_refresh": true,
+    "candidate_topology_refresh_count": 8,
+    "batched_exact_forward_proxy_fft": true,
+    "precomputed_selector_certificates": true,
+    "serial_oracle_required": true,
+    "candidate_waveform_byte_equivalence_required": true,
+    "current_topology_hash_equivalence_required": true,
+    "current_proxy_absolute_tolerance": 1e-12,
+    "selector_choice_equivalence_required": true,
+    "uses_candidate_exact_outcomes": false,
+    "uses_speaker_or_case_identity_for_routing": false
+  },
+  "frozen_scientific_contract": {
+    "direction_families": [
+      "candidate_e_exact_path_projected",
+      "candidate_e_exact_path_raw_ablation"
+    ],
+    "alpha_ladder": [
+      0.001,
+      0.0005,
+      0.00025,
+      0.000125
+    ],
+    "selector": "maximum_current_topology_proxy_gap_reduction_across_projected_and_raw_exact_path_directions",
+    "deterministic_tie_break": [
+      "projected_before_raw",
+      "larger_alpha_before_smaller_alpha"
+    ],
+    "formal_total_metric_step_runtime_ms": 500.0,
+    "thresholds_unchanged": true,
+    "candidate_e_math_unchanged": true,
+    "target_scalar_contract_unchanged": true,
+    "exact_praat_remains_final_judge": true,
+    "no_final_waveform_highpass": true
+  },
+  "immutable_boundaries": {
+    "v30r2_panel_seal_unchanged": true,
+    "v31r2_target_scalar_seal_unchanged": true,
+    "v32r2_preexact_no_go_preserved": true,
+    "v32r3_preexact_no_go_preserved": true,
+    "v32r4_preexact_no_go_preserved": true,
+    "candidate_exact_must_remain_unopened_until_new_selector_seal": true,
+    "generator_optimizer_steps": 0,
+    "formal_generator_training_authorized": false,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  }
+}
