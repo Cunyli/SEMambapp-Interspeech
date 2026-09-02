@@ -1,0 +1,104 @@
+{
+  "schema_version": "avqi-route-c-six-joint-candidate-e-readiness-contract-v4",
+  "external_promotion_binding": {
+    "slurm_job_id": "20044559",
+    "observed_state": "COMPLETED",
+    "exit_code": "0:0",
+    "candidate_exact_outcomes_opened_after_selector_seal": true,
+    "scientific_result": "PASS_CANDIDATE_E_EXACT_PRAAT_EXTERNAL_SVD_PROMOTION_V32R8",
+    "promotion_report_sha256": "4a5b49dbdf3a1324d6b0f1e084d5153469f7c178afae0ded9cefd9060206e632",
+    "promotion_receipt_sha256": "d256073901fd708cfbad10687c8e281007f98a64b46e902bd8eeb528e06cc84f"
+  },
+  "historical_boundary": {
+    "predecessor_source_commit": "5d33561fd1324e6e9370a7ff815d34973a262d01",
+    "readiness_v2_sha256": "78b2769af014ed0bc2cfa6e4c70a235f4eab5e4266bcef1729f08cb74b64bc66",
+    "candidate_d_v23_closure_sha256": "56a314b65b7a1272f34ad300253ed86e5618c33d5bd9c958b4515d4e12719492",
+    "candidate_d_v23_no_go_remains_immutable": true,
+    "candidate_d_v23_no_go_reinterpreted_as_pass": false
+  },
+  "candidate_e_external_promotion": {
+    "report_schema": "avqi-route-c-shimmer-db-candidate-e-external-svd-exact-promotion-v32r8",
+    "receipt_schema": "avqi-route-c-shimmer-db-candidate-e-external-svd-receipt-v32r8",
+    "pass_decision": "PASS_CANDIDATE_E_EXACT_PRAAT_EXTERNAL_SVD_PROMOTION_V32R8",
+    "readiness_status": "READY_SHIMMER_DB_FOR_SIX_COMPONENT_JOINT_READINESS",
+    "source_commit": "109f398d607bce936a9576c826ff74ce0ea9f636",
+    "runner_sha256": "45dde78d00845d378c81ca863104cd19e39001c527c3ddee1224e9a644ff7429",
+    "runtime_config_sha256": "4dec4b018b6cd9f7a5a7f87966cc7f2dde057f152df256f65fc397faefb53b98",
+    "v32r7_no_go_report_sha256": "1f727fb4b766af4a8387b33828a3ad4b21bf7af80f4e167aa44996557f91e3d5",
+    "v32r7_no_go_receipt_sha256": "a10895951faf85d7abaeeb9657737d1fe66b9e6c30d20072abbad75f28c1a4c6",
+    "v30r2_panel_seal_sha256": "0f1147b107ae848b6914916ef0fec87ed2e115e6868c4014d132aae9b86487a2",
+    "v30r2_panel_receipt_sha256": "b4f570c8ed8fd2084469d2a998bdb5aa604b70cd52e5e72b16f95c420c78c711",
+    "v30r2_updated_ledger_sha256": "f5831ecd455f21bed626ebd4302881626553db2c378d45330faa75137179e4ee",
+    "v31r2_target_seal_sha256": "b3e33ef80e2f0454f55c4b045a644a6394dd29806889b6b186fc96757f06db2d",
+    "v31r2_target_receipt_sha256": "71a5e616a407675f2336d758acb3bffa457945862768f67942721ddd053d60a2",
+    "required_preexact_gates": [
+      "complete_selector_coverage",
+      "candidate_pool_frozen_serial_equivalence",
+      "total_metric_step_runtime_le_500ms",
+      "selector_uses_no_candidate_exact_outcome",
+      "selector_uses_no_identity",
+      "candidate_e_remains_frozen",
+      "generator_optimizer_steps_zero"
+    ],
+    "required_summary_gate_families": [
+      "mechanism_gates",
+      "integration_gates"
+    ],
+    "required_receipt_artifacts": [
+      "external_svd_report_v32r8.json",
+      "external_svd_exact_results_v32r8.csv",
+      "selector_seal_pre_exact_v32r8.json",
+      "candidate_e_attempts_pre_exact_v32r8.csv",
+      "candidate_pool_equivalence_v32r8.json"
+    ],
+    "exact_praat_is_final_judge": true,
+    "candidate_exact_must_follow_selector_seal": true,
+    "candidate_exact_outcomes_used_for_selection": false,
+    "speaker_or_case_identity_used_for_routing": false,
+    "preserved_preexact_no_go_versions": [
+      "v32r2",
+      "v32r3",
+      "v32r4",
+      "v32r5",
+      "v32r6",
+      "v32r7"
+    ],
+    "thresholds_changed": false
+  },
+  "readiness_interpretation": {
+    "component_decision": "PASS_SHIMMER_DB_CANDIDATE_E_COMPONENT_READINESS_V4",
+    "component_scientific_status": "fresh_speaker_panel_pass",
+    "shimmer_db_six_component_readiness_eligible": true,
+    "six_component_order": [
+      "cpps",
+      "hnr",
+      "shimmer_percent",
+      "shimmer_db",
+      "slope",
+      "tilt"
+    ],
+    "all_six_scientific_components_ready": true,
+    "readiness_scope": "component_scientific_status_only_not_joint_execution_authorization",
+    "joint_panel_decision": "NO_GO_SIX_JOINT_PANEL_OTHER_INPUTS_UNBOUND_V4",
+    "joint_panel_authorized": false,
+    "execution_authorized": false,
+    "joint_scientific_promotion_granted": false,
+    "unbound_joint_inputs": [
+      "candidate_e_joint_runtime_binding",
+      "six_gradient_report",
+      "six_gradient_receipt",
+      "fresh_panel_split_seal",
+      "fresh_speaker_source_manifest",
+      "clean_target_label_bank",
+      "joint_gradient_manifest"
+    ]
+  },
+  "immutable_training_boundary": {
+    "generator_loaded": false,
+    "generator_optimizer_created": false,
+    "generator_optimizer_steps": 0,
+    "formal_generator_training_submitted": false,
+    "formal_generator_training_authorized": false,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  }
+}
