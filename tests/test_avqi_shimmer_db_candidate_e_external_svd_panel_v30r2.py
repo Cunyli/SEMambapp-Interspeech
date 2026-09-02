@@ -4,8 +4,11 @@ import json
 import subprocess
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 import scripts.prepare_avqi_shimmer_db_candidate_e_external_svd_panel_v30r2 as v30r2
 
@@ -62,6 +65,16 @@ def test_v30r2_config_preregisters_boolean_only_generic_amendment() -> None:
     assert amendment["target_shimmer_percent_scorability_boolean_used"] is True
     assert amendment["target_shimmer_db_scorability_boolean_used"] is True
     assert amendment["speaker_or_case_identity_hardcoded"] is False
+    inheritance = config["retained_artifact_contract"]
+    assert inheritance["mode"] == v30r2.INHERITANCE_MODE
+    assert inheritance["retained_rerun_outputs_diagnostic_only"] is True
+    assert inheritance["retained_final_artifacts_byte_inherited"] is True
+    assert inheritance["uses_base_or_candidate_exact_outcomes"] is False
+    assert inheritance["failed_run_evidence"]["job_id"] == "20041442"
+    assert (
+        inheritance["failed_run_evidence"]["failure_not_reinterpreted_as_pass"]
+        is True
+    )
     assert config["immutable_boundaries"]["generator_optimizer_steps"] == 0
 
 
@@ -131,6 +144,12 @@ def test_slot_assignment_preserves_retained_v30_recipe_slots() -> None:
 def test_retained_equivalence_fails_closed_on_waveform_drift() -> None:
     common = {
         "case_id": "case-1",
+        "panel_speaker_id": "SVD:1",
+        "speaker_id": "1",
+        "session_id": "1001",
+        "view": "cs",
+        "condition": "rir_only",
+        "selection_digest": "e" * 64,
         "source_sha256": "a",
         "target_sha256": "b",
         "degraded_sha256": "c",
@@ -146,6 +165,186 @@ def test_retained_equivalence_fails_closed_on_waveform_drift() -> None:
     drifted = {**common, "base_sha256": "changed"}
     with pytest.raises(ValueError, match="equivalence failed"):
         v30r2.retained_waveform_equivalence([drifted], [common])
+
+
+def test_retained_rerun_diagnostic_separates_samples_from_final_artifacts(
+    tmp_path: Path,
+) -> None:
+    samples = np.linspace(-0.2, 0.2, 257, dtype=np.float32)
+    paths = {
+        name: tmp_path / f"{name}.wav"
+        for name in (
+            "old-target",
+            "new-target",
+            "old-degraded",
+            "new-degraded",
+            "old-base",
+            "new-base",
+        )
+    }
+    for name in ("old-target", "new-target", "old-degraded", "new-degraded"):
+        sf.write(paths[name], samples, v30r2.v24.SAMPLE_RATE, subtype="FLOAT")
+    sf.write(
+        paths["old-base"],
+        samples,
+        v30r2.v24.SAMPLE_RATE,
+        subtype="FLOAT",
+    )
+    sf.write(
+        paths["new-base"],
+        samples + np.float32(1e-6),
+        v30r2.v24.SAMPLE_RATE,
+        subtype="FLOAT",
+    )
+    identity = {
+        "panel_speaker_id": "SVD:1",
+        "speaker_id": "1",
+        "session_id": "1001",
+        "view": "cs",
+        "condition": "rir_only",
+        "selection_digest": "e" * 64,
+        "source_sha256": "a" * 64,
+        "recipe_index": 936,
+        "recipe_uid": "recipe",
+        "simulation_seed": 12,
+        "noise_start_sample": 34,
+    }
+    original = {
+        "case_id": "case-1",
+        **identity,
+        "target_path": str(paths["old-target"]),
+        "degraded_path": str(paths["old-degraded"]),
+        "base_path": str(paths["old-base"]),
+    }
+    rerun = {
+        "case_id": "case-1",
+        **identity,
+        "target_path": str(paths["new-target"]),
+        "degraded_path": str(paths["new-degraded"]),
+        "base_path": str(paths["new-base"]),
+    }
+    result = v30r2.retained_rerun_diagnostic([rerun], [original])
+    assert result["all_target_decoded_samples_identical"] is True
+    assert result["all_degraded_decoded_samples_identical"] is True
+    assert result["base_rerun_sample_identical_count"] == 0
+    assert result["retained_rerun_outputs_used_for_final_panel"] is False
+    assert result["rows"][0]["rerun_base_used_in_final_panel"] is False
+
+
+def test_retained_rerun_diagnostic_fails_closed_on_source_or_sample_drift(
+    tmp_path: Path,
+) -> None:
+    old_path = tmp_path / "old.wav"
+    rerun_path = tmp_path / "rerun.wav"
+    samples = np.linspace(-0.2, 0.2, 257, dtype=np.float32)
+    sf.write(old_path, samples, v30r2.v24.SAMPLE_RATE, subtype="FLOAT")
+    sf.write(rerun_path, samples, v30r2.v24.SAMPLE_RATE, subtype="FLOAT")
+    identity = {
+        "panel_speaker_id": "SVD:1",
+        "speaker_id": "1",
+        "session_id": "1001",
+        "view": "cs",
+        "condition": "rir_only",
+        "selection_digest": "e" * 64,
+        "source_sha256": "a" * 64,
+        "recipe_index": 936,
+        "recipe_uid": "recipe",
+        "simulation_seed": 12,
+        "noise_start_sample": 34,
+    }
+    original = {
+        "case_id": "case-1",
+        **identity,
+        "target_path": str(old_path),
+        "degraded_path": str(old_path),
+        "base_path": str(old_path),
+    }
+    source_drift = {
+        **original,
+        "source_sha256": "b" * 64,
+        "target_path": str(rerun_path),
+        "degraded_path": str(rerun_path),
+        "base_path": str(rerun_path),
+    }
+    with pytest.raises(ValueError, match="identity drift"):
+        v30r2.retained_rerun_diagnostic([source_drift], [original])
+
+    sf.write(
+        rerun_path,
+        samples + np.float32(1e-4),
+        v30r2.v24.SAMPLE_RATE,
+        subtype="FLOAT",
+    )
+    sample_drift = {
+        **original,
+        "target_path": str(rerun_path),
+        "degraded_path": str(rerun_path),
+        "base_path": str(rerun_path),
+    }
+    with pytest.raises(ValueError, match="simulation sample drift"):
+        v30r2.retained_rerun_diagnostic([sample_drift], [original])
+
+
+def test_retained_artifacts_are_inherited_by_case_id_without_speaker_hardcode(
+    tmp_path: Path,
+) -> None:
+    old_paths = {
+        field: tmp_path / f"old-{field}.wav"
+        for field in ("target", "degraded", "base")
+    }
+    retained_paths = {
+        field: tmp_path / f"retained-{field}.wav"
+        for field in ("target", "degraded", "base")
+    }
+    replacement_paths = {
+        field: tmp_path / f"replacement-{field}.wav"
+        for field in ("target", "degraded", "base")
+    }
+    for index, field in enumerate(("target", "degraded", "base"), start=1):
+        old_paths[field].write_bytes(bytes([index]) * 16)
+        retained_paths[field].write_bytes(b"rerun")
+        replacement_paths[field].write_bytes(b"replacement")
+    original = {
+        "case_id": "retained-case",
+        **{
+            f"{field}_path": str(path)
+            for field, path in old_paths.items()
+        },
+        **{
+            f"{field}_sha256": v30r2.v24.sha256_file(path)
+            for field, path in old_paths.items()
+        },
+    }
+    prepared = [
+        SimpleNamespace(
+            spec=SimpleNamespace(case_id="retained-case"),
+            **{
+                f"{field}_path": path
+                for field, path in retained_paths.items()
+            },
+        ),
+        SimpleNamespace(
+            spec=SimpleNamespace(case_id="replacement-case"),
+            **{
+                f"{field}_path": path
+                for field, path in replacement_paths.items()
+            },
+        ),
+    ]
+    result = v30r2.inherit_retained_v30_artifacts(prepared, [original])
+    assert result["retained_case_count"] == 1
+    assert result["replacement_case_count"] == 1
+    assert result["retained_final_artifacts_byte_inherited"] is True
+    assert result["speaker_or_case_identity_hardcoded"] is False
+    for field in ("target", "degraded", "base"):
+        assert retained_paths[field].read_bytes() == old_paths[field].read_bytes()
+        assert replacement_paths[field].read_bytes() == b"replacement"
+        artifact = result["rows"][0]["artifacts"][field]
+        assert artifact["source_path"] == str(old_paths[field].resolve())
+        assert artifact["destination_path"] == str(
+            retained_paths[field].resolve()
+        )
+        assert artifact["sha256"] == v30r2.v24.sha256_file(old_paths[field])
 
 
 def test_v30r2_ledger_preserves_old_entries_and_adds_replacement(

@@ -79,6 +79,34 @@
     "assignment_unchanged": true,
     "speaker_selection_before_simulation_required": true
   },
+  "retained_artifact_contract": {
+    "mode": "byte_inherit_original_v30_sealed_artifacts_after_result_blind_rerun",
+    "match_key": "case_id",
+    "artifact_fields": [
+      "target",
+      "degraded",
+      "base"
+    ],
+    "full_result_blind_rerun_required": true,
+    "retained_rerun_outputs_diagnostic_only": true,
+    "retained_final_artifacts_byte_inherited": true,
+    "replacement_artifacts_newly_generated": true,
+    "uses_target_scalar_values": false,
+    "uses_base_or_candidate_exact_outcomes": false,
+    "speaker_or_case_identity_hardcoded": false,
+    "failed_run_evidence": {
+      "job_id": "20041442",
+      "state": "FAILED",
+      "exit_code": "1:0",
+      "node": "dgx15",
+      "stdout_sha256": "44038adf06e149ff447d81785e78ee8d076aded305af56d5ad92ef8f36c71f42",
+      "stderr_sha256": "1b2f86c158eb4f07284f7fe17e6805f3b2cafe450dcbc1910550a9c890cfc271",
+      "preflight_sha256": "dc8ae36dd7f244c89d7165ab1a7aa5870174177fc5a346c459401cf07b050a3e",
+      "confirmation_sha256": "4508dd53ea923cfd719b6461d82fc53ebd16da448879ed4269a9c37eeb8958f3",
+      "old_artifacts_remain_immutable": true,
+      "failure_not_reinterpreted_as_pass": true
+    }
+  },
   "immutable_boundaries": {
     "old_v23_no_go_receipt_preserved": true,
     "old_v30_panel_and_v31_failure_artifacts_preserved": true,

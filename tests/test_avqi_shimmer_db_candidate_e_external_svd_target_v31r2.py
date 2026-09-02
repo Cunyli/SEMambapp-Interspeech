@@ -44,6 +44,8 @@ def sealed_panel() -> tuple[dict[str, object], dict[str, object]]:
             "selection_uses_target_scorability_boolean": True,
             "selection_uses_base_or_candidate_exact_outcomes": False,
             "slot_assignment_preserves_retained_v30_recipe_mapping": True,
+            "retained_v30_final_artifact_mode": v31r2.v30r2.INHERITANCE_MODE,
+            "retained_v30_rerun_outputs_used_for_final_panel": False,
             "prior_ledger_excluded_before_hash_ranking": True,
             "prior_panel_speaker_overlap": 0,
             "paired_cs_sv_same_session_required": True,
@@ -68,12 +70,31 @@ def sealed_panel() -> tuple[dict[str, object], dict[str, object]]:
             "target_scorability_preflight_v30r2.json": "1" * 64,
             "target_scorability_confirmation_v30r2.json": "2" * 64,
         },
+        "retained_v30_rerun_diagnostic_sha256": "3" * 64,
+        "retained_v30_artifact_inheritance_sha256": "4" * 64,
+        "retained_v30_equivalence_sha256": "5" * 64,
+        "generator": {
+            "mode": "frozen_inference_only",
+            "optimizer_created": False,
+            "optimizer_steps": 0,
+            "retained_rerun_diagnostic_only": True,
+            "retained_rerun_outputs_used_for_final_panel": False,
+            "replacement_outputs_used_for_final_panel": True,
+        },
         "waveform_contract": {
             "emitted_waveform_highpass": False,
             "exact_metric_highpass_branch_only": True,
             "target_is_same_speaker_same_view_clean_pathological": True,
+            "retained_v30_waveforms_byte_inherited_from_original_seal": True,
+            "replacement_waveforms_newly_generated": True,
             "full_band_pathology_guardrails_required_later": True,
             "denoising_nonregression_required_later": True,
+        },
+        "failed_v30r2_evidence": {
+            "job_id": "20041442",
+            "state": "FAILED",
+            "failure_not_reinterpreted_as_pass": True,
+            "old_artifacts_remain_immutable": True,
         },
         "exact_contract": {
             "target_shimmer_scalar_values_opened": False,
@@ -101,6 +122,14 @@ def sealed_panel() -> tuple[dict[str, object], dict[str, object]]:
         "candidate_exact_outcomes_opened": False,
         "target_scalar_stage_authorized": True,
         "selector_stage_authorized": False,
+        "retained_v30_artifact_inheritance_verified": True,
+        "retained_v30_rerun_outputs_used_for_final_panel": False,
+        "failed_v30r2_evidence": {
+            "job_id": "20041442",
+            "state": "FAILED",
+            "failure_not_reinterpreted_as_pass": True,
+            "old_artifacts_remain_immutable": True,
+        },
         "scientific_promotion_granted": False,
         "joint_panel_authorized": False,
         "generator_optimizer_steps": 0,
@@ -110,6 +139,9 @@ def sealed_panel() -> tuple[dict[str, object], dict[str, object]]:
             "panel_seal_v30r2.json": "e" * 64,
             "target_scorability_preflight_v30r2.json": "1" * 64,
             "target_scorability_confirmation_v30r2.json": "2" * 64,
+            "retained_v30_rerun_diagnostic_v30r2.json": "3" * 64,
+            "retained_v30_artifact_inheritance_v30r2.json": "4" * 64,
+            "retained_v30_equivalence_v30r2.json": "5" * 64,
         },
     }
     return panel, receipt
@@ -137,6 +169,25 @@ def test_v31r2_rejects_unbound_scorability_certificate() -> None:
         "target_scorability_confirmation_v30r2.json"
     ] = "f" * 64
     with pytest.raises(ValueError, match="scorability binding drift"):
+        v31r2.validate_panel_binding(panel, receipt, panel_sha256="e" * 64)
+
+
+def test_v31r2_rejects_unbound_or_runtime_retained_rerun() -> None:
+    panel, receipt = sealed_panel()
+    receipt["artifact_sha256"][
+        "retained_v30_artifact_inheritance_v30r2.json"
+    ] = "f" * 64
+    with pytest.raises(ValueError, match="retained binding drift"):
+        v31r2.validate_panel_binding(panel, receipt, panel_sha256="e" * 64)
+
+    panel, receipt = sealed_panel()
+    panel["generator"]["retained_rerun_outputs_used_for_final_panel"] = True
+    with pytest.raises(ValueError, match="generator drift"):
+        v31r2.validate_panel_binding(panel, receipt, panel_sha256="e" * 64)
+
+    panel, receipt = sealed_panel()
+    receipt["failed_v30r2_evidence"]["state"] = "COMPLETED"
+    with pytest.raises(ValueError, match="failed-run evidence drift"):
         v31r2.validate_panel_binding(panel, receipt, panel_sha256="e" * 64)
 
 

@@ -130,6 +130,8 @@ def validate_panel_binding(
         "selection_uses_target_scorability_boolean": True,
         "selection_uses_base_or_candidate_exact_outcomes": False,
         "slot_assignment_preserves_retained_v30_recipe_mapping": True,
+        "retained_v30_final_artifact_mode": v30r2.INHERITANCE_MODE,
+        "retained_v30_rerun_outputs_used_for_final_panel": False,
         "prior_ledger_excluded_before_hash_ranking": True,
         "prior_panel_speaker_overlap": 0,
         "paired_cs_sv_same_session_required": True,
@@ -157,6 +159,8 @@ def validate_panel_binding(
         "emitted_waveform_highpass": False,
         "exact_metric_highpass_branch_only": True,
         "target_is_same_speaker_same_view_clean_pathological": True,
+        "retained_v30_waveforms_byte_inherited_from_original_seal": True,
+        "replacement_waveforms_newly_generated": True,
         "full_band_pathology_guardrails_required_later": True,
         "denoising_nonregression_required_later": True,
     }
@@ -181,8 +185,42 @@ def validate_panel_binding(
         or receipt.get("candidate_exact_outcomes_opened") is not False
         or receipt.get("target_scalar_stage_authorized") is not True
         or receipt.get("selector_stage_authorized") is not False
+        or receipt.get("retained_v30_artifact_inheritance_verified") is not True
+        or (
+            receipt.get("retained_v30_rerun_outputs_used_for_final_panel")
+            is not False
+        )
     ):
         raise ValueError("Candidate-E v30r2 receipt exact-opening drift")
+    generator = panel.get("generator", {})
+    expected_generator = {
+        "mode": "frozen_inference_only",
+        "optimizer_created": False,
+        "optimizer_steps": 0,
+        "retained_rerun_diagnostic_only": True,
+        "retained_rerun_outputs_used_for_final_panel": False,
+        "replacement_outputs_used_for_final_panel": True,
+    }
+    for field, value in expected_generator.items():
+        if generator.get(field) != value:
+            raise ValueError(f"Candidate-E v30r2 generator drift: {field}")
+    panel_failure = panel.get("failed_v30r2_evidence", {})
+    receipt_failure = receipt.get("failed_v30r2_evidence", {})
+    if panel_failure != receipt_failure:
+        raise ValueError("Candidate-E v30r2 failed-run evidence binding drift")
+    for label, failure in (
+        ("panel", panel_failure),
+        ("receipt", receipt_failure),
+    ):
+        if (
+            failure.get("job_id") != "20041442"
+            or failure.get("state") != "FAILED"
+            or failure.get("failure_not_reinterpreted_as_pass") is not True
+            or failure.get("old_artifacts_remain_immutable") is not True
+        ):
+            raise ValueError(
+                f"Candidate-E v30r2 {label} failed-run evidence drift"
+            )
     scorability_hashes = panel.get("scorability_artifact_sha256", {})
     receipt_hashes = receipt.get("artifact_sha256", {})
     for name in (
@@ -193,6 +231,23 @@ def validate_panel_binding(
             receipt_hashes.get(name) != scorability_hashes[name]
         ):
             raise ValueError(f"Candidate-E v30r2 scorability binding drift: {name}")
+    retained_artifacts = {
+        "retained_v30_rerun_diagnostic_v30r2.json": panel.get(
+            "retained_v30_rerun_diagnostic_sha256"
+        ),
+        "retained_v30_artifact_inheritance_v30r2.json": panel.get(
+            "retained_v30_artifact_inheritance_sha256"
+        ),
+        "retained_v30_equivalence_v30r2.json": panel.get(
+            "retained_v30_equivalence_sha256"
+        ),
+    }
+    for name, expected_hash in retained_artifacts.items():
+        if (
+            not str(expected_hash or "")
+            or receipt_hashes.get(name) != expected_hash
+        ):
+            raise ValueError(f"Candidate-E v30r2 retained binding drift: {name}")
     for label, value in (("panel", panel), ("receipt", receipt)):
         if value.get("scientific_promotion_granted") is not False:
             raise ValueError(f"Candidate-E v30r2 {label} promotes early")

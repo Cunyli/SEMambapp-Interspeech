@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import soundfile as sf
 import yaml
 
 from scripts import evaluate_avqi_shimmer_db_candidate_e_opened_v15_v29 as v29
@@ -38,6 +41,15 @@ SCORABILITY_SCHEMA = (
 )
 EQUIVALENCE_SCHEMA = (
     "avqi-route-c-shimmer-db-candidate-e-v30-retained-waveform-equivalence-v30r2"
+)
+RERUN_DIAGNOSTIC_SCHEMA = (
+    "avqi-route-c-shimmer-db-candidate-e-v30-retained-rerun-diagnostic-v30r2"
+)
+INHERITANCE_SCHEMA = (
+    "avqi-route-c-shimmer-db-candidate-e-v30-retained-artifact-inheritance-v30r2"
+)
+INHERITANCE_MODE = (
+    "byte_inherit_original_v30_sealed_artifacts_after_result_blind_rerun"
 )
 PANEL_DECISION = (
     "SEALED_CANDIDATE_E_EXTERNAL_SVD_PANEL_TARGET_SCORABILITY_ONLY_V30R2"
@@ -269,6 +281,45 @@ def validate_v30r2_config(config: dict[str, Any]) -> None:
         raise ValueError("v30r2 recipe assignment drift")
     if recipe.get("assignment_unchanged") is not True:
         raise ValueError("v30r2 recipe inheritance drift")
+    inheritance = config.get("retained_artifact_contract", {})
+    expected_inheritance = {
+        "mode": INHERITANCE_MODE,
+        "match_key": "case_id",
+        "artifact_fields": ["target", "degraded", "base"],
+        "full_result_blind_rerun_required": True,
+        "retained_rerun_outputs_diagnostic_only": True,
+        "retained_final_artifacts_byte_inherited": True,
+        "replacement_artifacts_newly_generated": True,
+        "uses_target_scalar_values": False,
+        "uses_base_or_candidate_exact_outcomes": False,
+        "speaker_or_case_identity_hardcoded": False,
+    }
+    for field, value in expected_inheritance.items():
+        if inheritance.get(field) != value:
+            raise ValueError(f"v30r2 retained-artifact contract drift: {field}")
+    failure = inheritance.get("failed_run_evidence", {})
+    expected_failure = {
+        "job_id": "20041442",
+        "state": "FAILED",
+        "exit_code": "1:0",
+        "node": "dgx15",
+        "stdout_sha256": (
+            "44038adf06e149ff447d81785e78ee8d076aded305af56d5ad92ef8f36c71f42"
+        ),
+        "stderr_sha256": (
+            "1b2f86c158eb4f07284f7fe17e6805f3b2cafe450dcbc1910550a9c890cfc271"
+        ),
+        "preflight_sha256": (
+            "dc8ae36dd7f244c89d7165ab1a7aa5870174177fc5a346c459401cf07b050a3e"
+        ),
+        "confirmation_sha256": (
+            "4508dd53ea923cfd719b6461d82fc53ebd16da448879ed4269a9c37eeb8958f3"
+        ),
+        "old_artifacts_remain_immutable": True,
+        "failure_not_reinterpreted_as_pass": True,
+    }
+    if failure != expected_failure:
+        raise ValueError("v30r2 failed-run evidence drift")
     boundaries = config.get("immutable_boundaries", {})
     for field in (
         "old_v23_no_go_receipt_preserved",
@@ -615,6 +666,8 @@ def build_selection_contract(
         "selection_uses_target_scorability_boolean": True,
         "selection_uses_base_or_candidate_exact_outcomes": False,
         "slot_assignment_preserves_retained_v30_recipe_mapping": True,
+        "retained_v30_final_artifact_mode": INHERITANCE_MODE,
+        "retained_v30_rerun_outputs_used_for_final_panel": False,
         "selected_speakers": sorted(selected),
         "selected_sessions": sorted({case.session_id for case in cases}, key=int),
         "retained_v30_speakers": sorted(selected & original),
@@ -660,6 +713,194 @@ def final_target_scorability(
     }
 
 
+def compare_float_waveforms(old_path: Path, rerun_path: Path) -> dict[str, Any]:
+    old_info = sf.info(old_path)
+    rerun_info = sf.info(rerun_path)
+    old, old_sample_rate = sf.read(
+        old_path,
+        dtype="float64",
+        always_2d=False,
+    )
+    rerun, rerun_sample_rate = sf.read(
+        rerun_path,
+        dtype="float64",
+        always_2d=False,
+    )
+    metadata_identical = (
+        old_sample_rate == rerun_sample_rate == v24.SAMPLE_RATE
+        and old.ndim == rerun.ndim == 1
+        and old.shape == rerun.shape
+        and old_info.channels == rerun_info.channels == 1
+        and old_info.format == rerun_info.format == "WAV"
+        and old_info.subtype == rerun_info.subtype == "FLOAT"
+    )
+    if not metadata_identical:
+        raise ValueError("retained v30 rerun waveform metadata drift")
+    if not bool(np.isfinite(old).all()) or not bool(np.isfinite(rerun).all()):
+        raise ValueError("retained v30 rerun waveform is non-finite")
+    delta = rerun - old
+    old_sha256 = v24.sha256_file(old_path)
+    rerun_sha256 = v24.sha256_file(rerun_path)
+    return {
+        "old_path": str(old_path.resolve()),
+        "rerun_path": str(rerun_path.resolve()),
+        "old_sha256": old_sha256,
+        "rerun_sha256": rerun_sha256,
+        "raw_file_byte_identical": old_sha256 == rerun_sha256,
+        "decoded_samples_identical": bool(np.array_equal(old, rerun)),
+        "sample_rate": old_sample_rate,
+        "sample_count": int(old.size),
+        "subtype": old_info.subtype,
+        "maximum_absolute_sample_delta": float(
+            np.max(np.abs(delta)) if delta.size else 0.0
+        ),
+        "rms_sample_delta": float(
+            np.sqrt(np.mean(np.square(delta))) if delta.size else 0.0
+        ),
+    }
+
+
+def retained_rerun_diagnostic(
+    rerun_rows: list[dict[str, Any]],
+    original_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    original_by_case = {str(row["case_id"]): row for row in original_rows}
+    comparisons: list[dict[str, Any]] = []
+    identity_fields = (
+        "panel_speaker_id",
+        "speaker_id",
+        "session_id",
+        "view",
+        "condition",
+        "selection_digest",
+        "source_sha256",
+        "recipe_index",
+        "recipe_uid",
+        "simulation_seed",
+        "noise_start_sample",
+    )
+    for row in rerun_rows:
+        old = original_by_case.get(str(row["case_id"]))
+        if old is None:
+            continue
+        identity = {field: row[field] == old[field] for field in identity_fields}
+        if not all(identity.values()):
+            raise ValueError("retained v30 rerun identity drift")
+        target = compare_float_waveforms(
+            Path(str(old["target_path"])),
+            Path(str(row["target_path"])),
+        )
+        degraded = compare_float_waveforms(
+            Path(str(old["degraded_path"])),
+            Path(str(row["degraded_path"])),
+        )
+        base = compare_float_waveforms(
+            Path(str(old["base_path"])),
+            Path(str(row["base_path"])),
+        )
+        if not target["decoded_samples_identical"] or not degraded[
+            "decoded_samples_identical"
+        ]:
+            raise ValueError("retained v30 rerun simulation sample drift")
+        comparisons.append(
+            {
+                "case_id": row["case_id"],
+                "identity_fields": identity,
+                "target": target,
+                "degraded": degraded,
+                "base": base,
+                "rerun_base_used_in_final_panel": False,
+            }
+        )
+    if not comparisons:
+        raise ValueError("retained v30 rerun diagnostic has no retained cases")
+    return {
+        "schema_version": RERUN_DIAGNOSTIC_SCHEMA,
+        "role": "result_blind_rerun_diagnostic_before_sealed_artifact_inheritance",
+        "retained_case_count": len(comparisons),
+        "replacement_case_count": len(rerun_rows) - len(comparisons),
+        "all_identity_fields_identical": True,
+        "all_target_decoded_samples_identical": True,
+        "all_degraded_decoded_samples_identical": True,
+        "base_rerun_same_shape_and_finite": True,
+        "base_rerun_sample_identical_count": sum(
+            row["base"]["decoded_samples_identical"] is True
+            for row in comparisons
+        ),
+        "base_rerun_maximum_absolute_sample_delta": max(
+            float(row["base"]["maximum_absolute_sample_delta"])
+            for row in comparisons
+        ),
+        "retained_rerun_outputs_used_for_final_panel": False,
+        "target_scalar_values_retained_or_used": False,
+        "base_exact_outcomes_opened": False,
+        "candidate_exact_outcomes_opened": False,
+        "rows": comparisons,
+    }
+
+
+def inherit_retained_v30_artifacts(
+    prepared: list[v24.PreparedCase],
+    original_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    original_by_case = {str(row["case_id"]): row for row in original_rows}
+    inherited_rows: list[dict[str, Any]] = []
+    for item in prepared:
+        old = original_by_case.get(item.spec.case_id)
+        if old is None:
+            continue
+        hashes: dict[str, str] = {}
+        artifacts: dict[str, dict[str, str]] = {}
+        for field in ("target", "degraded", "base"):
+            source = Path(str(old[f"{field}_path"]))
+            expected = str(old[f"{field}_sha256"])
+            v24.validate_hash(source, expected, f"original v30 {field} artifact")
+            destination = Path(getattr(item, f"{field}_path"))
+            if source.resolve() == destination.resolve():
+                raise ValueError("v30r2 inheritance would overwrite original artifact")
+            shutil.copyfile(source, destination)
+            hashes[f"{field}_sha256"] = v24.validate_hash(
+                destination,
+                expected,
+                f"inherited v30 {field} artifact",
+            )
+            v24.validate_hash(
+                source,
+                expected,
+                f"original v30 {field} artifact after inheritance",
+            )
+            artifacts[field] = {
+                "source_path": str(source.resolve()),
+                "destination_path": str(destination.resolve()),
+                "sha256": expected,
+            }
+        inherited_rows.append(
+            {
+                "case_id": item.spec.case_id,
+                "match_key": "case_id",
+                "artifact_sha256": hashes,
+                "artifacts": artifacts,
+            }
+        )
+    if not inherited_rows:
+        raise ValueError("v30r2 artifact inheritance has no retained cases")
+    return {
+        "schema_version": INHERITANCE_SCHEMA,
+        "mode": INHERITANCE_MODE,
+        "match_key": "case_id",
+        "artifact_fields": ["target", "degraded", "base"],
+        "retained_case_count": len(inherited_rows),
+        "replacement_case_count": len(prepared) - len(inherited_rows),
+        "retained_final_artifacts_byte_inherited": True,
+        "replacement_artifacts_newly_generated": True,
+        "retained_rerun_outputs_used_in_final_panel": False,
+        "uses_target_scalar_values": False,
+        "uses_base_or_candidate_exact_outcomes": False,
+        "speaker_or_case_identity_hardcoded": False,
+        "rows": inherited_rows,
+    }
+
+
 def retained_waveform_equivalence(
     rows: list[dict[str, Any]],
     original_rows: list[dict[str, Any]],
@@ -671,6 +912,12 @@ def retained_waveform_equivalence(
         if old is None:
             continue
         fields = (
+            "panel_speaker_id",
+            "speaker_id",
+            "session_id",
+            "view",
+            "condition",
+            "selection_digest",
             "source_sha256",
             "target_sha256",
             "degraded_sha256",
@@ -849,6 +1096,17 @@ def main() -> None:
     v24.write_json(preflight_path, preflight)
     prepared = v24.prepare_waveforms(args, cases, recipes, simulation_config)
     v24.run_frozen_generator(args, prepared)
+    rerun_rows = v24.panel_rows(prepared)
+    rerun_diagnostic = retained_rerun_diagnostic(rerun_rows, original_rows)
+    rerun_diagnostic_path = (
+        args.output_dir / "retained_v30_rerun_diagnostic_v30r2.json"
+    )
+    v24.write_json(rerun_diagnostic_path, rerun_diagnostic)
+    inheritance = inherit_retained_v30_artifacts(prepared, original_rows)
+    inheritance_path = (
+        args.output_dir / "retained_v30_artifact_inheritance_v30r2.json"
+    )
+    v24.write_json(inheritance_path, inheritance)
     rows = v24.panel_rows(prepared)
     final_scorability = final_target_scorability(
         rows,
@@ -902,6 +1160,12 @@ def main() -> None:
             preflight_path.name: v24.sha256_file(preflight_path),
             final_scorability_path.name: v24.sha256_file(final_scorability_path),
         },
+        "retained_v30_rerun_diagnostic_sha256": v24.sha256_file(
+            rerun_diagnostic_path
+        ),
+        "retained_v30_artifact_inheritance_sha256": v24.sha256_file(
+            inheritance_path
+        ),
         "retained_v30_equivalence_sha256": v24.sha256_file(equivalence_path),
         "prior_panel_speaker_ledger_input_sha256": source_hashes[
             "prior_panel_speaker_ledger"
@@ -919,6 +1183,9 @@ def main() -> None:
             "mode": "frozen_inference_only",
             "optimizer_created": False,
             "optimizer_steps": 0,
+            "retained_rerun_diagnostic_only": True,
+            "retained_rerun_outputs_used_for_final_panel": False,
+            "replacement_outputs_used_for_final_panel": True,
             "config_sha256": source_hashes["generator_config"],
             "checkpoint_sha256": source_hashes["generator_checkpoint"],
         },
@@ -926,9 +1193,14 @@ def main() -> None:
             "emitted_waveform_highpass": False,
             "exact_metric_highpass_branch_only": True,
             "target_is_same_speaker_same_view_clean_pathological": True,
+            "retained_v30_waveforms_byte_inherited_from_original_seal": True,
+            "replacement_waveforms_newly_generated": True,
             "full_band_pathology_guardrails_required_later": True,
             "denoising_nonregression_required_later": True,
         },
+        "failed_v30r2_evidence": config["retained_artifact_contract"][
+            "failed_run_evidence"
+        ],
         "exact_contract": {
             "target_shimmer_scalar_values_opened": False,
             "target_scorability_boolean_opened": True,
@@ -958,6 +1230,11 @@ def main() -> None:
         "candidate_exact_outcomes_opened": False,
         "target_scalar_stage_authorized": True,
         "selector_stage_authorized": False,
+        "retained_v30_artifact_inheritance_verified": True,
+        "retained_v30_rerun_outputs_used_for_final_panel": False,
+        "failed_v30r2_evidence": config["retained_artifact_contract"][
+            "failed_run_evidence"
+        ],
         "scientific_promotion_granted": False,
         "joint_panel_authorized": False,
         "generator_optimizer_steps": 0,
@@ -968,6 +1245,8 @@ def main() -> None:
             ledger_path.name: v24.sha256_file(ledger_path),
             preflight_path.name: v24.sha256_file(preflight_path),
             final_scorability_path.name: v24.sha256_file(final_scorability_path),
+            rerun_diagnostic_path.name: v24.sha256_file(rerun_diagnostic_path),
+            inheritance_path.name: v24.sha256_file(inheritance_path),
             equivalence_path.name: v24.sha256_file(equivalence_path),
         },
     }
