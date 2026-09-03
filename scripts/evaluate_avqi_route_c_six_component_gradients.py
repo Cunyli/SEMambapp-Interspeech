@@ -2,10 +2,9 @@
 
 This evaluator deliberately has no scientific PASS path.  It reuses the
 accepted five-component surrogate calibration/holdout selection, freezes
-inverse-gradient weights on calibration rows only, and requires detached v19
-base-current-output topology for Shimmer dB.  Numeric promotion gates remain
-unfrozen, so every completed report remains PENDING and keeps the joint panel
-closed.
+inverse-gradient weights on calibration rows only, and requires detached exact
+base-current-output topology for Candidate-E Shimmer dB.  The raw report stays
+PENDING until the independent frozen decision stage accepts it.
 """
 
 from __future__ import annotations
@@ -30,13 +29,27 @@ from model.avqi_components import (
     AVQI_V0301_SCALE,
 )
 from model.avqi_route_c import (
-    ROUTE_C_SIX_ACTIVE_ARCHITECTURE,
     ROUTE_C_SIX_ACTIVE_COMPONENTS,
-    ROUTE_C_SIX_REGISTRY_SCHEMA_VERSION,
-    ROUTE_C_SIX_SCIENTIFIC_STATUS,
-    load_route_c_six_active_scorer,
-    route_c_six_registry_records,
     six_active_bidirectional_gap_losses,
+)
+from model.avqi_route_c_candidate_e import (
+    CANDIDATE_E_RUNTIME_CLIENT_SHA256,
+    CANDIDATE_E_RUNTIME_CONFIG_SHA256,
+    CANDIDATE_E_SELECTOR_SHA256,
+    CANDIDATE_E_SOURCE_COMMIT,
+    CANDIDATE_E_TOPOLOGY_IMPLEMENTATION,
+    CANDIDATE_E_REFERENCE_SHA256,
+    CANDIDATE_E_WORKER_SHA256,
+    build_cycle_gain_plan,
+    candidate_e_proxy,
+    project_cycle_gain_gradient_fixed_order,
+)
+from model.avqi_route_c_candidate_e_scorer import (
+    ROUTE_C_CANDIDATE_E_REGISTRY_SCHEMA_VERSION,
+    ROUTE_C_CANDIDATE_E_SCIENTIFIC_STATUS,
+    ROUTE_C_CANDIDATE_E_SIX_ACTIVE_ARCHITECTURE,
+    load_route_c_candidate_e_six_scorer,
+    route_c_candidate_e_registry_records,
 )
 from model.avqi_route_c_v19_contracts import (
     ROUTE_C_V19_BASE_TOPOLOGY_HIGHPASS_MODE,
@@ -46,7 +59,6 @@ from model.avqi_route_c_v19_contracts import (
     ROUTE_C_V19_FULL_STEP_ARTIFACT_KEYS,
     ROUTE_C_V19_IMPLEMENTATION_ARTIFACT_KEYS,
     ROUTE_C_V19_SAMPLE_RATE,
-    ROUTE_C_V19_TOPOLOGY_IMPLEMENTATION,
     RouteCArtifactBinding,
     RouteCV19EvidenceManifest,
     sha256_file,
@@ -54,6 +66,13 @@ from model.avqi_route_c_v19_contracts import (
 from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     FIVE_COMPONENT_EVIDENCE_KEYS,
     _validate_five_component_evidence,
+)
+from scripts.audit_avqi_route_c_six_joint_candidate_e_readiness_v4 import (
+    PROMOTION_RECEIPT_SHA256,
+    PROMOTION_REPORT_SHA256,
+    UPDATED_LEDGER_SHA256,
+    validate_promotion,
+    validate_receipt_artifact_files,
 )
 from scripts.evaluate_avqi_route_c_multicomponent_gradients import (
     AUDIT_SPLITS,
@@ -68,10 +87,16 @@ from scripts.evaluate_avqi_route_c_multicomponent_gradients import (
 
 
 MEASUREMENT_SCHEMA_VERSION = (
-    "dev-avqi-route-c-six-gradient-raw-measurement-v1"
+    "dev-avqi-route-c-six-gradient-raw-measurement-v2"
 )
 TOPOLOGY_INPUT_SCHEMA_VERSION = (
-    "dev-avqi-route-c-six-gradient-topology-input-v1"
+    "dev-avqi-route-c-six-gradient-candidate-e-topology-input-v2"
+)
+TOPOLOGY_RECEIPT_SCHEMA_VERSION = (
+    "avqi-route-c-six-gradient-candidate-e-topology-receipt-v2"
+)
+TOPOLOGY_SEAL_DECISION = (
+    "SEALED_ROUTE_C_SIX_GRADIENT_CANDIDATE_E_TOPOLOGIES_V2"
 )
 MEASUREMENT_DECISION = (
     "PENDING_ROUTE_C_SIX_COMPONENT_GRADIENT_GATES_UNFROZEN"
@@ -82,6 +107,18 @@ REQUIRED_FIVE_SOURCE_EVIDENCE = (
     *FIVE_COMPONENT_EVIDENCE_KEYS,
     "five_gradient_report",
     "five_gradient_receipt",
+)
+CANDIDATE_E_EVIDENCE_KEYS = (
+    "candidate_e_promotion_report",
+    "candidate_e_promotion_receipt",
+    "candidate_e_reference_source",
+    "candidate_e_runtime_client",
+    "candidate_e_worker",
+    "candidate_e_selector_source",
+    "candidate_e_runtime_config",
+    "exact_code_tree_manifest",
+    "exact_runtime_manifest",
+    "exact_authority_receipt",
 )
 PAIRWISE_COMPONENT_KEYS = tuple(
     f"{left}__{right}"
@@ -114,8 +151,8 @@ V19_MANIFEST_FIELDS = {
 }
 TOPOLOGY_MANIFEST_FIELDS = {
     "schema_version",
-    "v19_source_commit",
-    "v19_evidence_manifest_sha256",
+    "candidate_e_source_commit",
+    "candidate_e_evidence_sha256",
     "label_bank_sha256",
     "selection_salt",
     "sample_rate",
@@ -177,10 +214,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         metavar=("NAME", "PATH", "SHA256"),
         required=True,
     )
-    parser.add_argument("--v19-evidence-manifest", type=Path, required=True)
-    parser.add_argument("--v19-evidence-manifest-sha256", required=True)
+    parser.add_argument(
+        "--candidate-e-evidence",
+        action="append",
+        nargs=3,
+        metavar=("NAME", "PATH", "SHA256"),
+        required=True,
+    )
     parser.add_argument("--topology-manifest", type=Path, required=True)
     parser.add_argument("--topology-manifest-sha256", required=True)
+    parser.add_argument("--topology-receipt", type=Path, required=True)
+    parser.add_argument("--topology-receipt-sha256", required=True)
     parser.add_argument("--selection-salt", required=True)
     parser.add_argument("--test-evidence", type=Path, required=True)
     parser.add_argument("--test-evidence-sha256", required=True)
@@ -304,6 +348,55 @@ def validate_five_source_evidence(
     return artifacts
 
 
+def validate_candidate_e_evidence(
+    entries: list[list[str]],
+) -> dict[str, dict[str, str]]:
+    if len(entries) != len(CANDIDATE_E_EVIDENCE_KEYS):
+        raise ValueError("Candidate-E source evidence count differs")
+    raw = {name: (Path(path), digest) for name, path, digest in entries}
+    if set(raw) != set(CANDIDATE_E_EVIDENCE_KEYS):
+        raise ValueError("Candidate-E source evidence keys differ")
+    artifacts = {}
+    for name in CANDIDATE_E_EVIDENCE_KEYS:
+        path, digest = raw[name]
+        resolved = _verified_file(path, digest, f"Candidate-E evidence {name}")
+        artifacts[name] = {"path": str(resolved), "sha256": digest}
+
+    expected_hashes = {
+        "candidate_e_promotion_report": PROMOTION_REPORT_SHA256,
+        "candidate_e_promotion_receipt": PROMOTION_RECEIPT_SHA256,
+        "candidate_e_reference_source": CANDIDATE_E_REFERENCE_SHA256,
+        "candidate_e_runtime_client": CANDIDATE_E_RUNTIME_CLIENT_SHA256,
+        "candidate_e_worker": CANDIDATE_E_WORKER_SHA256,
+        "candidate_e_selector_source": CANDIDATE_E_SELECTOR_SHA256,
+        "candidate_e_runtime_config": CANDIDATE_E_RUNTIME_CONFIG_SHA256,
+    }
+    if any(
+        artifacts[name]["sha256"] != digest
+        for name, digest in expected_hashes.items()
+    ):
+        raise ValueError("Candidate-E frozen evidence hash differs")
+    promotion_report = _read_json_mapping(
+        Path(artifacts["candidate_e_promotion_report"]["path"]),
+        "Candidate-E promotion report",
+    )
+    promotion_receipt = _read_json_mapping(
+        Path(artifacts["candidate_e_promotion_receipt"]["path"]),
+        "Candidate-E promotion receipt",
+    )
+    validate_promotion(
+        promotion_report,
+        promotion_receipt,
+        report_sha256=PROMOTION_REPORT_SHA256,
+        ledger_sha256=UPDATED_LEDGER_SHA256,
+    )
+    validate_receipt_artifact_files(
+        Path(artifacts["candidate_e_promotion_report"]["path"]).parent,
+        promotion_receipt["artifact_sha256"],
+    )
+    return artifacts
+
+
 def case_selector(case: AuditCase) -> tuple[str, str, str, str, str, str]:
     return (
         case.split,
@@ -334,8 +427,7 @@ def load_topology_inputs(
     expected_sha256: str,
     cases: list[AuditCase],
     *,
-    v19_source_commit: str,
-    v19_evidence_manifest_sha256: str,
+    candidate_e_evidence_sha256: Mapping[str, str],
     label_bank_sha256: str,
     selection_salt: str,
 ) -> tuple[
@@ -348,8 +440,8 @@ def load_topology_inputs(
         raise ValueError("topology input manifest fields differ")
     expected_contract = {
         "schema_version": TOPOLOGY_INPUT_SCHEMA_VERSION,
-        "v19_source_commit": v19_source_commit,
-        "v19_evidence_manifest_sha256": v19_evidence_manifest_sha256,
+        "candidate_e_source_commit": CANDIDATE_E_SOURCE_COMMIT,
+        "candidate_e_evidence_sha256": dict(candidate_e_evidence_sha256),
         "label_bank_sha256": label_bank_sha256,
         "selection_salt": selection_salt,
         "sample_rate": ROUTE_C_V19_SAMPLE_RATE,
@@ -421,7 +513,7 @@ def load_topology_inputs(
         role = topology.get("role")
         if role not in ROUTE_C_V19_CURRENT_OUTPUT_ROLES:
             raise ValueError("topology payload is not a current output")
-        if topology.get("implementation") != ROUTE_C_V19_TOPOLOGY_IMPLEMENTATION:
+        if topology.get("implementation") != CANDIDATE_E_TOPOLOGY_IMPLEMENTATION:
             raise ValueError("topology payload implementation differs")
         if topology.get("metric_highpass") != (
             ROUTE_C_V19_BASE_TOPOLOGY_HIGHPASS_MODE
@@ -462,6 +554,31 @@ def load_topology_inputs(
     return observed_inputs, coverage
 
 
+def validate_topology_receipt(
+    path: Path,
+    expected_sha256: str,
+    *,
+    topology_manifest_sha256: str,
+    source_commit: str,
+) -> dict[str, str]:
+    resolved = _verified_file(path, expected_sha256, "topology receipt")
+    receipt = _read_json_mapping(resolved, "topology receipt")
+    if (
+        receipt.get("schema_version") != TOPOLOGY_RECEIPT_SCHEMA_VERSION
+        or receipt.get("decision") != TOPOLOGY_SEAL_DECISION
+        or receipt.get("source", {}).get("head") != source_commit
+        or receipt.get("topology_count") != 8
+        or receipt.get("candidate_exact_outcomes_opened") is not False
+        or receipt.get("generator_optimizer_steps") != 0
+        or receipt.get("artifact_sha256", {}).get(
+            "candidate_e_topology_manifest_v2.json"
+        )
+        != topology_manifest_sha256
+    ):
+        raise ValueError("Candidate-E topology receipt differs")
+    return {"path": str(resolved), "sha256": expected_sha256}
+
+
 def extract_case_measurement(
     scorer: torch.nn.Module,
     case: AuditCase,
@@ -496,7 +613,62 @@ def extract_case_measurement(
             waveform,
             retain_graph=offset < len(ROUTE_C_SIX_ACTIVE_COMPONENTS) - 1,
             create_graph=False,
-        )[0].detach().cpu()
+        )[0].detach().cpu().to(dtype=torch.float64)
+        projection: dict[str, Any] | None = None
+        if component == "shimmer_db":
+            plan = build_cycle_gain_plan(
+                waveform.detach().cpu().numpy(),
+                topology_input.topology,
+            )
+            proxy = candidate_e_proxy(
+                waveform.detach().cpu().to(dtype=torch.float64),
+                torch.as_tensor(
+                    topology_input.topology["pulse_positions_samples"],
+                    dtype=torch.float64,
+                ),
+                torch.from_numpy(plan["source_indices"]),
+                int(
+                    topology_input.topology[
+                        "metric_constant_prefix_samples"
+                    ]
+                ),
+            )
+            if proxy.peak_scale_abstention_pass is not True:
+                raise ValueError(
+                    "Candidate-E base proxy is outside the peak-scale domain: "
+                    f"{topology_input.case_id}"
+                )
+            proxy_value = float(proxy.shimmer_db.detach().cpu())
+            prediction_value = float(
+                denormalized_prediction[
+                    AVQI_COMPONENT_NAMES.index("shimmer_db")
+                ].detach().cpu()
+            )
+            if not math.isclose(
+                proxy_value,
+                prediction_value,
+                rel_tol=1e-6,
+                abs_tol=1e-5,
+            ):
+                raise ValueError("Candidate-E scorer/proxy value differs")
+            gradient, projection = project_cycle_gain_gradient_fixed_order(
+                waveform.detach().cpu().to(dtype=torch.float64),
+                gradient,
+                plan,
+            )
+            if projection.get("projected_gradient_valid") is not True:
+                raise ValueError(
+                    "invalid Candidate-E projected gradient: "
+                    f"{topology_input.case_id}"
+                )
+            projection = {
+                **projection,
+                "candidate_e_proxy_shimmer_db": proxy_value,
+                "candidate_e_sinc70_peak_upper_bound": (
+                    proxy.sinc70_peak_upper_bound
+                ),
+                "candidate_e_peak_scale_abstention_pass": True,
+            }
         norm = float(torch.linalg.vector_norm(gradient))
         finite = bool(torch.isfinite(gradient).all()) and math.isfinite(norm)
         if not finite or norm <= 0.0:
@@ -522,6 +694,7 @@ def extract_case_measurement(
             "gradient_norm": norm,
             "finite_observed": True,
             "strictly_positive_norm_observed": True,
+            "candidate_e_projection": projection,
             "scientific_gate_applied": False,
         }
     return {
@@ -723,7 +896,8 @@ def slot_separation_metadata(
     if (
         shimmer_db.get("component_indices") != [3]
         or shimmer_db.get("checkpoint_affine_used") is not False
-        or shimmer_db.get("source") != "v19_current_output_exact_topology"
+        or shimmer_db.get("source")
+        != "candidate_e_v32r8_current_output_exact_topology"
     ):
         raise ValueError("Shimmer dB is not isolated to external slot 3")
     return {
@@ -735,14 +909,18 @@ def slot_separation_metadata(
         },
         "slot3_shimmer_db": {
             "component_index": 3,
-            "source": "current_waveform_with_detached_v19_base_topology",
+            "source": "candidate_e_v32r8_current_waveform_exact_path",
             "checkpoint_affine_used": False,
             "v19_topology_used": True,
             "topology_role": "base_current_output",
-            "implementation": ROUTE_C_V19_TOPOLOGY_IMPLEMENTATION,
+            "implementation": (
+                "candidate_e_exact_path_fixed_order_cycle_gain_projection"
+            ),
+            "candidate_e_reference_sha256": CANDIDATE_E_REFERENCE_SHA256,
+            "topology_implementation": CANDIDATE_E_TOPOLOGY_IMPLEMENTATION,
             "metric_highpass": ROUTE_C_V19_BASE_TOPOLOGY_HIGHPASS_MODE,
             "topology_input_loader": ROUTE_C_V19_BASE_TOPOLOGY_INPUT_LOADER,
-            "scientific_promotion_granted": False,
+            "scientific_promotion_granted": True,
         },
         "slots_are_independent": True,
     }
@@ -767,9 +945,8 @@ def main() -> None:
     if test_evidence_path.stat().st_size == 0:
         raise ValueError("focused test evidence is empty")
     five_source_evidence = validate_five_source_evidence(args.source_evidence)
-    v19_manifest = load_v19_evidence_manifest(
-        args.v19_evidence_manifest,
-        args.v19_evidence_manifest_sha256,
+    candidate_e_evidence = validate_candidate_e_evidence(
+        args.candidate_e_evidence
     )
     raw_checkpoint_paths = {
         "cpps": args.cpps_checkpoint,
@@ -793,10 +970,9 @@ def main() -> None:
         )
         for component, path in raw_checkpoint_paths.items()
     }
-    bundle = load_route_c_six_active_scorer(
+    bundle = load_route_c_candidate_e_six_scorer(
         checkpoint_paths,
         checkpoint_hashes,
-        v19_evidence_manifest=v19_manifest,
     )
     device = torch.device(args.device)
     scorer = bundle.scorer.to(device).eval()
@@ -816,10 +992,18 @@ def main() -> None:
         args.topology_manifest,
         args.topology_manifest_sha256,
         cases,
-        v19_source_commit=v19_manifest.source_commit,
-        v19_evidence_manifest_sha256=args.v19_evidence_manifest_sha256,
+        candidate_e_evidence_sha256={
+            key: value["sha256"]
+            for key, value in candidate_e_evidence.items()
+        },
         label_bank_sha256=args.label_bank_sha256,
         selection_salt=args.selection_salt,
+    )
+    topology_receipt = validate_topology_receipt(
+        args.topology_receipt,
+        args.topology_receipt_sha256,
+        topology_manifest_sha256=args.topology_manifest_sha256,
+        source_commit=args.source_commit,
     )
 
     extracted = []
@@ -865,7 +1049,7 @@ def main() -> None:
         "component_and_joint_share_split": True,
         "topology_manifest_uses_same_selection": True,
     }
-    registry_records = route_c_six_registry_records()
+    registry_records = route_c_candidate_e_registry_records()
     integrity = {
         "six_component_order_exact": tuple(ROUTE_C_SIX_ACTIVE_COMPONENTS)
         == AVQI_COMPONENT_NAMES,
@@ -888,12 +1072,11 @@ def main() -> None:
             parameter.numel() for parameter in scorer.parameters()
         )
         == 0,
-        "shimmer_db_scientific_status_pending": bundle.scientific_status
-        == ROUTE_C_SIX_SCIENTIFIC_STATUS,
-        "v19_runtime_evidence_does_not_grant_promotion": bundle.v19_evidence_metadata[
-            "promotion_authorized"
-        ]
-        is False,
+        "shimmer_db_scientific_status_promoted": bundle.scientific_status
+        == ROUTE_C_CANDIDATE_E_SCIENTIFIC_STATUS,
+        "candidate_e_promoted_runtime_evidence_bound": (
+            set(candidate_e_evidence) == set(CANDIDATE_E_EVIDENCE_KEYS)
+        ),
         "numeric_scientific_gates_applied": False,
         "final_or_fresh_panel_opened": False,
         "generator_optimizer_steps": 0,
@@ -928,9 +1111,13 @@ def main() -> None:
             for key, value in checkpoint_evidence.items()
         },
         "label_bank": args.label_bank_sha256,
-        "v19_evidence_manifest": args.v19_evidence_manifest_sha256,
         "topology_manifest": args.topology_manifest_sha256,
+        "topology_receipt": args.topology_receipt_sha256,
         "focused_test_evidence": args.test_evidence_sha256,
+        **{
+            key: value["sha256"]
+            for key, value in candidate_e_evidence.items()
+        },
     }
     report = {
         "schema_version": MEASUREMENT_SCHEMA_VERSION,
@@ -938,9 +1125,11 @@ def main() -> None:
         "joint_panel_decision": JOINT_PANEL_DECISION,
         "contract": {
             "source": source,
-            "architecture": ROUTE_C_SIX_ACTIVE_ARCHITECTURE,
+            "architecture": ROUTE_C_CANDIDATE_E_SIX_ACTIVE_ARCHITECTURE,
             "component_order": list(ROUTE_C_SIX_ACTIVE_COMPONENTS),
-            "registry_schema_version": ROUTE_C_SIX_REGISTRY_SCHEMA_VERSION,
+            "registry_schema_version": (
+                ROUTE_C_CANDIDATE_E_REGISTRY_SCHEMA_VERSION
+            ),
             "component_registry": registry_records,
             "avqi_v0301": {
                 "intercept": AVQI_V0301_INTERCEPT,
@@ -984,21 +1173,31 @@ def main() -> None:
                 "path": str(args.label_bank.resolve()),
                 "sha256": args.label_bank_sha256,
             },
-            "v19_evidence_manifest": {
-                "path": str(args.v19_evidence_manifest.resolve()),
-                "sha256": args.v19_evidence_manifest_sha256,
-            },
+            **candidate_e_evidence,
             "topology_manifest": {
                 "path": str(args.topology_manifest.resolve()),
                 "sha256": args.topology_manifest_sha256,
             },
+            "topology_receipt": topology_receipt,
             "focused_test_evidence": {
                 "path": str(test_evidence_path),
                 "sha256": args.test_evidence_sha256,
             },
         },
         "source_evidence_sha256": source_evidence_sha256,
-        "v19_runtime_evidence": bundle.v19_evidence_metadata,
+        "candidate_e_runtime_evidence": {
+            "source_commit": CANDIDATE_E_SOURCE_COMMIT,
+            "promotion_report_sha256": PROMOTION_REPORT_SHA256,
+            "promotion_receipt_sha256": PROMOTION_RECEIPT_SHA256,
+            "runtime_client_sha256": CANDIDATE_E_RUNTIME_CLIENT_SHA256,
+            "worker_sha256": CANDIDATE_E_WORKER_SHA256,
+            "selector_sha256": CANDIDATE_E_SELECTOR_SHA256,
+            "runtime_config_sha256": CANDIDATE_E_RUNTIME_CONFIG_SHA256,
+            "scientific_promotion_granted": True,
+            "candidate_exact_outcomes_used_for_selection": False,
+            "speaker_or_case_identity_used_for_selection": False,
+            "generator_optimizer_steps": 0,
+        },
         "selection": selection,
         "topology_coverage": topology_coverage,
         "coverage": {
@@ -1063,7 +1262,7 @@ def main() -> None:
     write_json(report_path, report)
     receipt = {
         "schema_version": (
-            "dev-avqi-route-c-six-gradient-raw-measurement-receipt-v1"
+            "dev-avqi-route-c-six-gradient-raw-measurement-receipt-v2"
         ),
         "decision": MEASUREMENT_DECISION,
         "joint_panel_decision": JOINT_PANEL_DECISION,

@@ -17,10 +17,11 @@ required_flags=(
   --label-bank
   --label-bank-sha256
   --source-evidence
-  --v19-evidence-manifest
-  --v19-evidence-manifest-sha256
+  --candidate-e-evidence
   --topology-manifest
   --topology-manifest-sha256
+  --topology-receipt
+  --topology-receipt-sha256
   --selection-salt
   --test-evidence
   --test-evidence-sha256

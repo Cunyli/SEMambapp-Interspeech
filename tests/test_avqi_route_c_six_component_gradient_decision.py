@@ -13,6 +13,7 @@ from scripts import decide_avqi_route_c_six_component_gradients as decision
 from scripts.decide_avqi_route_c_six_component_gradients import (
     ACTIVE_COMPONENTS,
     AUDIT_SPLITS,
+    CANDIDATE_E_REFERENCE_SHA256,
     DECISION_SCHEMA_VERSION,
     FIVE_ACTIVE_COMPONENTS,
     FROZEN_FIVE_RECEIPT_SHA256,
@@ -30,6 +31,7 @@ from scripts.decide_avqi_route_c_six_component_gradients import (
     TOPOLOGY_HIGHPASS,
     TOPOLOGY_IMPLEMENTATION,
     TOPOLOGY_LOADER,
+    TOPOLOGY_RUNTIME_IMPLEMENTATION,
     TRAINING_NO_GO,
     decision_requirements,
     evaluate_six_gradient_decision,
@@ -65,6 +67,28 @@ def _case_rows(*, raw: bool) -> list[dict[str, object]]:
                 weights = {name: 1.0 for name in ACTIVE_COMPONENTS}
                 norms = {name: 1.0 for name in ACTIVE_COMPONENTS}
                 shares = {name: 1.0 / len(ACTIVE_COMPONENTS) for name in ACTIVE_COMPONENTS}
+                components = {
+                    name: {
+                        "prediction": 1.0,
+                        "clean_pathological_target": 2.0,
+                        "normalized_signed_error": -1.0,
+                        "normalized_bidirectional_gap": 1.0,
+                        "smooth_l1_loss": 0.5,
+                        "gradient_norm": norms[name],
+                        "finite_observed": True,
+                        "strictly_positive_norm_observed": True,
+                        "candidate_e_projection": None,
+                        "scientific_gate_applied": False,
+                    }
+                    for name in ACTIVE_COMPONENTS
+                }
+                components["shimmer_db"]["candidate_e_projection"] = {
+                    "projected_gradient_valid": True,
+                    "projection_reduction": "numpy_float64_fixed_cycle_order",
+                    "complete_cycle_count": 20,
+                    "candidate_e_sinc70_peak_upper_bound": 0.5,
+                    "candidate_e_peak_scale_abstention_pass": True,
+                }
                 pairwise = {}
                 for pair_index, pair in enumerate(PAIRWISE_COMPONENT_KEYS):
                     cosine = -0.2 if pair_index == 0 else 0.1
@@ -88,20 +112,7 @@ def _case_rows(*, raw: bool) -> list[dict[str, object]]:
                             "slot2_shimmer_percent_uses_topology": False,
                             "slot3_shimmer_db_uses_topology": True,
                         },
-                        "components": {
-                            name: {
-                                "prediction": 1.0,
-                                "clean_pathological_target": 2.0,
-                                "normalized_signed_error": -1.0,
-                                "normalized_bidirectional_gap": 1.0,
-                                "smooth_l1_loss": 0.5,
-                                "gradient_norm": norms[name],
-                                "finite_observed": True,
-                                "strictly_positive_norm_observed": True,
-                                "scientific_gate_applied": False,
-                            }
-                            for name in ACTIVE_COMPONENTS
-                        },
+                        "components": components,
                         "joint": {
                             "gradient_norm": 1.0,
                             "calibration_only_inverse_gradient_weights": weights,
@@ -255,6 +266,27 @@ def _raw_evidence() -> tuple[dict[str, object], dict[str, object], str, str]:
     }
     source_hashes["five_gradient_report"] = FROZEN_FIVE_REPORT_SHA256
     source_hashes["five_gradient_receipt"] = FROZEN_FIVE_RECEIPT_SHA256
+    source_hashes.update(
+        {
+            "candidate_e_promotion_report": (
+                decision.CANDIDATE_E_PROMOTION_REPORT_SHA256
+            ),
+            "candidate_e_promotion_receipt": (
+                decision.CANDIDATE_E_PROMOTION_RECEIPT_SHA256
+            ),
+            "candidate_e_reference_source": CANDIDATE_E_REFERENCE_SHA256,
+            "candidate_e_runtime_client": (
+                decision.CANDIDATE_E_RUNTIME_CLIENT_SHA256
+            ),
+            "candidate_e_worker": decision.CANDIDATE_E_WORKER_SHA256,
+            "candidate_e_selector_source": (
+                decision.CANDIDATE_E_SELECTOR_SHA256
+            ),
+            "candidate_e_runtime_config": (
+                decision.CANDIDATE_E_RUNTIME_CONFIG_SHA256
+            ),
+        }
+    )
     source_evidence = {
         key: {"path": f"/immutable/{key}", "sha256": digest}
         for key, digest in source_hashes.items()
@@ -302,14 +334,18 @@ def _raw_evidence() -> tuple[dict[str, object], dict[str, object], str, str]:
             },
             "slot3_shimmer_db": {
                 "component_index": 3,
-                "source": "current_waveform_with_detached_v19_base_topology",
+                "source": "candidate_e_v32r8_current_waveform_exact_path",
                 "checkpoint_affine_used": False,
                 "v19_topology_used": True,
                 "topology_role": "base_current_output",
                 "implementation": TOPOLOGY_IMPLEMENTATION,
+                "candidate_e_reference_sha256": (
+                    CANDIDATE_E_REFERENCE_SHA256
+                ),
+                "topology_implementation": TOPOLOGY_RUNTIME_IMPLEMENTATION,
                 "metric_highpass": TOPOLOGY_HIGHPASS,
                 "topology_input_loader": TOPOLOGY_LOADER,
-                "scientific_promotion_granted": False,
+                "scientific_promotion_granted": True,
             },
             "slots_are_independent": True,
         },
@@ -357,8 +393,8 @@ def _raw_evidence() -> tuple[dict[str, object], dict[str, object], str, str]:
             "topology_exact_selection_coverage": True,
             "slot2_slot3_sources_independent": True,
             "scorer_has_zero_parameters": True,
-            "shimmer_db_scientific_status_pending": True,
-            "v19_runtime_evidence_does_not_grant_promotion": True,
+            "shimmer_db_scientific_status_promoted": True,
+            "candidate_e_promoted_runtime_evidence_bound": True,
             "numeric_scientific_gates_applied": False,
             "final_or_fresh_panel_opened": False,
             "generator_optimizer_steps": 0,

@@ -379,6 +379,7 @@ def validate_v19_exact_topology(
     view: str,
     expected_topology_sha256: str,
     sample_rate: int,
+    expected_implementation: str = ROUTE_C_V19_TOPOLOGY_IMPLEMENTATION,
 ) -> ValidatedRouteCV19Topology:
     """Bind detached exact topology to one current output waveform and view."""
     required_fields = {
@@ -414,7 +415,7 @@ def validate_v19_exact_topology(
         raise ValueError("Route C v19 topology is unavailable")
     if topology["topology_preprocessing"] != "exact_avqi_view_metric_waveform":
         raise ValueError("Route C v19 topology preprocessing differs")
-    if topology["implementation"] != ROUTE_C_V19_TOPOLOGY_IMPLEMENTATION:
+    if topology["implementation"] != expected_implementation:
         raise ValueError("Route C v19 topology implementation differs")
     if topology["metric_highpass"] != ROUTE_C_V19_BASE_TOPOLOGY_HIGHPASS_MODE:
         raise ValueError("Route C v19 base topology high-pass mode differs")

@@ -15,6 +15,12 @@ import torch
 
 from model.avqi_components import AVQI_COMPONENT_NAMES
 from model.avqi_route_c import ROUTE_C_SIX_ACTIVE_COMPONENTS
+from model.avqi_route_c_candidate_e import (
+    CANDIDATE_E_SOURCE_COMMIT,
+    CANDIDATE_E_TOPOLOGY_IMPLEMENTATION,
+    build_cycle_gain_plan,
+    candidate_e_proxy,
+)
 from model.avqi_route_c_v19_contracts import (
     ROUTE_C_V19_BASE_TOPOLOGY_HIGHPASS_MODE,
     ROUTE_C_V19_BASE_TOPOLOGY_INPUT_LOADER,
@@ -22,7 +28,6 @@ from model.avqi_route_c_v19_contracts import (
     ROUTE_C_V19_FULL_STEP_ARTIFACT_KEYS,
     ROUTE_C_V19_IMPLEMENTATION_ARTIFACT_KEYS,
     ROUTE_C_V19_PAIRED_CANDIDATE_HIGHPASS_MODE,
-    ROUTE_C_V19_TOPOLOGY_IMPLEMENTATION,
     ROUTE_C_V19_TOPOLOGY_SCALAR_FIELDS,
     sha256_file,
     validate_v19_exact_topology,
@@ -42,6 +47,8 @@ from scripts.evaluate_avqi_route_c_six_component_gradients import (
     PAIRWISE_COMPONENT_KEYS,
     REQUIRED_FIVE_SOURCE_EVIDENCE,
     TOPOLOGY_INPUT_SCHEMA_VERSION,
+    TOPOLOGY_RECEIPT_SCHEMA_VERSION,
+    TOPOLOGY_SEAL_DECISION,
     TopologyAuditInput,
     aggregate_measurements,
     calibration_inverse_gradient_weights,
@@ -50,6 +57,7 @@ from scripts.evaluate_avqi_route_c_six_component_gradients import (
     load_topology_inputs,
     load_v19_evidence_manifest,
     slot_separation_metadata,
+    validate_topology_receipt,
     validate_five_source_evidence,
 )
 
@@ -73,14 +81,17 @@ def _synthetic_topology(
     view: str = "cs",
 ) -> tuple[dict[str, object], str]:
     ranges = [[0, waveform.numel()]]
-    pulses = [100.0, 200.0, 300.0, 400.0]
+    pulses = [
+        float(position)
+        for position in range(100, waveform.numel() - 100, 80)
+    ]
     topology: dict[str, object] = {
         "case_id": case_id,
         "view": view,
         "role": "current_output_topology",
         "scoring_status": "ok",
         "topology_preprocessing": "exact_avqi_view_metric_waveform",
-        "implementation": ROUTE_C_V19_TOPOLOGY_IMPLEMENTATION,
+        "implementation": CANDIDATE_E_TOPOLOGY_IMPLEMENTATION,
         "metric_highpass": ROUTE_C_V19_BASE_TOPOLOGY_HIGHPASS_MODE,
         "topology_input_loader": ROUTE_C_V19_BASE_TOPOLOGY_INPUT_LOADER,
         "source_waveform_float32_sha256": _waveform_sha256(waveform),
@@ -119,7 +130,10 @@ def _synthetic_topology(
 
 def _case_and_topology(tmp_path: Path) -> tuple[AuditCase, TopologyAuditInput]:
     audio_path = tmp_path / "current.wav"
-    source = torch.linspace(0.05, 0.25, SEGMENT_SAMPLES, dtype=torch.float32)
+    time = torch.arange(SEGMENT_SAMPLES, dtype=torch.float32) / 16_000
+    source = torch.sin(2.0 * math.pi * 200.0 * time) * (
+        0.1 + 0.01 * torch.sin(2.0 * math.pi * 4.0 * time)
+    )
     sf.write(audio_path, source.numpy(), 16_000, subtype="FLOAT")
     case = AuditCase(
         split="surrogate_calibration",
@@ -175,13 +189,32 @@ class ContractCheckingSixScorer(torch.nn.Module):
             view=view,
             expected_topology_sha256=topology_sha256,
             sample_rate=16_000,
+            expected_implementation=CANDIDATE_E_TOPOLOGY_IMPLEMENTATION,
         )
+        plan = build_cycle_gain_plan(
+            waveform.detach().cpu().numpy(),
+            topology,
+        )
+        shimmer_db = candidate_e_proxy(
+            waveform.to(dtype=torch.float64),
+            torch.as_tensor(
+                topology["pulse_positions_samples"],
+                device=waveform.device,
+                dtype=torch.float64,
+            ),
+            torch.as_tensor(
+                plan["source_indices"],
+                device=waveform.device,
+                dtype=torch.long,
+            ),
+            int(topology["metric_constant_prefix_samples"]),
+        ).shimmer_db.to(dtype=waveform.dtype)
         ramp = torch.linspace(0.5, 1.5, waveform.numel(), device=waveform.device)
         features = (
             waveform.mean(),
             waveform.square().mean(),
             waveform.pow(3).mean(),
-            (waveform * ramp).mean(),
+            shimmer_db,
             torch.sin(waveform).mean(),
             torch.sqrt(waveform.square().mean() + 1e-8),
         )
@@ -192,7 +225,10 @@ def test_raw_collector_reports_six_norms_and_all_cosines(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    waveform = torch.linspace(0.05, 0.25, 2_000, dtype=torch.float32)
+    time = torch.arange(2_000, dtype=torch.float32) / 16_000
+    waveform = torch.sin(2.0 * math.pi * 200.0 * time) * (
+        0.1 + 0.01 * torch.sin(2.0 * math.pi * 4.0 * time)
+    )
     case = AuditCase(
         split="surrogate_calibration",
         speaker_id="speaker-a",
@@ -245,6 +281,15 @@ def test_raw_collector_reports_six_norms_and_all_cosines(
     assert summary["component_to_joint_cosine_measurements"] == 6
     assert finalized["topology"]["slot2_shimmer_percent_uses_topology"] is False
     assert finalized["topology"]["slot3_shimmer_db_uses_topology"] is True
+    projection = finalized["components"]["shimmer_db"][
+        "candidate_e_projection"
+    ]
+    assert projection["projected_gradient_valid"] is True
+    assert projection["projection_reduction"] == (
+        "numpy_float64_fixed_cycle_order"
+    )
+    assert projection["candidate_e_peak_scale_abstention_pass"] is True
+    assert projection["candidate_e_sinc70_peak_upper_bound"] < 0.999
     assert finalized["joint"]["scientific_gate_applied"] is False
 
 
@@ -275,8 +320,10 @@ def _topology_manifest(
 ) -> dict[str, object]:
     return {
         "schema_version": TOPOLOGY_INPUT_SCHEMA_VERSION,
-        "v19_source_commit": "a" * 40,
-        "v19_evidence_manifest_sha256": "b" * 64,
+        "candidate_e_source_commit": CANDIDATE_E_SOURCE_COMMIT,
+        "candidate_e_evidence_sha256": {
+            key: "b" * 64 for key in audit.CANDIDATE_E_EVIDENCE_KEYS
+        },
         "label_bank_sha256": "c" * 64,
         "selection_salt": "selection-salt",
         "sample_rate": 16_000,
@@ -321,8 +368,9 @@ def test_topology_manifest_exactly_binds_selected_current_outputs(
         manifest_path,
         sha256_file(manifest_path),
         [case],
-        v19_source_commit="a" * 40,
-        v19_evidence_manifest_sha256="b" * 64,
+        candidate_e_evidence_sha256={
+            key: "b" * 64 for key in audit.CANDIDATE_E_EVIDENCE_KEYS
+        },
         label_bank_sha256="c" * 64,
         selection_salt="selection-salt",
     )
@@ -342,10 +390,45 @@ def test_topology_manifest_exactly_binds_selected_current_outputs(
             manifest_path,
             sha256_file(manifest_path),
             [case],
-            v19_source_commit="a" * 40,
-            v19_evidence_manifest_sha256="b" * 64,
+            candidate_e_evidence_sha256={
+                key: "b" * 64 for key in audit.CANDIDATE_E_EVIDENCE_KEYS
+            },
             label_bank_sha256="c" * 64,
             selection_salt="selection-salt",
+        )
+
+
+def test_topology_receipt_binds_manifest_and_source(tmp_path: Path) -> None:
+    manifest_sha256 = "c" * 64
+    receipt_path = tmp_path / "topology_receipt.json"
+    receipt = {
+        "schema_version": TOPOLOGY_RECEIPT_SCHEMA_VERSION,
+        "decision": TOPOLOGY_SEAL_DECISION,
+        "source": {"head": "a" * 40},
+        "topology_count": 8,
+        "candidate_exact_outcomes_opened": False,
+        "generator_optimizer_steps": 0,
+        "artifact_sha256": {
+            "candidate_e_topology_manifest_v2.json": manifest_sha256
+        },
+    }
+    _write_json(receipt_path, receipt)
+    binding = validate_topology_receipt(
+        receipt_path,
+        sha256_file(receipt_path),
+        topology_manifest_sha256=manifest_sha256,
+        source_commit="a" * 40,
+    )
+    assert binding["path"] == str(receipt_path.resolve())
+
+    receipt["candidate_exact_outcomes_opened"] = True
+    _write_json(receipt_path, receipt)
+    with pytest.raises(ValueError, match="topology receipt differs"):
+        validate_topology_receipt(
+            receipt_path,
+            sha256_file(receipt_path),
+            topology_manifest_sha256=manifest_sha256,
+            source_commit="a" * 40,
         )
 
 
@@ -418,7 +501,7 @@ def test_slot2_and_slot3_sources_are_explicitly_separate() -> None:
             "shimmer_db": {
                 "component_indices": [3],
                 "checkpoint_affine_used": False,
-                "source": "v19_current_output_exact_topology",
+                "source": "candidate_e_v32r8_current_output_exact_topology",
             },
         }
     )
@@ -448,10 +531,11 @@ def test_launcher_is_fail_closed_and_has_no_submission_or_pass_path() -> None:
     assert "PASS_ROUTE_C_SIX_ACTIVE_CODE_GRADIENT_AUDIT" not in source
     assert "scripts.evaluate_avqi_route_c_six_component_gradients" in source
     assert "--source-evidence" in source
-    assert "--v19-evidence-manifest" in source
-    assert "--v19-evidence-manifest-sha256" in source
+    assert "--candidate-e-evidence" in source
     assert "--topology-manifest" in source
     assert "--topology-manifest-sha256" in source
+    assert "--topology-receipt" in source
+    assert "--topology-receipt-sha256" in source
     assert MEASUREMENT_DECISION.startswith("PENDING_")
     assert JOINT_PANEL_DECISION.startswith("NO_GO_")
     assert sys.executable not in source

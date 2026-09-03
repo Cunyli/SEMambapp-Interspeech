@@ -1,0 +1,56 @@
+{
+  "schema_version": "avqi-route-c-six-joint-target-protocol-v1",
+  "frozen_before_panel_selection": true,
+  "source_dataset": "SVD",
+  "patient_target": "exact same-speaker same-view clean pathological CS/SV target",
+  "patient_degraded_target_enabled": true,
+  "patient_clean_role": "no-overprocessing control",
+  "healthy_target": null,
+  "healthy_loss_enabled": false,
+  "healthy_waveform_step_enabled": false,
+  "target_waveform": {
+    "source": "selected same-session raw SVD CS or SV",
+    "resample_hz": 16000,
+    "channel": "mono first channel after mono eligibility check",
+    "simulation_applied": false,
+    "generator_applied": false,
+    "emitted_highpass_applied": false
+  },
+  "target_components": {
+    "authority": "exact Praat AVQI implementation",
+    "component_order": [
+      "cpps",
+      "hnr",
+      "shimmer_percent",
+      "shimmer_db",
+      "slope",
+      "tilt"
+    ],
+    "sealed_before_candidate_generation": true,
+    "candidate_exact_outcomes_opened": false,
+    "candidate_exact_outcomes_used_for_target_construction": false
+  },
+  "selection_forbidden_inputs": [
+    "diagnosis",
+    "clinical_severity",
+    "mild_severe",
+    "exact_avqi",
+    "exact_component_values",
+    "surrogate_component_values",
+    "candidate_exact_outcomes"
+  ],
+  "runtime_selector_may_use": [
+    "proxy_values",
+    "waveform_certificates",
+    "topology_certificates",
+    "safety_certificates",
+    "pcm_certificates"
+  ],
+  "runtime_selector_may_not_use": [
+    "candidate_exact_outcomes",
+    "speaker_identity",
+    "case_identity"
+  ],
+  "generator_optimizer_steps": 0,
+  "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+}

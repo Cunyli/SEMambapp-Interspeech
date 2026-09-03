@@ -1,0 +1,77 @@
+{
+  "schema_version": "avqi-route-c-six-joint-gate-contract-v1",
+  "frozen_before_panel_selection": true,
+  "component_order": [
+    "cpps",
+    "hnr",
+    "shimmer_percent",
+    "shimmer_db",
+    "slope",
+    "tilt"
+  ],
+  "global_alpha_grid": [
+    0.0,
+    1e-06,
+    3e-06,
+    1e-05,
+    3e-05,
+    0.0001,
+    0.0003,
+    0.001,
+    0.003
+  ],
+  "zero_alpha_selectable": false,
+  "selection_split": "calibration",
+  "selection_objective": "maximize_equal_weight_joint_exact_median_normalized_gap_reduction",
+  "selection_tie_break": "smaller_alpha",
+  "final_tuning_permitted": false,
+  "efficacy": {
+    "scope": "patient degraded rows only",
+    "material_normalized_before_gap_strictly_greater_than": 0.02,
+    "material_coverage_fraction_minimum": 0.8,
+    "material_cases_absolute_minimum": 5,
+    "material_cases_per_18_minimum": 15,
+    "exact_improvement_fraction_minimum": 0.8,
+    "median_normalized_gap_reduction_minimum": 0.02,
+    "applies_to_each_component_and_equal_weight_joint": true
+  },
+  "required_slices": {
+    "keys": [
+      "condition=rir_only&view=cs",
+      "condition=rir_only&view=sv",
+      "condition=snr20&view=cs",
+      "condition=snr20&view=sv",
+      "condition=snr10&view=cs",
+      "condition=snr10&view=sv"
+    ],
+    "expected_rows_per_slice": 3,
+    "improvement_fraction_strictly_greater_than": 0.5,
+    "median_normalized_reduction_minimum": 0.0,
+    "zero_coverage_decision": "FAIL"
+  },
+  "waveform_safety": {
+    "residual_rms_db_maximum": -50.0,
+    "cosine_similarity_minimum": 0.99999,
+    "clip_fraction_maximum": 0.0
+  },
+  "full_band_pathology": {
+    "low_frequency_bands_hz": [[20.0, 80.0], [80.0, 300.0]],
+    "airflow_proxy_frequency_range_hz": [500.0, 4000.0],
+    "low_energy_quantile": 0.25,
+    "pathology_db_median_gap_increase_maximum": 0.5,
+    "pathology_db_worst_gap_increase_maximum": 1.5,
+    "airflow_flatness_median_gap_increase_maximum": 0.05,
+    "airflow_flatness_worst_gap_increase_maximum": 0.1,
+    "pause_f1_median_decrease_maximum": 0.05,
+    "pause_f1_worst_decrease_maximum": 0.15,
+    "guardrail_pass_fraction_minimum": 0.6666666666666666,
+    "emitted_waveform_highpass": false
+  },
+  "denoising": {
+    "metrics": ["snr", "si_sdr"],
+    "median_change_minimum_db": -0.1,
+    "worst_change_minimum_db": -0.5
+  },
+  "generator_optimizer_steps": 0,
+  "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+}

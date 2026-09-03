@@ -20,13 +20,13 @@ import sys
 from typing import Any, Mapping
 
 
-DECISION_SCHEMA_VERSION = "avqi-route-c-six-gradient-decision-v1"
+DECISION_SCHEMA_VERSION = "avqi-route-c-six-gradient-decision-v2"
 DECISION_RECEIPT_SCHEMA_VERSION = (
-    "avqi-route-c-six-gradient-decision-receipt-v1"
+    "avqi-route-c-six-gradient-decision-receipt-v2"
 )
-RAW_SCHEMA_VERSION = "dev-avqi-route-c-six-gradient-raw-measurement-v1"
+RAW_SCHEMA_VERSION = "dev-avqi-route-c-six-gradient-raw-measurement-v2"
 RAW_RECEIPT_SCHEMA_VERSION = (
-    "dev-avqi-route-c-six-gradient-raw-measurement-receipt-v1"
+    "dev-avqi-route-c-six-gradient-raw-measurement-receipt-v2"
 )
 RAW_PENDING_DECISION = (
     "PENDING_ROUTE_C_SIX_COMPONENT_GRADIENT_GATES_UNFROZEN"
@@ -84,9 +84,35 @@ LOSS_TARGET = (
 WEIGHT_RULE = (
     "minimum calibration median gradient norm / component median gradient norm"
 )
-TOPOLOGY_IMPLEMENTATION = "exact_paired_peak_certificate_tmpfs_v19"
+TOPOLOGY_IMPLEMENTATION = (
+    "candidate_e_exact_path_fixed_order_cycle_gain_projection"
+)
+TOPOLOGY_RUNTIME_IMPLEMENTATION = (
+    "exact_vectorized_frames_reused_tmpfs_numpy_sounding_v15"
+)
 TOPOLOGY_HIGHPASS = "numpy_official_praat_6_1_38_stop_hann_0_34_0p1"
 TOPOLOGY_LOADER = "client_tmpfs_raw_float32_current_output"
+CANDIDATE_E_REFERENCE_SHA256 = (
+    "e9266444fa1a8a9589471fb1edd08dbec020368e4dc984551eab304f20d4a9cf"
+)
+CANDIDATE_E_PROMOTION_REPORT_SHA256 = (
+    "4a5b49dbdf3a1324d6b0f1e084d5153469f7c178afae0ded9cefd9060206e632"
+)
+CANDIDATE_E_PROMOTION_RECEIPT_SHA256 = (
+    "d256073901fd708cfbad10687c8e281007f98a64b46e902bd8eeb528e06cc84f"
+)
+CANDIDATE_E_RUNTIME_CLIENT_SHA256 = (
+    "28e48fc3de99bb2c7258559f4f58be2760c7804f53a08bab162fff670b36153b"
+)
+CANDIDATE_E_WORKER_SHA256 = (
+    "c78cdb277274a9f46153c80ca5ad8c47536e3c1009cf1b3c2b613aee744d276f"
+)
+CANDIDATE_E_SELECTOR_SHA256 = (
+    "7401b4b80f6dbb546a4a88886c469bb4df6b4681bad9314f1244a046fbb2b69b"
+)
+CANDIDATE_E_RUNTIME_CONFIG_SHA256 = (
+    "4dec4b018b6cd9f7a5a7f87966cc7f2dde057f152df256f65fc397faefb53b98"
+)
 
 FIVE_COMPONENT_EVIDENCE_KEYS = (
     "cpps_report",
@@ -102,6 +128,18 @@ FIVE_COMPONENT_EVIDENCE_KEYS = (
     "tilt_report",
     "tilt_receipt",
 )
+CANDIDATE_E_EVIDENCE_KEYS = (
+    "candidate_e_promotion_report",
+    "candidate_e_promotion_receipt",
+    "candidate_e_reference_source",
+    "candidate_e_runtime_client",
+    "candidate_e_worker",
+    "candidate_e_selector_source",
+    "candidate_e_runtime_config",
+    "exact_code_tree_manifest",
+    "exact_runtime_manifest",
+    "exact_authority_receipt",
+)
 RAW_SOURCE_EVIDENCE_KEYS = (
     *FIVE_COMPONENT_EVIDENCE_KEYS,
     "five_gradient_report",
@@ -112,15 +150,18 @@ RAW_SOURCE_EVIDENCE_KEYS = (
     "slope_checkpoint",
     "tilt_checkpoint",
     "label_bank",
-    "v19_evidence_manifest",
     "topology_manifest",
+    "topology_receipt",
     "focused_test_evidence",
+    *CANDIDATE_E_EVIDENCE_KEYS,
 )
 READINESS_SOURCE_EVIDENCE_KEYS = (
     *FIVE_COMPONENT_EVIDENCE_KEYS,
     "five_gradient_report",
     "five_gradient_receipt",
-    "v19_runtime_evidence_manifest",
+    "topology_manifest",
+    "topology_receipt",
+    *CANDIDATE_E_EVIDENCE_KEYS,
 )
 RAW_IMPLEMENTATION_KEYS = (
     "evaluate_avqi_route_c_six_component_gradients.py",
@@ -146,7 +187,7 @@ FROZEN_GATE_KEYS = (
     "calibration_holdout_speaker_disjoint",
     "mild_severe_cs_sv_coverage_each_split",
     "final_and_fresh_panels_closed",
-    "current_waveform_v19_base_topology_coverage_8_of_8",
+    "candidate_e_current_waveform_topology_coverage_8_of_8",
     "slot2_slot3_separation",
     "zero_scorer_parameters",
     "same_speaker_clean_pathological_bidirectional_target",
@@ -455,6 +496,20 @@ def _validate_source_evidence(
         raise ValueError("raw report does not bind accepted five-gradient report")
     if parsed["five_gradient_receipt"] != FROZEN_FIVE_RECEIPT_SHA256:
         raise ValueError("raw report does not bind accepted five-gradient receipt")
+    expected_candidate_hashes = {
+        "candidate_e_promotion_report": CANDIDATE_E_PROMOTION_REPORT_SHA256,
+        "candidate_e_promotion_receipt": CANDIDATE_E_PROMOTION_RECEIPT_SHA256,
+        "candidate_e_reference_source": CANDIDATE_E_REFERENCE_SHA256,
+        "candidate_e_runtime_client": CANDIDATE_E_RUNTIME_CLIENT_SHA256,
+        "candidate_e_worker": CANDIDATE_E_WORKER_SHA256,
+        "candidate_e_selector_source": CANDIDATE_E_SELECTOR_SHA256,
+        "candidate_e_runtime_config": CANDIDATE_E_RUNTIME_CONFIG_SHA256,
+    }
+    if any(
+        parsed[name] != digest
+        for name, digest in expected_candidate_hashes.items()
+    ):
+        raise ValueError("raw report does not bind promoted Candidate-E runtime")
     if receipt.get("source_evidence_sha256") != evidence_hashes:
         raise ValueError("raw receipt source evidence differs")
     return parsed
@@ -587,7 +642,7 @@ def _validate_raw_envelope(
         "exact_selection_coverage": True,
     }
     if any(topology.get(key) != value for key, value in expected_topology.items()):
-        raise ValueError("raw v19 topology coverage differs")
+        raise ValueError("raw Candidate-E topology coverage differs")
     separation = _mapping(
         report.get("slot2_slot3_separation"), "raw slot separation"
     )
@@ -601,14 +656,16 @@ def _validate_raw_envelope(
     }
     expected_slot3 = {
         "component_index": 3,
-        "source": "current_waveform_with_detached_v19_base_topology",
+        "source": "candidate_e_v32r8_current_waveform_exact_path",
         "checkpoint_affine_used": False,
         "v19_topology_used": True,
         "topology_role": "base_current_output",
         "implementation": TOPOLOGY_IMPLEMENTATION,
+        "candidate_e_reference_sha256": CANDIDATE_E_REFERENCE_SHA256,
+        "topology_implementation": TOPOLOGY_RUNTIME_IMPLEMENTATION,
         "metric_highpass": TOPOLOGY_HIGHPASS,
         "topology_input_loader": TOPOLOGY_LOADER,
-        "scientific_promotion_granted": False,
+        "scientific_promotion_granted": True,
     }
     if (
         any(slot2.get(key) != value for key, value in expected_slot2.items())
@@ -625,8 +682,8 @@ def _validate_raw_envelope(
         "topology_exact_selection_coverage",
         "slot2_slot3_sources_independent",
         "scorer_has_zero_parameters",
-        "shimmer_db_scientific_status_pending",
-        "v19_runtime_evidence_does_not_grant_promotion",
+        "shimmer_db_scientific_status_promoted",
+        "candidate_e_promoted_runtime_evidence_bound",
     )
     if any(integrity.get(key) is not True for key in required_true):
         raise ValueError("raw six-gradient integrity differs")
@@ -644,6 +701,32 @@ def _validate_raw_envelope(
             or not _is_sha256(row_topology.get("topology_sha256"))
         ):
             raise ValueError("raw case topology contract differs")
+        components = _mapping(row.get("components"), "raw case components")
+        shimmer_db = _mapping(
+            components.get("shimmer_db"), "raw Candidate-E component"
+        )
+        projection = _mapping(
+            shimmer_db.get("candidate_e_projection"),
+            "raw Candidate-E projection",
+        )
+        if (
+            projection.get("projected_gradient_valid") is not True
+            or projection.get("projection_reduction")
+            != "numpy_float64_fixed_cycle_order"
+            or int(projection.get("complete_cycle_count", 0)) < 16
+            or projection.get("candidate_e_peak_scale_abstention_pass")
+            is not True
+            or not isinstance(
+                projection.get("candidate_e_sinc70_peak_upper_bound"),
+                (int, float),
+            )
+            or not math.isfinite(
+                float(projection["candidate_e_sinc70_peak_upper_bound"])
+            )
+            or float(projection["candidate_e_sinc70_peak_upper_bound"])
+            >= 0.999
+        ):
+            raise ValueError("raw Candidate-E projection contract differs")
     _require_raw_pending_boundaries(report, receipt)
     return rows, source_hashes
 
@@ -965,7 +1048,7 @@ def evaluate_six_gradient_decision(
         "calibration_holdout_speaker_disjoint": True,
         "mild_severe_cs_sv_coverage_each_split": True,
         "final_and_fresh_panels_closed": True,
-        "current_waveform_v19_base_topology_coverage_8_of_8": True,
+        "candidate_e_current_waveform_topology_coverage_8_of_8": True,
         "slot2_slot3_separation": True,
         "zero_scorer_parameters": True,
         "same_speaker_clean_pathological_bidirectional_target": True,
@@ -984,9 +1067,12 @@ def evaluate_six_gradient_decision(
         {
             "five_gradient_report": FROZEN_FIVE_REPORT_SHA256,
             "five_gradient_receipt": FROZEN_FIVE_RECEIPT_SHA256,
-            "v19_runtime_evidence_manifest": raw_source_hashes[
-                "v19_evidence_manifest"
-            ],
+            "topology_manifest": raw_source_hashes["topology_manifest"],
+            "topology_receipt": raw_source_hashes["topology_receipt"],
+            **{
+                key: raw_source_hashes[key]
+                for key in CANDIDATE_E_EVIDENCE_KEYS
+            },
         }
     )
     return {
@@ -1042,7 +1128,12 @@ def decision_requirements() -> dict[str, Any]:
             },
             "strata_per_split": list(SELECTION_STRATA),
             "speaker_overlap": 0,
-            "topology_coverage": "8/8 current-waveform v19 base topology",
+            "topology_coverage": (
+                "8/8 Candidate-E current-waveform exact base topology"
+            ),
+            "shimmer_db_backward": (
+                "Candidate-E exact-path proxy plus fixed-order cycle-gain projection"
+            ),
             "component_gradient_norm": {
                 "finite": True,
                 "strictly_greater_than": NONZERO_GRADIENT_NORM_MIN,

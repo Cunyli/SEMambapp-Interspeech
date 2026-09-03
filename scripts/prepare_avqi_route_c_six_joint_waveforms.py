@@ -39,6 +39,7 @@ if __name__ == "__main__" and __package__ in {None, ""}:
     raise SystemExit(completed.returncode)
 
 from model.avqi_route_c import ROUTE_C_SIX_ACTIVE_COMPONENTS
+from model.avqi_route_c_candidate_e import PEAK_SCALE_TRIGGER
 from model.avqi_route_c_v19_contracts import sha256_file
 from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
     CLEAN_PATHOLOGICAL_ROLE,
@@ -64,6 +65,10 @@ from scripts.audit_avqi_route_c_six_joint_panel_readiness import (
 
 SAMPLE_RATE = 16_000
 OUTPUT_SUBTYPE = "PCM_24"
+GRADIENT_SOURCE = (
+    "six_active_bidirectional_gap_losses_candidate_e_v32r8_exact_path_"
+    "fixed_order_projection"
+)
 GRADIENT_MANIFEST_SCHEMA_VERSION = (
     "avqi-route-c-six-joint-gradient-manifest-v1"
 )
@@ -261,6 +266,8 @@ def validate_target_bank(
     *,
     bank_sha256: str,
     split_seal_sha256: str,
+    source_manifest_sha256: str,
+    target_protocol_sha256: str,
     panel_rows: Mapping[str, Mapping[str, Any]],
 ) -> dict[tuple[str, str], dict[str, Any]]:
     if bank.get("schema_version") != TARGET_BANK_SCHEMA_VERSION:
@@ -271,6 +278,13 @@ def validate_target_bank(
         raise ValueError("clean target-bank scientific contract differs")
     if bank.get("split_seal_sha256") != split_seal_sha256:
         raise ValueError("clean target bank does not bind the split seal")
+    if (
+        bank.get("fresh_speaker_source_manifest_sha256")
+        != source_manifest_sha256
+        or bank.get("target_value_protocol_sha256")
+        != target_protocol_sha256
+    ):
+        raise ValueError("clean target bank source/protocol binding differs")
     if (
         bank.get("candidate_exact_outcomes_opened") is not False
         or bank.get("candidate_waveforms_scored") is not False
@@ -347,10 +361,11 @@ def validate_gradient_manifest(
         "six_gradient_raw_report_sha256": six_gradient_raw_report_sha256,
         "six_gradient_decision": SIX_GRADIENT_PASS_DECISION,
         "normalization_source": NORMALIZATION_SOURCE,
-        "gradient_source": (
-            "six_active_bidirectional_gap_losses_current_output_v19_topology"
-        ),
+        "gradient_source": GRADIENT_SOURCE,
         "current_output_topology_bound": True,
+        "candidate_e_projection": (
+            "numpy_float64_fixed_cycle_order_before_six_component_combination"
+        ),
         "waveform_steps": 1,
         "gradient_normalization": "waveform_rms_normalized",
         "candidate_exact_outcomes_opened": False,
@@ -375,6 +390,43 @@ def validate_gradient_manifest(
     rows = manifest.get("rows")
     if not isinstance(rows, list) or len(rows) != EXPECTED_TOTAL_ROWS:
         raise ValueError("six-joint gradient manifest row count differs")
+    patient_case_ids = {
+        case_id
+        for case_id, panel_row in panel_rows.items()
+        if panel_row["optimization_role"] != HEALTHY_ROLE
+    }
+    projections = manifest.get("candidate_e_projection_receipts")
+    if not isinstance(projections, dict) or set(projections) != patient_case_ids:
+        raise ValueError("Candidate-E projection receipt coverage differs")
+    for case_id, projection in projections.items():
+        if (
+            not isinstance(projection, dict)
+            or projection.get("projection_reduction")
+            != "numpy_float64_fixed_cycle_order"
+            or projection.get("projected_gradient_valid") is not True
+            or projection.get("projected_gradient_finite") is not True
+            or not isinstance(projection.get("complete_cycle_count"), int)
+            or projection["complete_cycle_count"] < 16
+            or not isinstance(
+                projection.get("projected_gradient_l2_norm"), (int, float)
+            )
+            or not math.isfinite(float(projection["projected_gradient_l2_norm"]))
+            or float(projection["projected_gradient_l2_norm"]) <= 0.0
+            or projection.get("candidate_e_peak_scale_abstention_pass")
+            is not True
+            or not isinstance(
+                projection.get("candidate_e_sinc70_peak_upper_bound"),
+                (int, float),
+            )
+            or not math.isfinite(
+                float(projection["candidate_e_sinc70_peak_upper_bound"])
+            )
+            or float(projection["candidate_e_sinc70_peak_upper_bound"])
+            >= PEAK_SCALE_TRIGGER
+        ):
+            raise ValueError(
+                f"Candidate-E projection receipt differs: {case_id}"
+            )
     indexed: dict[str, dict[str, Any]] = {}
     for row in rows:
         if not isinstance(row, dict) or set(row) != GRADIENT_ROW_FIELDS:
@@ -387,7 +439,7 @@ def validate_gradient_manifest(
         panel_row = panel_rows[case_id]
         base_path = Path(str(row["base_waveform_path"]))
         base_sha256 = str(row["base_waveform_sha256"])
-        _load_audio(base_path, base_sha256, f"base waveform {case_id}")
+        base = _load_audio(base_path, base_sha256, f"base waveform {case_id}")
         if panel_row["optimization_role"] == HEALTHY_ROLE:
             if any(
                 row[key] is not None
@@ -410,9 +462,22 @@ def validate_gradient_manifest(
                 )
             ):
                 raise ValueError("patient gradient row lacks step inputs")
+            if re.fullmatch(r"[0-9a-f]{64}", str(row["topology_sha256"])) is None:
+                raise ValueError("patient topology hash differs")
+            _load_gradient(
+                Path(str(row["joint_gradient_path"])),
+                str(row["joint_gradient_sha256"]),
+                base.size,
+                f"joint gradient {case_id}",
+            )
         indexed[case_id] = {
             **row,
             "base_waveform_path": str(base_path.resolve()),
+            "joint_gradient_path": (
+                str(Path(str(row["joint_gradient_path"])).resolve())
+                if row["joint_gradient_path"] is not None
+                else None
+            ),
         }
     if set(indexed) != set(panel_rows):
         raise ValueError("six-joint gradient manifest does not exactly cover panel")
@@ -497,6 +562,8 @@ def prepare_and_seal(
         target_bank,
         bank_sha256=target_bank_sha256,
         split_seal_sha256=split_seal_sha256,
+        source_manifest_sha256=source_manifest_sha256,
+        target_protocol_sha256=target_protocol_sha256,
         panel_rows=panel_rows,
     )
     gradients = validate_gradient_manifest(
