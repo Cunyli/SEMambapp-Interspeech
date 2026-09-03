@@ -45,6 +45,10 @@ CANDIDATE_E_RUNTIME_CONFIG_SHA256 = (
 CANDIDATE_E_TOPOLOGY_IMPLEMENTATION = (
     "exact_vectorized_frames_reused_tmpfs_numpy_sounding_v15"
 )
+CANDIDATE_E_NUMPY_HIGHPASS_MODE = (
+    "numpy_official_praat_6_1_38_stop_hann_0_34_0p1"
+)
+PEAK_CERTIFICATE_NUMERICAL_SAFETY_FACTOR = 4096.0
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,103 @@ class CandidateEProxyResult:
     metric_sample_abs_max: float
     sinc70_peak_upper_bound: float
     peak_scale_abstention_pass: bool
+
+
+def validate_candidate_e_base_peak_certificate(
+    topology: Mapping[str, Any],
+    proxy: CandidateEProxyResult,
+) -> dict[str, Any]:
+    """Validate the worker's exact fallback when the local peak bound is loose."""
+    timing = topology.get("timing_ms")
+    if not isinstance(timing, Mapping):
+        raise ValueError("Candidate-E topology lacks a peak certificate")
+    mode = timing.get("highpass_peak_check_mode")
+    skipped = timing.get("highpass_sinc70_skipped")
+    scaled = timing.get("highpass_peak_scaled")
+    peak = timing.get("highpass_peak_value")
+    sample_abs_max = timing.get("highpass_sample_abs_max")
+    local_upper = timing.get("highpass_sinc70_peak_upper_bound")
+    if (
+        timing.get("highpass_mode") != CANDIDATE_E_NUMPY_HIGHPASS_MODE
+        or topology.get("metric_highpass") != CANDIDATE_E_NUMPY_HIGHPASS_MODE
+        or timing.get("highpass_sinc70_absolute_weight_bound")
+        != SINC70_ABSOLUTE_WEIGHT_BOUND
+        or not isinstance(skipped, bool)
+        or not isinstance(scaled, bool)
+        or isinstance(sample_abs_max, bool)
+        or not isinstance(sample_abs_max, (int, float))
+        or isinstance(local_upper, bool)
+        or not isinstance(local_upper, (int, float))
+    ):
+        raise ValueError("Candidate-E base peak certificate fields differ")
+    sample_abs_max = float(sample_abs_max)
+    local_upper = float(local_upper)
+    if (
+        not math.isfinite(sample_abs_max)
+        or sample_abs_max < 0.0
+        or not math.isfinite(local_upper)
+        or local_upper < 0.0
+        or local_upper != sample_abs_max * SINC70_ABSOLUTE_WEIGHT_BOUND
+        or not math.isclose(
+            sample_abs_max,
+            proxy.metric_sample_abs_max,
+            rel_tol=1e-8,
+            abs_tol=1e-10,
+        )
+        or not math.isclose(
+            local_upper,
+            proxy.sinc70_peak_upper_bound,
+            rel_tol=1e-8,
+            abs_tol=1e-10,
+        )
+    ):
+        raise ValueError("Candidate-E base peak certificate/proxy differs")
+
+    exact_peak: float | None
+    if mode == "proven_safe_sinc70_l1_upper_bound":
+        if skipped is not True or peak is not None or scaled is not False:
+            raise ValueError("Candidate-E safe-bound peak certificate differs")
+        observed_or_bound = local_upper
+        exact_peak = None
+    elif mode == "exact_praat_sinc70":
+        if (
+            skipped is not False
+            or isinstance(peak, bool)
+            or not isinstance(peak, (int, float))
+        ):
+            raise ValueError("Candidate-E exact peak certificate differs")
+        exact_peak = float(peak)
+        if (
+            not math.isfinite(exact_peak)
+            or exact_peak < 0.0
+            or exact_peak > math.nextafter(local_upper, math.inf)
+            or scaled != (exact_peak > PEAK_SCALE_TRIGGER)
+        ):
+            raise ValueError("Candidate-E exact peak/scale decision differs")
+        observed_or_bound = exact_peak
+    else:
+        raise ValueError("Candidate-E peak-check mode differs")
+
+    numerical_epsilon = (
+        PEAK_CERTIFICATE_NUMERICAL_SAFETY_FACTOR
+        * np.finfo(np.float64).eps
+        * max(observed_or_bound, 1.0)
+    )
+    certified_upper = math.nextafter(
+        observed_or_bound + numerical_epsilon,
+        math.inf,
+    )
+    if scaled or certified_upper >= PEAK_SCALE_TRIGGER:
+        raise ValueError("Candidate-E base requires Praat peak scaling")
+    return {
+        "base_peak_check_mode": mode,
+        "base_local_sinc70_peak_upper_bound": local_upper,
+        "base_exact_sinc70_peak": exact_peak,
+        "base_peak_numerical_epsilon": numerical_epsilon,
+        "base_peak_upper_bound": certified_upper,
+        "base_highpass_peak_scaled": False,
+        "base_peak_scale_abstention_pass": True,
+    }
 
 
 def pcm16_ste(values: torch.Tensor) -> torch.Tensor:

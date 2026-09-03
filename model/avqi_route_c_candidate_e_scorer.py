@@ -26,6 +26,7 @@ from model.avqi_route_c import (
 from model.avqi_route_c_candidate_e import (
     CANDIDATE_E_TOPOLOGY_IMPLEMENTATION,
     candidate_e_proxy,
+    validate_candidate_e_base_peak_certificate,
 )
 from model.avqi_route_c_v19_contracts import (
     validate_v19_exact_topology,
@@ -149,10 +150,7 @@ class RouteCCandidateESixScorer(RouteCSixActiveScorer):
             source_indices,
             validated.metric_constant_prefix_samples,
         )
-        if candidate_result.peak_scale_abstention_pass is not True:
-            raise ValueError(
-                "Candidate-E proxy is outside the promoted peak-scale domain"
-            )
+        validate_candidate_e_base_peak_certificate(topology, candidate_result)
         raw_shimmer_db = candidate_result.shimmer_db.to(
             dtype=base_prediction.dtype
         )

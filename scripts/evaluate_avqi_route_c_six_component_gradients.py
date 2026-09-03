@@ -43,6 +43,7 @@ from model.avqi_route_c_candidate_e import (
     build_cycle_gain_plan,
     candidate_e_proxy,
     project_cycle_gain_gradient_fixed_order,
+    validate_candidate_e_base_peak_certificate,
 )
 from model.avqi_route_c_candidate_e_scorer import (
     ROUTE_C_CANDIDATE_E_REGISTRY_SCHEMA_VERSION,
@@ -633,11 +634,10 @@ def extract_case_measurement(
                     ]
                 ),
             )
-            if proxy.peak_scale_abstention_pass is not True:
-                raise ValueError(
-                    "Candidate-E base proxy is outside the peak-scale domain: "
-                    f"{topology_input.case_id}"
-                )
+            peak_certificate = validate_candidate_e_base_peak_certificate(
+                topology_input.topology,
+                proxy,
+            )
             proxy_value = float(proxy.shimmer_db.detach().cpu())
             prediction_value = float(
                 denormalized_prediction[
@@ -665,8 +665,17 @@ def extract_case_measurement(
                 **projection,
                 "candidate_e_proxy_shimmer_db": proxy_value,
                 "candidate_e_sinc70_peak_upper_bound": (
-                    proxy.sinc70_peak_upper_bound
+                    peak_certificate["base_peak_upper_bound"]
                 ),
+                "candidate_e_local_sinc70_peak_upper_bound": (
+                    peak_certificate["base_local_sinc70_peak_upper_bound"]
+                ),
+                "candidate_e_exact_sinc70_peak": peak_certificate[
+                    "base_exact_sinc70_peak"
+                ],
+                "candidate_e_peak_check_mode": peak_certificate[
+                    "base_peak_check_mode"
+                ],
                 "candidate_e_peak_scale_abstention_pass": True,
             }
         norm = float(torch.linalg.vector_norm(gradient))

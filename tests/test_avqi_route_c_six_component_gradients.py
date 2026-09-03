@@ -18,6 +18,7 @@ from model.avqi_route_c import ROUTE_C_SIX_ACTIVE_COMPONENTS
 from model.avqi_route_c_candidate_e import (
     CANDIDATE_E_SOURCE_COMMIT,
     CANDIDATE_E_TOPOLOGY_IMPLEMENTATION,
+    SINC70_ABSOLUTE_WEIGHT_BOUND,
     build_cycle_gain_plan,
     candidate_e_proxy,
 )
@@ -111,6 +112,25 @@ def _synthetic_topology(
         "pulse_positions_sha256": hashlib.sha256(
             struct.pack(f"<{len(pulses)}d", *pulses)
         ).hexdigest(),
+    }
+    proxy = candidate_e_proxy(
+        waveform.to(dtype=torch.float64),
+        torch.as_tensor(pulses, dtype=torch.float64),
+        torch.arange(waveform.numel()),
+        0,
+    )
+    assert proxy.sinc70_peak_upper_bound < 0.999
+    topology["timing_ms"] = {
+        "highpass_mode": ROUTE_C_V19_BASE_TOPOLOGY_HIGHPASS_MODE,
+        "highpass_sample_abs_max": proxy.metric_sample_abs_max,
+        "highpass_sinc70_peak_upper_bound": proxy.sinc70_peak_upper_bound,
+        "highpass_sinc70_absolute_weight_bound": (
+            SINC70_ABSOLUTE_WEIGHT_BOUND
+        ),
+        "highpass_peak_check_mode": "proven_safe_sinc70_l1_upper_bound",
+        "highpass_sinc70_skipped": True,
+        "highpass_peak_value": None,
+        "highpass_peak_scaled": False,
     }
     scalar_payload = {
         field: int(topology[field]) for field in ROUTE_C_V19_TOPOLOGY_SCALAR_FIELDS

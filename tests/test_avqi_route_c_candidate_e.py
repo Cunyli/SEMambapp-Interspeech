@@ -6,12 +6,15 @@ import numpy as np
 import torch
 
 from model.avqi_route_c_candidate_e import (
+    CANDIDATE_E_NUMPY_HIGHPASS_MODE,
     CANDIDATE_E_REFERENCE_SHA256,
+    SINC70_ABSOLUTE_WEIGHT_BOUND,
     build_cycle_gain_plan,
     candidate_e_proxy,
     pcm16_ste,
     praat_pcm16_ste,
     project_cycle_gain_gradient_fixed_order,
+    validate_candidate_e_base_peak_certificate,
 )
 
 
@@ -103,3 +106,45 @@ def test_candidate_e_proxy_and_fixed_order_projection_are_deterministic() -> Non
     assert torch.equal(first, second)
     assert float(torch.linalg.vector_norm(first)) > 0.0
     assert np.isfinite(first.numpy()).all()
+
+
+def test_candidate_e_peak_certificate_uses_exact_fallback_for_loose_bound() -> None:
+    waveform = _waveform() * 3.8
+    pulses = waveform.new_tensor(_topology(waveform)["pulse_positions_samples"])
+    proxy = candidate_e_proxy(
+        waveform,
+        pulses,
+        torch.arange(waveform.numel()),
+        0,
+    )
+    assert proxy.sinc70_peak_upper_bound > 0.999
+    exact_peak = min(0.95, proxy.metric_sample_abs_max * 1.01)
+    topology = {
+        "metric_highpass": CANDIDATE_E_NUMPY_HIGHPASS_MODE,
+        "timing_ms": {
+            "highpass_mode": CANDIDATE_E_NUMPY_HIGHPASS_MODE,
+            "highpass_sample_abs_max": proxy.metric_sample_abs_max,
+            "highpass_sinc70_peak_upper_bound": (
+                proxy.metric_sample_abs_max * SINC70_ABSOLUTE_WEIGHT_BOUND
+            ),
+            "highpass_sinc70_absolute_weight_bound": (
+                SINC70_ABSOLUTE_WEIGHT_BOUND
+            ),
+            "highpass_peak_check_mode": "exact_praat_sinc70",
+            "highpass_sinc70_skipped": False,
+            "highpass_peak_value": exact_peak,
+            "highpass_peak_scaled": False,
+        },
+    }
+    certificate = validate_candidate_e_base_peak_certificate(topology, proxy)
+    assert certificate["base_exact_sinc70_peak"] == exact_peak
+    assert certificate["base_peak_upper_bound"] < 0.999
+    assert certificate["base_peak_scale_abstention_pass"] is True
+
+    topology["timing_ms"]["highpass_peak_value"] = 1.0
+    topology["timing_ms"]["highpass_peak_scaled"] = True
+    with np.testing.assert_raises_regex(
+        ValueError,
+        "requires Praat peak scaling",
+    ):
+        validate_candidate_e_base_peak_certificate(topology, proxy)

@@ -41,6 +41,7 @@ from model.avqi_route_c_candidate_e import (
     build_cycle_gain_plan,
     candidate_e_proxy,
     project_cycle_gain_gradient_fixed_order,
+    validate_candidate_e_base_peak_certificate,
 )
 from model.avqi_route_c_candidate_e_scorer import (
     load_route_c_candidate_e_six_scorer,
@@ -1058,11 +1059,10 @@ def main() -> None:
             torch.from_numpy(plan["source_indices"]),
             int(topology["metric_constant_prefix_samples"]),
         )
-        if proxy.peak_scale_abstention_pass is not True:
-            raise ValueError(
-                f"Candidate-E base proxy is outside the peak-scale domain: "
-                f"{case_id}"
-            )
+        peak_certificate = validate_candidate_e_base_peak_certificate(
+            topology,
+            proxy,
+        )
         proxy_value = float(proxy.shimmer_db.detach().cpu())
         scorer_value = float(
             scorer.denormalized_prediction(prediction)[0, 3].detach().cpu()
@@ -1106,8 +1106,19 @@ def main() -> None:
                     **case_projection,
                     "candidate_e_proxy_shimmer_db": proxy_value,
                     "candidate_e_sinc70_peak_upper_bound": (
-                        proxy.sinc70_peak_upper_bound
+                        peak_certificate["base_peak_upper_bound"]
                     ),
+                    "candidate_e_local_sinc70_peak_upper_bound": (
+                        peak_certificate[
+                            "base_local_sinc70_peak_upper_bound"
+                        ]
+                    ),
+                    "candidate_e_exact_sinc70_peak": peak_certificate[
+                        "base_exact_sinc70_peak"
+                    ],
+                    "candidate_e_peak_check_mode": peak_certificate[
+                        "base_peak_check_mode"
+                    ],
                     "candidate_e_peak_scale_abstention_pass": True,
                 }
             if not bool(torch.isfinite(gradient).all()) or float(
