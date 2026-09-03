@@ -1,0 +1,100 @@
+{
+  "schema_version": "avqi-route-c-six-gradient-fusion-contract-v1",
+  "decision": "FROZEN_BEFORE_NEW_FUSION_PANEL_OPEN",
+  "route": "C",
+  "component_order": [
+    "cpps",
+    "hnr",
+    "shimmer_percent",
+    "shimmer_db",
+    "slope",
+    "tilt"
+  ],
+  "loss_target": "normalized bidirectional gap to same-speaker clean pathological CS/SV target",
+  "base_weight_rule": "minimum calibration median gradient norm / component median gradient norm",
+  "fusion_rule": {
+    "schema_version": "avqi-route-c-six-gradient-dominance-capped-fusion-v1",
+    "maximum_weighted_component_norm_share": 0.8,
+    "threshold_source": "unchanged frozen five-component numeric precedent",
+    "cap_scope": "per_case_before_joint_sum",
+    "cap_policy": "attenuate_only_the_unique_dominant_weighted_gradient_to_the_existing_maximum_norm_share",
+    "component_amplification_allowed": false,
+    "joint_normalization": "divide_by_sum_of_calibration_frozen_base_component_weights",
+    "pairwise_negative_cosines": "diagnostic_only",
+    "direction_conflict_policy": "fail_closed_abstain_if_any_component_to_post_cap_joint_cosine_is_negative",
+    "speaker_or_case_identity_used_for_fusion": false,
+    "exact_candidate_outcome_used_for_fusion": false,
+    "learned_fusion_parameters": 0
+  },
+  "opened_failure_use": {
+    "allowed": [
+      "identify the general dominance failure class",
+      "exclude all previously opened gradient-audit speakers"
+    ],
+    "forbidden": [
+      "choose component-specific multipliers",
+      "choose or relax the 0.80 threshold",
+      "route by speaker or case identity",
+      "reuse the opened holdout as promotion evidence"
+    ]
+  },
+  "opened_evidence": {
+    "decision": "NO_GO_ROUTE_C_SIX_ACTIVE_CODE_GRADIENT_AUDIT",
+    "decision_report_sha256": "59b0e19a389f2008384b4eb67c37c43a5066e964f38c1a8815d14cd64d3581b7",
+    "decision_receipt_sha256": "bee54284f399eb2746c654739f55f9c59ec91f842914a81903fdd7891f3bab54",
+    "raw_report_sha256": "ece23eadd03c268b7da223fa7a9e50aac8361d52e0fbf5f1bcdd1aa701266874",
+    "raw_receipt_sha256": "239bfbc98274faa16733468da14bf87f5e4370bc6106a74cf792845d18dd752e",
+    "excluded_speakers_by_split": {
+      "surrogate_calibration": [
+        "PD_92",
+        "SD20",
+        "SD21",
+        "ÄHH31"
+      ],
+      "surrogate_holdout": [
+        "FD01",
+        "PD_69",
+        "PD_94",
+        "ÄHH36"
+      ]
+    },
+    "role": "diagnostic_and_exclusion_only"
+  },
+  "new_panel": {
+    "source_label_bank_sha256": "03b8d5e3d0542dbfe60e54723bc89431e8dfd475dcc38284a6058465c5224760",
+    "selection_salt": "route-c-six-gradient-fusion-v1-predeclared-20260903",
+    "cases_by_split": {
+      "surrogate_calibration": 4,
+      "surrogate_holdout": 4
+    },
+    "strata_per_split": [
+      "pathological_mild/cs",
+      "pathological_mild/sv",
+      "pathological_severe/cs",
+      "pathological_severe/sv"
+    ],
+    "speaker_overlap": 0,
+    "exclude_all_opened_speakers": true,
+    "seal_before_gradient_measurement": true,
+    "same_speaker_clean_pathological_targets": true
+  },
+  "promotion_gates": {
+    "all_component_gradients_finite_nonzero_bounded": true,
+    "all_post_cap_joint_gradients_finite_nonzero_bounded": true,
+    "all_post_cap_weighted_component_shares_le_0_80": true,
+    "all_post_cap_component_to_joint_cosines_nonnegative": true,
+    "no_component_amplified": true,
+    "only_unique_dominant_component_may_be_attenuated": true,
+    "new_calibration_and_holdout_speaker_disjoint": true,
+    "all_opened_speakers_excluded": true
+  },
+  "boundaries": {
+    "fresh_or_final_joint_panel_opened": false,
+    "candidate_exact_outcomes_opened": false,
+    "waveform_generation_performed": false,
+    "joint_panel_authorized": false,
+    "formal_generator_training_submitted": false,
+    "generator_optimizer_steps": 0,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  }
+}
