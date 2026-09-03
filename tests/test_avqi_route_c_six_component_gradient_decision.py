@@ -161,7 +161,7 @@ def _five_evidence() -> tuple[dict[str, object], dict[str, object]]:
             "loss_target": decision.LOSS_TARGET,
             "avqi_scalar_coefficient_used_for_direction": False,
             "calibration_only_weight_selection": True,
-            "weight_rule": decision.WEIGHT_RULE,
+            "weight_rule": decision.FIVE_WEIGHT_RULE,
         },
         "selection": selection,
         "case_results": _case_rows(raw=False),

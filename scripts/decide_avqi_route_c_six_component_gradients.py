@@ -84,6 +84,7 @@ LOSS_TARGET = (
 WEIGHT_RULE = (
     "minimum calibration median gradient norm / component median gradient norm"
 )
+FIVE_WEIGHT_RULE = "minimum calibration median norm / component median norm"
 TOPOLOGY_IMPLEMENTATION = (
     "candidate_e_exact_path_fixed_order_cycle_gain_projection"
 )
@@ -381,7 +382,7 @@ def validate_five_gradient_precedent(
         contract.get("loss_target") != LOSS_TARGET
         or contract.get("avqi_scalar_coefficient_used_for_direction") is not False
         or contract.get("calibration_only_weight_selection") is not True
-        or contract.get("weight_rule") != WEIGHT_RULE
+        or contract.get("weight_rule") != FIVE_WEIGHT_RULE
     ):
         raise ValueError("accepted five-gradient target/weight contract differs")
     selection = _mapping(report.get("selection"), "accepted five-gradient selection")
