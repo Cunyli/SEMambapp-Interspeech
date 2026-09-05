@@ -1,0 +1,105 @@
+{
+  "schema_version": "avqi-route-c-svd-history-capacity-contract-v3",
+  "decision": "FROZEN_DIAGNOSTIC_AUDIT_OF_INCOMPLETE_SVD_HISTORY_BEFORE_ANY_SUCCESSOR_SELECTION_V3",
+  "route": "C",
+  "scope": "six-component gradient-fusion external SVD source-panel history and unused-speaker capacity only",
+  "input_sha256": {
+    "candidate_e_exact_csv": "2e2a6c6486aba121c06e375f2947d41a48e2874e8daebf8002ce6b1d24cbecd6",
+    "candidate_e_exact_receipt": "d256073901fd708cfbad10687c8e281007f98a64b46e902bd8eeb528e06cc84f",
+    "candidate_e_exact_report": "4a5b49dbdf3a1324d6b0f1e084d5153469f7c178afae0ded9cefd9060206e632",
+    "candidate_e_prior_ledger": "f5831ecd455f21bed626ebd4302881626553db2c378d45330faa75137179e4ee",
+    "cs_metadata": "465c15e46c9c9e325c14e5672abead050bbfd9a4bba75d0ace46bf5d58884966",
+    "invalid_v2_contract": "58d520e998adc7825f4ed0555734d49a40a3ede01ea202c65997a617c6a27690",
+    "invalid_v2_receipt": "ab5f0c33f0d1a9fd41bcd0779deed3a0aea7c0723a8fb67d2a0eb37ebfdf6b11",
+    "invalid_v2_source_seal": "3076c6c71791e7940296cdd966e5f673a72c509491411281d8c1565a6f8ad751",
+    "invalid_v2_updated_ledger": "aaa338f1703c5504c3aa0d981da3fc2b22cd3cc5adda178c86c6a34567c5c90c",
+    "ltas_fresh_alpha_selection": "1078fef455d65a86a98d8b0c8c2cb0787dba6165e4e2bec1cca40e88d1076d47",
+    "ltas_fresh_calibration_csv": "f8dcb479857a0c148945a88fb544ed212272302f6b5795d9c504924fa6646fd4",
+    "ltas_fresh_final_csv": "c4bc55d2074d93d7425a018d92aa00f38a402a1ea2b2394bc2b87ee5ca48ea2a",
+    "ltas_fresh_final_seal": "52a2afff063825e9c68228b5fafc0a9073853fd07deaeb7aee36aa09334b151c",
+    "ltas_fresh_panel_contract": "b826e6ae9c2aab06cae10d4a5c19d0353dbbeb545f336a9ce12451ec937968e6",
+    "ltas_fresh_receipt": "35b5f787df7b4b053a3d502878df5d92938438c1cf9bb6dc494b564b65e3b74e",
+    "ltas_fresh_report": "7301291f8f4ab3fe0454bce293b346865d81261ce6f4e86a31615dde153e26b0",
+    "sv_metadata": "36d8a725a209578744a862e63b5990d348e3d17d066a0247cdcd2e657c7ffc03",
+    "v10_diagnostic_report": "01e8ecfc9997ce3c02c8ad51034167a9a74f9f070ee0912c5ee85c73265519ee",
+    "v10_panel_seal": "02d27c3f05be3a3b1196e2178fa6fbb6a14dafefccd068094ded58e56f700e57",
+    "v10_predictions": "54c7b2ea3f2f806205bccf6c84f18c5af0ae88bbb77a59684d6a7f95b0a45823",
+    "v10_receipt": "68a7a8e0b1eb1adeb84d856050317f192615827bff1aebf6e24cf5bec94ac7e9",
+    "v10_status_audit": "57563c0fdd860af6709d80c5bd063a73e482e450a5f764579ed4837dedf93304",
+    "v9_diagnostic_report": "35a5ca7c48aee0eda23933973cc7eddcd151ef079e3a6a9f0f29118547326f75",
+    "v9_panel_seal": "b57e4aafab5c0ac2d7ed7ff2db12a16e86f705219df7ed0a33102e1deaa8e46c",
+    "v9_predictions": "a9a529b1fa3db3fd93ebafc56a1f6545f64962318aad7223716760e59e4b1778",
+    "v9_receipt": "d78a2ed785adda490b98638b2cdcc1dbb79b78543f068a232d7fafaba3ad0a81"
+  },
+  "historical_exact_opening_evidence": {
+    "candidate_e_external_v32r8": {
+      "expected_job_id": "20044559",
+      "expected_rows": 12,
+      "expected_speakers": 6
+    },
+    "ltas_fresh_panel_v1": {
+      "expected_job_id": "19906251",
+      "expected_calibration_speakers": 3,
+      "expected_final_speakers": 3
+    },
+    "ltas_svd_authority_v10": {
+      "expected_score_job_id": "19901428",
+      "expected_primary_speakers_attempted": 24,
+      "expected_reserve_speakers_attempted": 1,
+      "expected_variant_attempts": 200
+    },
+    "ltas_svd_authority_v9": {
+      "expected_score_job_id": "19901205",
+      "expected_speakers_attempted": 24,
+      "expected_variant_attempts": 192
+    }
+  },
+  "expected_audit_result": {
+    "candidate_e_prior_ledger_entries": 35,
+    "complete_historical_exact_opened_svd_speakers": 55,
+    "invalid_v2_selected_speakers": 8,
+    "invalid_v2_historical_overlap": 8,
+    "metadata_eligible_svd_speakers_before_complete_history_exclusion": 36,
+    "remaining_eligible_svd_speakers": [
+      "SVD:1301",
+      "SVD:1530",
+      "SVD:1819"
+    ],
+    "remaining_female_speakers": 3,
+    "remaining_male_speakers": 0
+  },
+  "source_panel_capacity_gate": {
+    "required_cases": 8,
+    "required_distinct_speakers": 8,
+    "required_splits": [
+      "surrogate_calibration",
+      "surrogate_holdout"
+    ],
+    "required_strata_per_split": [
+      "female/cs",
+      "female/sv",
+      "male/cs",
+      "male/sv"
+    ],
+    "one_case_per_speaker": true,
+    "minimum_raw_mono_duration_seconds": {
+      "cs": 3.0,
+      "sv": 1.0
+    },
+    "thresholds_may_not_be_weakened_after_capacity_failure": true,
+    "successor_selection_authorized_only_if_capacity_passes": true
+  },
+  "audit_boundaries": {
+    "historical_open_status_used_only_for_exclusion_and_audit": true,
+    "historical_exact_scalar_values_used_for_new_selection": false,
+    "new_target_scalar_values_opened": false,
+    "base_or_candidate_exact_outcomes_opened": false,
+    "new_waveforms_materialized": false,
+    "six_gradient_evaluation_submitted": false,
+    "joint_panel_submitted": false,
+    "formal_generator_training_submitted": false,
+    "generator_optimizer_steps": 0,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  },
+  "failure_decision": "NO_GO_ROUTE_C_SIX_GRADIENT_SVD_SOURCE_PANEL_INCOMPLETE_HISTORICAL_LEDGER_AND_INSUFFICIENT_UNUSED_SPEAKERS_V3"
+}
