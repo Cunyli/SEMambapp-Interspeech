@@ -149,6 +149,12 @@ class RouteCCandidateESixScorer(RouteCSixActiveScorer):
             pulses,
             source_indices,
             validated.metric_constant_prefix_samples,
+            peak_scale_required=bool(
+                topology.get("timing_ms", {}).get("highpass_peak_scaled")
+            ),
+            expected_highpass_pcm16_sha256=topology.get(
+                "highpass_pcm16_sha256"
+            ),
         )
         validate_candidate_e_base_peak_certificate(topology, candidate_result)
         raw_shimmer_db = candidate_result.shimmer_db.to(

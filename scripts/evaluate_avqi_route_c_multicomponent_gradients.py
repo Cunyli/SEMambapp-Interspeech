@@ -44,6 +44,12 @@ SELECTION_STRATA = (
     ("pathological_severe", "cs"),
     ("pathological_severe", "sv"),
 )
+SVD_FUSION_SELECTION_STRATA = (
+    ("female", "cs"),
+    ("female", "sv"),
+    ("male", "cs"),
+    ("male", "sv"),
+)
 INPUT_GRADIENT_NORM_MAX = 1e4
 NONZERO_GRADIENT_NORM_MIN = 1e-10
 MAX_WEIGHTED_COMPONENT_NORM_SHARE = 0.80
@@ -284,6 +290,145 @@ def load_label_bank(
         "speaker_overlap": 0,
         "strata": [f"{group}/{view}" for group, view in SELECTION_STRATA],
         "target_stat_rows": int(training_targets.shape[0]),
+    }
+    return cases, target_mean, target_scale, selection
+
+
+def load_svd_fusion_label_bank(
+    path: Path,
+    expected_sha256: str,
+    selection_salt: str,
+) -> tuple[list[AuditCase], torch.Tensor, torch.Tensor, dict[str, Any]]:
+    """Load a source-sealed SVD panel with exact targets and unscored bases."""
+    if sha256_file(path) != expected_sha256:
+        raise ValueError("SVD fusion label-bank hash mismatch")
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    task_rows = [row for row in rows if row.get("view") in {"cs", "sv"}]
+    if any("final" in row.get("split", "").lower() for row in task_rows):
+        raise ValueError("SVD fusion label bank exposes a final split")
+    exact_rows = [row for row in task_rows if row.get("scoring_status") == "ok"]
+    legacy_clean_rows = [
+        row for row in exact_rows if row.get("condition_id") == "clean"
+    ]
+    legacy_clean_by_key = {
+        clean_target_key(row): row for row in legacy_clean_rows
+    }
+    if len(legacy_clean_by_key) != len(legacy_clean_rows):
+        raise ValueError("duplicate same-speaker clean targets")
+    legacy_usable_rows = [
+        row for row in exact_rows if clean_target_key(row) in legacy_clean_by_key
+    ]
+    training_targets = [
+        component_tensor(row)
+        for row in legacy_usable_rows
+        if row.get("split") == "surrogate_train"
+    ]
+    if not training_targets:
+        raise ValueError("SVD fusion label bank has no frozen training statistics")
+    stacked_training = torch.stack(training_targets)
+    target_mean = stacked_training.mean(dim=0)
+    target_scale = stacked_training.std(dim=0, unbiased=False).clamp_min(1e-6)
+
+    external_rows = [
+        row
+        for row in task_rows
+        if row.get("schema_version") == "svd_six_gradient_fusion_v2"
+    ]
+    clean_rows = [
+        row
+        for row in external_rows
+        if row.get("condition_id") == "clean"
+        and row.get("scoring_status") == "ok"
+    ]
+    source_rows = [
+        row
+        for row in external_rows
+        if row.get("condition_id") == "aug16k_phone"
+        and row.get("scoring_status") == "source_unscored_result_blind"
+        and row.get("label") == "patient"
+        and row.get("source") == "SVD"
+    ]
+    clean_by_key = {clean_target_key(row): row for row in clean_rows}
+    if len(clean_by_key) != len(clean_rows):
+        raise ValueError("duplicate SVD same-speaker clean target")
+    if len(source_rows) != 8 or len(clean_rows) != 8:
+        raise ValueError("SVD fusion label-bank coverage differs")
+    exact_metric_columns = ("avqi", "jitter_local", *AVQI_COMPONENT_NAMES)
+    if any(
+        str(row.get(column, "")).strip()
+        for row in source_rows
+        for column in exact_metric_columns
+    ):
+        raise ValueError("SVD fusion source row exposes an exact outcome")
+
+    cases: list[AuditCase] = []
+    speaker_sets = {split: set() for split in AUDIT_SPLITS}
+    strata = {split: set() for split in AUDIT_SPLITS}
+    seen_selectors: set[tuple[str, str, str, str]] = set()
+    for row in source_rows:
+        split = row.get("split")
+        sex = row.get("sample_group")
+        view = row.get("view")
+        key = clean_target_key(row)
+        clean_row = clean_by_key.get(key)
+        if (
+            split not in AUDIT_SPLITS
+            or (sex, view) not in SVD_FUSION_SELECTION_STRATA
+            or clean_row is None
+            or key in seen_selectors
+        ):
+            raise ValueError("SVD fusion source/target binding differs")
+        seen_selectors.add(key)
+        speaker_id = row["speaker_id"]
+        if speaker_id in speaker_sets[split]:
+            raise ValueError("SVD fusion split reuses a speaker")
+        speaker_sets[split].add(speaker_id)
+        strata[split].add(f"{sex}/{view}")
+        cases.append(
+            AuditCase(
+                split=split,
+                speaker_id=speaker_id,
+                sample_id=row_sample_id(row),
+                sample_group=sex,
+                view=view,
+                condition=row["condition_id"],
+                waveform_path=Path(row[f"{view}_path"]),
+                waveform_sha256=row[f"{view}_sha256"],
+                clean_target=component_tensor(clean_row),
+            )
+        )
+    expected_strata = {
+        f"{sex}/{view}" for sex, view in SVD_FUSION_SELECTION_STRATA
+    }
+    if any(strata[split] != expected_strata for split in AUDIT_SPLITS):
+        raise ValueError("SVD fusion selection strata differ")
+    overlap = speaker_sets[AUDIT_SPLITS[0]] & speaker_sets[AUDIT_SPLITS[1]]
+    if overlap:
+        raise ValueError(f"SVD fusion split speaker overlap: {sorted(overlap)}")
+    cases.sort(
+        key=lambda case: (
+            AUDIT_SPLITS.index(case.split),
+            SVD_FUSION_SELECTION_STRATA.index((case.sample_group, case.view)),
+        )
+    )
+    selection = {
+        "selection_mode": "sealed_external_svd_v2",
+        "selection_salt": selection_salt,
+        "allowed_splits": list(AUDIT_SPLITS),
+        "final_panel_opened": False,
+        "cases": len(cases),
+        "cases_by_split": {
+            split: sum(case.split == split for case in cases)
+            for split in AUDIT_SPLITS
+        },
+        "speakers_by_split": {
+            split: sorted(speaker_sets[split]) for split in AUDIT_SPLITS
+        },
+        "speaker_overlap": 0,
+        "strata": sorted(expected_strata),
+        "target_stat_rows": int(stacked_training.shape[0]),
+        "base_or_candidate_exact_outcomes_opened": False,
     }
     return cases, target_mean, target_scale, selection
 

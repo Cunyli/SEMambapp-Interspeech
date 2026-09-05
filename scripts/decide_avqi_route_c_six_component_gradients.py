@@ -328,7 +328,11 @@ def _case_selector(row: Mapping[str, Any], *, raw: bool) -> tuple[str, ...]:
 
 
 def _selection_case_contract(
-    rows: list[Mapping[str, Any]], label: str, *, raw: bool
+    rows: list[Mapping[str, Any]],
+    label: str,
+    *,
+    raw: bool,
+    expected_strata: tuple[str, ...] = SELECTION_STRATA,
 ) -> set[tuple[str, ...]]:
     if len(rows) != EXPECTED_CASES:
         raise ValueError(f"{label} does not contain exactly eight cases")
@@ -341,7 +345,7 @@ def _selection_case_contract(
             f"{row['sample_group']}/{row['view']}" for row in split_rows
         }
         if len(split_rows) != EXPECTED_CASES_PER_SPLIT or strata != set(
-            SELECTION_STRATA
+            expected_strata
         ):
             raise ValueError(f"{label} {split} strata differ")
     return selectors
@@ -524,6 +528,7 @@ def _validate_raw_envelope(
     report_sha256: str,
     precedent: Mapping[str, Any],
     execution_source: Mapping[str, Any],
+    expected_strata: tuple[str, ...] = SELECTION_STRATA,
 ) -> tuple[list[Mapping[str, Any]], dict[str, str]]:
     if not _is_sha256(report_sha256):
         raise ValueError("raw six-gradient report SHA-256 is invalid")
@@ -596,7 +601,7 @@ def _validate_raw_envelope(
             split: EXPECTED_CASES_PER_SPLIT for split in AUDIT_SPLITS
         },
         "speaker_overlap": 0,
-        "strata": list(SELECTION_STRATA),
+        "strata": list(expected_strata),
         "final_panel_opened": False,
         "component_and_joint_share_split": True,
         "topology_manifest_uses_same_selection": True,
@@ -612,7 +617,12 @@ def _validate_raw_envelope(
     rows = report.get("case_results")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("raw six-gradient cases differ")
-    raw_selectors = _selection_case_contract(rows, "raw six-gradient", raw=True)
+    raw_selectors = _selection_case_contract(
+        rows,
+        "raw six-gradient",
+        raw=True,
+        expected_strata=expected_strata,
+    )
     if raw_selectors != precedent["case_selectors"]:
         raise ValueError("raw six-gradient case selection differs from precedent")
     coverage = _mapping(report.get("coverage"), "raw six-gradient coverage")
@@ -710,22 +720,29 @@ def _validate_raw_envelope(
             shimmer_db.get("candidate_e_projection"),
             "raw Candidate-E projection",
         )
+        peak_abstained = projection.get(
+            "candidate_e_peak_scale_abstention_pass"
+        )
+        peak_supported = projection.get(
+            "candidate_e_peak_scale_support_pass",
+            peak_abstained,
+        )
+        peak_handled = projection.get(
+            "candidate_e_peak_handling_pass",
+            peak_abstained,
+        )
+        peak_upper = projection.get("candidate_e_sinc70_peak_upper_bound")
         if (
             projection.get("projected_gradient_valid") is not True
             or projection.get("projection_reduction")
             != "numpy_float64_fixed_cycle_order"
             or int(projection.get("complete_cycle_count", 0)) < 16
-            or projection.get("candidate_e_peak_scale_abstention_pass")
-            is not True
-            or not isinstance(
-                projection.get("candidate_e_sinc70_peak_upper_bound"),
-                (int, float),
-            )
-            or not math.isfinite(
-                float(projection["candidate_e_sinc70_peak_upper_bound"])
-            )
-            or float(projection["candidate_e_sinc70_peak_upper_bound"])
-            >= 0.999
+            or peak_supported is not True
+            or peak_handled is not True
+            or not isinstance(peak_abstained, bool)
+            or not isinstance(peak_upper, (int, float))
+            or not math.isfinite(float(peak_upper))
+            or (peak_abstained and float(peak_upper) >= 0.999)
         ):
             raise ValueError("raw Candidate-E projection contract differs")
     _require_raw_pending_boundaries(report, receipt)

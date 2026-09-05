@@ -82,6 +82,7 @@ from scripts.evaluate_avqi_route_c_multicomponent_gradients import (
     cosine,
     load_fixed_segment,
     load_label_bank,
+    load_svd_fusion_label_bank,
     verify_source,
     write_json,
 )
@@ -227,6 +228,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--topology-receipt", type=Path, required=True)
     parser.add_argument("--topology-receipt-sha256", required=True)
     parser.add_argument("--selection-salt", required=True)
+    parser.add_argument(
+        "--selection-mode",
+        choices=("legacy_tau", "sealed_external_svd_v2"),
+        default="legacy_tau",
+    )
     parser.add_argument("--test-evidence", type=Path, required=True)
     parser.add_argument("--test-evidence-sha256", required=True)
     parser.add_argument("--source-root", type=Path, required=True)
@@ -633,6 +639,14 @@ def extract_case_measurement(
                         "metric_constant_prefix_samples"
                     ]
                 ),
+                peak_scale_required=bool(
+                    topology_input.topology.get("timing_ms", {}).get(
+                        "highpass_peak_scaled"
+                    )
+                ),
+                expected_highpass_pcm16_sha256=topology_input.topology.get(
+                    "highpass_pcm16_sha256"
+                ),
             )
             peak_certificate = validate_candidate_e_base_peak_certificate(
                 topology_input.topology,
@@ -676,7 +690,18 @@ def extract_case_measurement(
                 "candidate_e_peak_check_mode": peak_certificate[
                     "base_peak_check_mode"
                 ],
-                "candidate_e_peak_scale_abstention_pass": True,
+                "candidate_e_peak_scale_abstention_pass": peak_certificate[
+                    "base_peak_scale_abstention_pass"
+                ],
+                "candidate_e_peak_scale_support_pass": peak_certificate[
+                    "base_peak_scale_support_pass"
+                ],
+                "candidate_e_peak_handling_pass": peak_certificate[
+                    "base_peak_handling_pass"
+                ],
+                "candidate_e_exact_highpass_pcm16_sha256": (
+                    proxy.exact_highpass_pcm16_sha256
+                ),
             }
         norm = float(torch.linalg.vector_norm(gradient))
         finite = bool(torch.isfinite(gradient).all()) and math.isfinite(norm)
@@ -723,6 +748,12 @@ def extract_case_measurement(
             "role": "base_current_output",
             "worker_role": topology_input.topology["role"],
             "topology_sha256": topology_input.topology_sha256,
+            "highpass_pcm16_sha256": topology_input.topology.get(
+                "highpass_pcm16_sha256"
+            ),
+            "highpass_peak_scaled": topology_input.topology.get(
+                "timing_ms", {}
+            ).get("highpass_peak_scaled"),
             "pulse_count": topology_input.topology.get("pulse_count"),
             "metric_source_range_count": topology_input.topology.get(
                 "metric_source_range_count"
@@ -988,10 +1019,13 @@ def main() -> None:
     if sum(parameter.numel() for parameter in scorer.parameters()) != 0:
         raise ValueError("six-component scorer unexpectedly has parameters")
     separation = slot_separation_metadata(bundle.source_metadata)
-    cases, label_mean, label_scale, selection = load_label_bank(
-        args.label_bank,
-        args.label_bank_sha256,
-        args.selection_salt,
+    label_loader = (
+        load_svd_fusion_label_bank
+        if args.selection_mode == "sealed_external_svd_v2"
+        else load_label_bank
+    )
+    cases, label_mean, label_scale, selection = label_loader(
+        args.label_bank, args.label_bank_sha256, args.selection_salt
     )
     if not torch.equal(scorer.target_mean.detach().cpu(), label_mean):
         raise ValueError("six-component target means differ from label bank")

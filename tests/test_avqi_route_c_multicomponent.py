@@ -32,9 +32,11 @@ from model.avqi_route_c import (
 )
 from scripts.evaluate_avqi_route_c_multicomponent_gradients import (
     MAX_WEIGHTED_COMPONENT_NORM_SHARE,
+    SVD_FUSION_SELECTION_STRATA,
     finalize_case,
     frozen_inverse_gradient_weights,
     load_label_bank,
+    load_svd_fusion_label_bank,
 )
 
 
@@ -397,6 +399,157 @@ def test_dev_selection_is_balanced_and_rejects_final_rows(tmp_path: Path) -> Non
     forbidden_digest = _write_label_bank(forbidden_bank, include_final=True)
     with pytest.raises(ValueError, match="forbidden final splits"):
         load_label_bank(forbidden_bank, forbidden_digest, "test-salt")
+
+
+def _write_svd_fusion_label_bank(path: Path) -> str:
+    fields = [
+        "schema_version",
+        "speaker_id",
+        "pair_id",
+        "sample_id",
+        "split",
+        "condition_id",
+        "view",
+        "scoring_status",
+        "label",
+        "sample_group",
+        "source",
+        "sex",
+        "cs_path",
+        "cs_sha256",
+        "sv_path",
+        "sv_sha256",
+        "avqi",
+        "jitter_local",
+        *AVQI_COMPONENT_NAMES,
+    ]
+    rows: list[dict[str, object]] = []
+    legacy_strata = (
+        ("pathological_mild", "cs"),
+        ("pathological_mild", "sv"),
+        ("pathological_severe", "cs"),
+        ("pathological_severe", "sv"),
+    )
+    for split in (
+        "surrogate_train",
+        "surrogate_calibration",
+        "surrogate_holdout",
+    ):
+        for index, (group, view) in enumerate(legacy_strata):
+            speaker = f"legacy-{split}-{index}"
+            common: dict[str, object] = {
+                "schema_version": "legacy",
+                "speaker_id": speaker,
+                "pair_id": "sample",
+                "sample_id": "sample",
+                "split": split,
+                "view": view,
+                "scoring_status": "ok",
+                "label": "patient",
+                "sample_group": group,
+                "source": "TAU",
+                "sex": "",
+                "cs_path": "/tmp/cs.wav",
+                "cs_sha256": "a" * 64,
+                "sv_path": "/tmp/sv.wav",
+                "sv_sha256": "b" * 64,
+                "avqi": 1.0,
+                "jitter_local": 1.0,
+            }
+            clean = {**common, "condition_id": "clean"}
+            augmented = {**common, "condition_id": "aug16k_phone"}
+            for component_index, component in enumerate(AVQI_COMPONENT_NAMES):
+                clean[component] = float(index + component_index)
+                augmented[component] = float(index + component_index) + 0.5
+            rows.extend((clean, augmented))
+    for split_index, split in enumerate(
+        ("surrogate_calibration", "surrogate_holdout")
+    ):
+        for stratum_index, (sex, view) in enumerate(
+            SVD_FUSION_SELECTION_STRATA
+        ):
+            speaker = f"SVD:{split_index}{stratum_index}"
+            sample = f"sample-{split_index}-{stratum_index}"
+            common = {
+                "schema_version": "svd_six_gradient_fusion_v2",
+                "speaker_id": speaker,
+                "pair_id": sample,
+                "sample_id": sample,
+                "split": split,
+                "view": view,
+                "label": "patient",
+                "sample_group": sex,
+                "source": "SVD",
+                "sex": sex,
+                "cs_path": "/tmp/svd-cs.wav",
+                "cs_sha256": "c" * 64,
+                "sv_path": "/tmp/svd-sv.wav",
+                "sv_sha256": "d" * 64,
+            }
+            clean = {
+                **common,
+                "condition_id": "clean",
+                "scoring_status": "ok",
+                "avqi": 2.0,
+                "jitter_local": 0.2,
+            }
+            for component_index, component in enumerate(AVQI_COMPONENT_NAMES):
+                clean[component] = float(component_index + 1)
+            source = {
+                **common,
+                "condition_id": "aug16k_phone",
+                "scoring_status": "source_unscored_result_blind",
+                "avqi": "",
+                "jitter_local": "",
+                **{component: "" for component in AVQI_COMPONENT_NAMES},
+            }
+            rows.extend((clean, source))
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return sha256_file(path)
+
+
+def test_svd_fusion_loader_reuses_legacy_normalization_and_is_result_blind(
+    tmp_path: Path,
+) -> None:
+    label_bank = tmp_path / "svd_fusion_labels.csv"
+    digest = _write_svd_fusion_label_bank(label_bank)
+    _, legacy_mean, legacy_scale, _ = load_label_bank(
+        label_bank, digest, "legacy-salt"
+    )
+    cases, svd_mean, svd_scale, selection = load_svd_fusion_label_bank(
+        label_bank, digest, "svd-salt"
+    )
+
+    assert torch.equal(svd_mean, legacy_mean)
+    assert torch.equal(svd_scale, legacy_scale)
+    assert len(cases) == 8
+    assert selection["strata"] == [
+        "female/cs",
+        "female/sv",
+        "male/cs",
+        "male/sv",
+    ]
+    assert selection["speaker_overlap"] == 0
+    assert selection["base_or_candidate_exact_outcomes_opened"] is False
+
+    rows = list(csv.DictReader(label_bank.open(newline="", encoding="utf-8")))
+    source_row = next(
+        row
+        for row in rows
+        if row["scoring_status"] == "source_unscored_result_blind"
+    )
+    source_row["cpps"] = "99.0"
+    with label_bank.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    with pytest.raises(ValueError, match="exposes an exact outcome"):
+        load_svd_fusion_label_bank(
+            label_bank, sha256_file(label_bank), "svd-salt"
+        )
 
 
 def test_multicomponent_slurm_wrapper_preserves_training_boundary() -> None:

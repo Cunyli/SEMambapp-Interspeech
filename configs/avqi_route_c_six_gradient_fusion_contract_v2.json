@@ -1,0 +1,158 @@
+{
+  "schema_version": "avqi-route-c-six-gradient-fusion-contract-v2",
+  "decision": "FROZEN_BEFORE_EXTERNAL_SVD_SOURCE_PANEL_SELECTION",
+  "route": "C",
+  "component_order": [
+    "cpps",
+    "hnr",
+    "shimmer_percent",
+    "shimmer_db",
+    "slope",
+    "tilt"
+  ],
+  "loss_target": "normalized bidirectional gap to same-speaker clean pathological CS/SV target",
+  "base_weight_rule": "minimum calibration median gradient norm / component median gradient norm",
+  "fusion_rule": {
+    "schema_version": "avqi-route-c-six-gradient-dominance-capped-fusion-v1",
+    "maximum_weighted_component_norm_share": 0.8,
+    "threshold_source": "unchanged frozen five-component numeric precedent",
+    "cap_scope": "per_case_before_joint_sum",
+    "cap_policy": "attenuate_only_the_unique_dominant_weighted_gradient_to_the_existing_maximum_norm_share",
+    "component_amplification_allowed": false,
+    "joint_normalization": "divide_by_sum_of_calibration_frozen_base_component_weights",
+    "pairwise_negative_cosines": "diagnostic_only",
+    "direction_conflict_policy": "fail_closed_abstain_if_any_component_to_post_cap_joint_cosine_is_negative",
+    "speaker_or_case_identity_used_for_fusion": false,
+    "exact_candidate_outcome_used_for_fusion": false,
+    "learned_fusion_parameters": 0
+  },
+  "predecessor_evidence": {
+    "v1_contract_sha256": "ebbd4438a3ce406c8b41c53e0bf1c3f2d7f9a7aae93ddae18b088a26f76020c5",
+    "v1_panel_seal_sha256": "2d01b740361b31a1b08293e373bb381e2e7147889195590943348a5696c0e690",
+    "v1_panel_receipt_sha256": "dd4083ebd29e1e231bbe86ec096ea98b5e7657b1dd80bbc54c25f0f69b73c17c",
+    "v1_topology_manifest_sha256": "a85bd02871aca2365180b297f699ce953efba6adbdc73741da22b6f07f74b5cb",
+    "v1_topology_receipt_sha256": "6fc3e39da3a0ac316fbefd169bbc7b965e73176010afb28134a83a83a943cb88",
+    "failed_raw_job_id": "20060716",
+    "failed_raw_job_state": "FAILED",
+    "failed_raw_job_exit_code": "1:0",
+    "failure_audit_report_sha256": "fab0f4a6e47c4f6ca89e212271ce4cba875ff1e3b2b488ed94322440eb122091",
+    "failure_audit_receipt_sha256": "2d35783e9d92049108fc4527015e41c5dacd14fd9c6875c059879ef814b5c443",
+    "role": "diagnostic_and_exclusion_only"
+  },
+  "scaled_base_support": {
+    "peak_trigger": 0.999,
+    "praat_scale_peak_target": 0.99,
+    "forward": "exact_numpy_stop_hann_scaled_or_unscaled_pcm16_hash_bound_to_sealed_topology",
+    "backward": "pytorch_stop_hann_with_differentiable_peak_scale_and_straight_through_pcm16",
+    "exact_worker_changed": false,
+    "worker_highpass_pcm16_sha256_must_match": true,
+    "candidate_exact_metric_used": false,
+    "candidate_exact_outcome_used": false,
+    "speaker_or_case_identity_used": false,
+    "support_rule_frozen_before_new_panel_selection": true
+  },
+  "exact_authority": {
+    "python": "/scratch/work/lil14/.conda_envs/avqi/bin/python",
+    "avqi_code_root": "/scratch/work/lil14/avqi",
+    "avqi_code_tree_sha256": "46987b3c447cb579aab4d34e87655938e4aa64e1b28c0e2348c4ea3e48f107f2",
+    "preselection_role": "clean_target_all_six_component_scorability_boolean_only",
+    "post_source_seal_role": "clean_target_scalar_sealing_only",
+    "base_exact_components_opened": false,
+    "candidate_exact_components_opened": false
+  },
+  "external_svd_source_panel": {
+    "dataset": "SVD",
+    "patient_only": true,
+    "sv_metadata_sha256": "36d8a725a209578744a862e63b5990d348e3d17d066a0247cdcd2e657c7ffc03",
+    "cs_metadata_sha256": "465c15e46c9c9e325c14e5672abead050bbfd9a4bba75d0ace46bf5d58884966",
+    "prior_speaker_ledger_sha256": "f5831ecd455f21bed626ebd4302881626553db2c378d45330faa75137179e4ee",
+    "normalization_label_bank_sha256": "03b8d5e3d0542dbfe60e54723bc89431e8dfd475dcc38284a6058465c5224760",
+    "selection_salt": "route-c-six-gradient-fusion-svd-v2-predeclared-20260906",
+    "splits": [
+      "surrogate_calibration",
+      "surrogate_holdout"
+    ],
+    "cases_per_split": 4,
+    "strata_per_split": [
+      "female/cs",
+      "female/sv",
+      "male/cs",
+      "male/sv"
+    ],
+    "one_case_per_speaker": true,
+    "speaker_disjoint_across_splits": true,
+    "exclude_every_prior_ledger_speaker": true,
+    "minimum_raw_mono_duration_seconds": {
+      "cs": 3.0,
+      "sv": 1.0
+    },
+    "selection_order": "ascending_SHA256(selection_salt:split:sex:view:speaker_id:session_id)",
+    "target_all_six_component_scorability_boolean_may_be_used": true,
+    "target_scalar_values_used_for_selection": false,
+    "base_or_candidate_exact_outcomes_used_for_selection": false,
+    "diagnosis_used_for_selection": false,
+    "source_split_sealed_before_simulation": true,
+    "clean_target_scalars_sealed_before_gradient_measurement": true
+  },
+  "waveform_materialization": {
+    "target_waveform": "raw_resampled_same_speaker_clean_pathological_source",
+    "fixed_recipe_indices": [
+      972,
+      973,
+      974,
+      975,
+      976,
+      977,
+      978,
+      979
+    ],
+    "degradations": [
+      "reverb",
+      "noise"
+    ],
+    "snr_db_by_case_order": [
+      20,
+      10,
+      20,
+      10,
+      20,
+      10,
+      20,
+      10
+    ],
+    "simulation_seed": "stable_seed(20260906,selection_salt,speaker_id,session_id,view,recipe_uid)",
+    "fixed_recipes_sha256": "9f9654dd4e078cb111ee2fae0b039893b6ae61094f35fb328b305250555cc8c6",
+    "generator": "S3_500",
+    "generator_mode": "frozen_inference_only",
+    "generator_config_sha256": "5c3f75ecd2b2a9fa9c938509e9ac8917bb19b22fdbdbf07b275c868685360407",
+    "generator_checkpoint_sha256": "d1ef31ec180b2378fce5a36b5a29ae5a601ed2fa1a26b1b18a81de7941bc6dd9",
+    "simulation_config_sha256": "0e665b5f3d97ad617cd1dde22a84b1ec5a8089e31b7657c7cb9989363115e276",
+    "simulation_source_sha256": "7f74a5727122bf3f8a6dbee297d9f3dd10165cba3bf2312bf2bd8704abc273bb",
+    "emitted_waveform_highpass": false,
+    "metric_highpass_internal_only": true,
+    "base_exact_components_opened": false,
+    "candidate_exact_components_opened": false,
+    "generator_optimizer_created": false,
+    "generator_optimizer_steps": 0
+  },
+  "promotion_gates": {
+    "all_component_gradients_finite_nonzero_bounded": true,
+    "all_post_cap_joint_gradients_finite_nonzero_bounded": true,
+    "all_post_cap_weighted_component_shares_le_0_80": true,
+    "all_post_cap_component_to_joint_cosines_nonnegative": true,
+    "all_candidate_e_peak_paths_pcm16_hash_bound": true,
+    "no_component_amplified": true,
+    "only_unique_dominant_component_may_be_attenuated": true,
+    "calibration_and_holdout_speaker_disjoint": true,
+    "all_prior_ledger_speakers_excluded": true
+  },
+  "boundaries": {
+    "old_v1_panel_and_failure_artifacts_preserved": true,
+    "candidate_exact_outcomes_opened": false,
+    "fresh_or_final_joint_panel_opened": false,
+    "joint_panel_authorized": false,
+    "formal_generator_training_submitted": false,
+    "generator_optimizer_steps": 0,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  }
+}

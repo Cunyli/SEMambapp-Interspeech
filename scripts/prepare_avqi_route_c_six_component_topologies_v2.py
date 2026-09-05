@@ -25,6 +25,7 @@ from scripts.evaluate_avqi_route_c_multicomponent_gradients import (
     SEGMENT_SAMPLES,
     load_fixed_segment,
     load_label_bank,
+    load_svd_fusion_label_bank,
     verify_source,
 )
 from scripts.evaluate_avqi_route_c_six_component_gradients import (
@@ -84,6 +85,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-bank", type=Path, required=True)
     parser.add_argument("--label-bank-sha256", required=True)
     parser.add_argument("--selection-salt", required=True)
+    parser.add_argument(
+        "--selection-mode",
+        choices=("legacy_tau", "sealed_external_svd_v2"),
+        default="legacy_tau",
+    )
     parser.add_argument(
         "--candidate-e-evidence",
         action="append",
@@ -148,10 +154,13 @@ def main() -> None:
         != evidence_hashes["exact_runtime_manifest"]
     ):
         raise ValueError("exact authority receipt binding differs")
-    cases, _, _, selection = load_label_bank(
-        args.label_bank,
-        args.label_bank_sha256,
-        args.selection_salt,
+    label_loader = (
+        load_svd_fusion_label_bank
+        if args.selection_mode == "sealed_external_svd_v2"
+        else load_label_bank
+    )
+    cases, _, _, selection = label_loader(
+        args.label_bank, args.label_bank_sha256, args.selection_salt
     )
     if len(cases) != 8:
         raise ValueError("six-gradient topology selection must contain eight cases")

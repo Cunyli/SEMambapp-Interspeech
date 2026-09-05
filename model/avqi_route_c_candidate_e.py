@@ -7,6 +7,7 @@ exact pulse topology is supplied by the sealed runtime worker.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -64,6 +65,8 @@ class CandidateEProxyResult:
     metric_sample_abs_max: float
     sinc70_peak_upper_bound: float
     peak_scale_abstention_pass: bool
+    peak_scale_support_pass: bool
+    exact_highpass_pcm16_sha256: str | None
 
 
 def validate_candidate_e_base_peak_certificate(
@@ -150,16 +153,29 @@ def validate_candidate_e_base_peak_certificate(
         observed_or_bound + numerical_epsilon,
         math.inf,
     )
-    if scaled or certified_upper >= PEAK_SCALE_TRIGGER:
-        raise ValueError("Candidate-E base requires Praat peak scaling")
+    expected_pcm16_sha256 = topology.get("highpass_pcm16_sha256")
+    if scaled:
+        if (
+            not isinstance(expected_pcm16_sha256, str)
+            or proxy.exact_highpass_pcm16_sha256 != expected_pcm16_sha256
+            or proxy.peak_scale_support_pass is not True
+        ):
+            raise ValueError(
+                "Candidate-E base requires Praat peak scaling but lacks "
+                "exact PCM-bound support"
+            )
+    elif certified_upper >= PEAK_SCALE_TRIGGER:
+        raise ValueError("Candidate-E base peak certificate is inconclusive")
     return {
         "base_peak_check_mode": mode,
         "base_local_sinc70_peak_upper_bound": local_upper,
         "base_exact_sinc70_peak": exact_peak,
         "base_peak_numerical_epsilon": numerical_epsilon,
         "base_peak_upper_bound": certified_upper,
-        "base_highpass_peak_scaled": False,
-        "base_peak_scale_abstention_pass": True,
+        "base_highpass_peak_scaled": scaled,
+        "base_peak_scale_abstention_pass": not scaled,
+        "base_peak_scale_support_pass": proxy.peak_scale_support_pass,
+        "base_peak_handling_pass": True,
     }
 
 
@@ -218,10 +234,70 @@ def official_stop_hann(input_pcm16: torch.Tensor) -> tuple[torch.Tensor, int]:
     return filtered, fft_sample_count
 
 
+def exact_numpy_highpass_pcm16(
+    waveform: torch.Tensor,
+    *,
+    peak_scale_required: bool,
+) -> tuple[torch.Tensor, str]:
+    """Rebuild the worker's exact NumPy/Praat PCM16 high-pass forward.
+
+    The returned tensor is detached.  It is used only as the exact forward
+    value; gradients continue through the PyTorch stop-Hann approximation.
+    """
+    if waveform.ndim != 1 or waveform.numel() == 0:
+        raise ValueError("Candidate-E exact PCM input must be one-dimensional")
+    values = (
+        waveform.detach()
+        .to(device="cpu", dtype=torch.float64)
+        .contiguous()
+        .numpy()
+    )
+    bounded = np.clip(values, -1.0, 1.0 - 1.0 / 32768.0)
+    input_pcm16 = np.floor(bounded * 32768.0) / 32768.0
+    fft_sample_count = next_power_of_two(input_pcm16.size)
+    spectrum = np.fft.rfft(input_pcm16, n=fft_sample_count)
+    frequencies = (
+        np.arange(fft_sample_count // 2 + 1, dtype=np.float64)
+        * SAMPLE_RATE
+        / fft_sample_count
+    )
+    response = np.ones(frequencies.size, dtype=np.float64)
+    response[frequencies <= STOP_HANN_LOW_HZ] = 0.0
+    transition = (frequencies > STOP_HANN_LOW_HZ) & (
+        frequencies <= STOP_HANN_HIGH_HZ
+    )
+    response[transition] = 0.5 - 0.5 * np.cos(
+        math.pi
+        / (STOP_HANN_HIGH_HZ - STOP_HANN_LOW_HZ)
+        * (frequencies[transition] - STOP_HANN_LOW_HZ)
+    )
+    filtered = np.fft.irfft(
+        spectrum * response,
+        n=fft_sample_count,
+    )[: input_pcm16.size]
+    if peak_scale_required:
+        sample_abs_max = float(np.max(np.abs(filtered)))
+        if not math.isfinite(sample_abs_max) or sample_abs_max <= 0.0:
+            raise ValueError("Candidate-E scaled base has no finite peak")
+        filtered = filtered * (0.99 / sample_abs_max)
+    codes = np.rint(
+        np.clip(filtered, -1.0, 1.0 - 1.0 / 32768.0) * 32768.0
+    ).astype("<i4")
+    digest = hashlib.sha256(codes.tobytes()).hexdigest()
+    exact = torch.from_numpy(codes.astype(np.float64) / 32768.0).to(
+        device=waveform.device,
+        dtype=waveform.dtype,
+    )
+    return exact, digest
+
+
 def exact_metric_branch_ste(
     waveform: torch.Tensor,
     source_indices: torch.Tensor,
     metric_constant_prefix_samples: int,
+    *,
+    peak_scale_required: bool = False,
+    expected_highpass_pcm16_sha256: str | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Construct the exact-forward metric waveform with an STE Jacobian."""
     if waveform.ndim != 1:
@@ -244,7 +320,29 @@ def exact_metric_branch_ste(
     sample_abs_max = float(filtered.detach().abs().max().cpu())
     sinc70_peak_upper_bound = sample_abs_max * SINC70_ABSOLUTE_WEIGHT_BOUND
     peak_scale_abstention_pass = sinc70_peak_upper_bound < PEAK_SCALE_TRIGGER
-    metric_pcm16_full = praat_pcm16_ste(filtered)
+    differentiable_filtered = filtered
+    if peak_scale_required:
+        differentiable_filtered = filtered * (
+            0.99 / filtered.abs().max().clamp_min(1e-24)
+        )
+    approximate_pcm16 = praat_pcm16_ste(differentiable_filtered)
+    exact_pcm16_sha256: str | None = None
+    peak_scale_support_pass = not peak_scale_required
+    if expected_highpass_pcm16_sha256 is not None:
+        exact_pcm16, exact_pcm16_sha256 = exact_numpy_highpass_pcm16(
+            waveform,
+            peak_scale_required=peak_scale_required,
+        )
+        if exact_pcm16_sha256 != expected_highpass_pcm16_sha256:
+            raise ValueError("Candidate-E exact high-pass PCM16 hash differs")
+        metric_pcm16_full = approximate_pcm16 + (
+            exact_pcm16 - approximate_pcm16
+        ).detach()
+        peak_scale_support_pass = True
+    elif peak_scale_required:
+        raise ValueError("Candidate-E scaled base requires an exact PCM16 hash")
+    else:
+        metric_pcm16_full = approximate_pcm16
     mapped = metric_pcm16_full.index_select(0, source_indices)
     if metric_constant_prefix_samples:
         mapped = torch.cat(
@@ -257,6 +355,8 @@ def exact_metric_branch_ste(
         "metric_sample_abs_max": sample_abs_max,
         "sinc70_peak_upper_bound": sinc70_peak_upper_bound,
         "peak_scale_abstention_pass": peak_scale_abstention_pass,
+        "peak_scale_support_pass": peak_scale_support_pass,
+        "exact_highpass_pcm16_sha256": exact_pcm16_sha256,
     }
 
 
@@ -360,11 +460,16 @@ def candidate_e_proxy(
     pulse_positions: torch.Tensor,
     source_indices: torch.Tensor,
     metric_constant_prefix_samples: int,
+    *,
+    peak_scale_required: bool = False,
+    expected_highpass_pcm16_sha256: str | None = None,
 ) -> CandidateEProxyResult:
     metric, certificate = exact_metric_branch_ste(
         waveform,
         source_indices,
         metric_constant_prefix_samples,
+        peak_scale_required=peak_scale_required,
+        expected_highpass_pcm16_sha256=expected_highpass_pcm16_sha256,
     )
     shimmer_db, amplitudes, centers, valid_pair, contributions = (
         fixed_pulse_shimmer_db(metric, pulse_positions)
@@ -383,6 +488,10 @@ def candidate_e_proxy(
         peak_scale_abstention_pass=bool(
             certificate["peak_scale_abstention_pass"]
         ),
+        peak_scale_support_pass=bool(certificate["peak_scale_support_pass"]),
+        exact_highpass_pcm16_sha256=certificate[
+            "exact_highpass_pcm16_sha256"
+        ],
     )
 
 

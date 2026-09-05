@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 import torch
 
 from model.avqi_route_c_candidate_e import (
@@ -11,6 +12,7 @@ from model.avqi_route_c_candidate_e import (
     SINC70_ABSOLUTE_WEIGHT_BOUND,
     build_cycle_gain_plan,
     candidate_e_proxy,
+    exact_numpy_highpass_pcm16,
     pcm16_ste,
     praat_pcm16_ste,
     project_cycle_gain_gradient_fixed_order,
@@ -148,3 +150,40 @@ def test_candidate_e_peak_certificate_uses_exact_fallback_for_loose_bound() -> N
         "requires Praat peak scaling",
     ):
         validate_candidate_e_base_peak_certificate(topology, proxy)
+
+    _, exact_pcm16_sha256 = exact_numpy_highpass_pcm16(
+        waveform,
+        peak_scale_required=True,
+    )
+    scaled_proxy = candidate_e_proxy(
+        waveform,
+        pulses,
+        torch.arange(waveform.numel()),
+        0,
+        peak_scale_required=True,
+        expected_highpass_pcm16_sha256=exact_pcm16_sha256,
+    )
+    topology["highpass_pcm16_sha256"] = exact_pcm16_sha256
+    certificate = validate_candidate_e_base_peak_certificate(
+        topology,
+        scaled_proxy,
+    )
+    assert certificate["base_highpass_peak_scaled"] is True
+    assert certificate["base_peak_scale_abstention_pass"] is False
+    assert certificate["base_peak_scale_support_pass"] is True
+    assert certificate["base_peak_handling_pass"] is True
+    assert scaled_proxy.exact_highpass_pcm16_sha256 == exact_pcm16_sha256
+
+
+def test_candidate_e_exact_pcm_hash_mismatch_fails_closed() -> None:
+    waveform = _waveform()
+    pulses = waveform.new_tensor(_topology(waveform)["pulse_positions_samples"])
+    with pytest.raises(ValueError, match="exact high-pass PCM16 hash differs"):
+        candidate_e_proxy(
+            waveform,
+            pulses,
+            torch.arange(waveform.numel()),
+            0,
+            peak_scale_required=True,
+            expected_highpass_pcm16_sha256="0" * 64,
+        )
