@@ -126,6 +126,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sv-root", type=Path, required=True)
     parser.add_argument("--cs-root", type=Path, required=True)
     parser.add_argument("--exact-python", type=Path, required=True)
+    parser.add_argument("--exact-python-sha256", required=True)
     parser.add_argument("--avqi-code-root", type=Path, required=True)
     parser.add_argument("--avqi-code-tree-sha256", required=True)
     parser.add_argument("--source-root", type=Path, required=True)
@@ -253,6 +254,10 @@ def validate_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
         != "clean_target_scalar_sealing_only"
         or exact.get("base_exact_components_opened") is not False
         or exact.get("candidate_exact_components_opened") is not False
+        or not isinstance(exact.get("python"), str)
+        or not isinstance(exact.get("python_resolved"), str)
+        or not isinstance(exact.get("python_sha256"), str)
+        or exact.get("python_version") != "3.11.15"
     ):
         raise ValueError("exact AVQI authority boundary differs")
     if (
@@ -551,6 +556,11 @@ def main() -> None:
             args.prior_speaker_ledger_sha256,
             "prior speaker ledger",
         ),
+        "exact_python": _verified_file(
+            args.exact_python,
+            args.exact_python_sha256,
+            "exact Python",
+        ),
     }
     source = verify_source(
         args.source_root.resolve(), args.source_commit, args.accepted_base_commit
@@ -579,11 +589,12 @@ def main() -> None:
         != args.failure_receipt_sha256
     ):
         raise ValueError("failure receipt differs from frozen contract")
-    if not args.exact_python.resolve().is_file():
-        raise FileNotFoundError("exact Python is unavailable")
     exact_policy = contract["exact_authority"]
     if (
-        str(args.exact_python.resolve()) != exact_policy["python"]
+        not args.exact_python.is_absolute()
+        or str(args.exact_python) != exact_policy["python"]
+        or str(args.exact_python.resolve()) != exact_policy["python_resolved"]
+        or args.exact_python_sha256 != exact_policy["python_sha256"]
         or str(args.avqi_code_root.resolve()) != exact_policy["avqi_code_root"]
         or args.avqi_code_tree_sha256 != exact_policy["avqi_code_tree_sha256"]
     ):
@@ -659,6 +670,9 @@ def main() -> None:
         },
         "exact_authority": {
             "python": str(args.exact_python.resolve()),
+            "python_entrypoint": str(args.exact_python),
+            "python_sha256": args.exact_python_sha256,
+            "python_version": exact_policy["python_version"],
             "avqi_code_root": str(args.avqi_code_root.resolve()),
             "avqi_code_tree_sha256": args.avqi_code_tree_sha256,
             "parselmouth_version": scorability_audit["parselmouth_version"],

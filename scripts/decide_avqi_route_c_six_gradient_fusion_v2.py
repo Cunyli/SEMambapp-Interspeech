@@ -247,6 +247,7 @@ def validate_materialized_panel(
         "simulation_config": contract["waveform_materialization"][
             "simulation_config_sha256"
         ],
+        "exact_python": contract["exact_authority"]["python_sha256"],
         "simulation_source": contract["waveform_materialization"][
             "simulation_source_sha256"
         ],

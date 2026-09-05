@@ -53,6 +53,9 @@
   },
   "exact_authority": {
     "python": "/scratch/work/lil14/.conda_envs/avqi/bin/python",
+    "python_resolved": "/scratch/work/lil14/.conda_envs/avqi/bin/python3.11",
+    "python_sha256": "7833038c61a2148f3a1f7fd6aacd0e6bbd576da9e125c0ac0917a22d0298ce68",
+    "python_version": "3.11.15",
     "avqi_code_root": "/scratch/work/lil14/avqi",
     "avqi_code_tree_sha256": "46987b3c447cb579aab4d34e87655938e4aa64e1b28c0e2348c4ea3e48f107f2",
     "preselection_role": "clean_target_all_six_component_scorability_boolean_only",

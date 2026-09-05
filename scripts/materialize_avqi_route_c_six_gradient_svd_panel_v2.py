@@ -133,6 +133,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--simulation-root", type=Path, required=True)
     parser.add_argument("--simulation-source-sha256", required=True)
     parser.add_argument("--exact-python", type=Path, required=True)
+    parser.add_argument("--exact-python-sha256", required=True)
     parser.add_argument("--avqi-code-root", type=Path, required=True)
     parser.add_argument("--avqi-code-tree-sha256", required=True)
     parser.add_argument("--source-root", type=Path, required=True)
@@ -600,6 +601,7 @@ def main() -> None:
         "generator_config": (args.generator_config, args.generator_config_sha256),
         "generator_checkpoint": (args.generator_checkpoint, args.generator_checkpoint_sha256),
         "simulation_config": (args.simulation_config, args.simulation_config_sha256),
+        "exact_python": (args.exact_python, args.exact_python_sha256),
     }
     paths = {
         name: _verified_file(path, digest, name)
@@ -632,7 +634,10 @@ def main() -> None:
         raise ValueError("exact AVQI code tree differs")
     exact_policy = contract["exact_authority"]
     if (
-        str(args.exact_python.resolve()) != exact_policy["python"]
+        not args.exact_python.is_absolute()
+        or str(args.exact_python) != exact_policy["python"]
+        or str(args.exact_python.resolve()) != exact_policy["python_resolved"]
+        or args.exact_python_sha256 != exact_policy["python_sha256"]
         or str(args.avqi_code_root.resolve()) != exact_policy["avqi_code_root"]
         or args.avqi_code_tree_sha256 != exact_policy["avqi_code_tree_sha256"]
     ):
