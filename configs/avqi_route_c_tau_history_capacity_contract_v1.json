@@ -1,0 +1,168 @@
+{
+  "schema_version": "avqi-route-c-tau-history-capacity-v1",
+  "failure_decision": "NO_GO_ROUTE_C_TAU_SOURCE_PANEL_ALL_CURRENT_SPEAKERS_EXACT_OPENED_V1",
+  "route": "C",
+  "iteration_compact": {
+    "goal": "Prove current TAU historical opening coverage and preserve a source-capacity NO_GO before any successor selection.",
+    "dataset": "Current authoritative TAU Elina and cleaned Nelly; original variants are provenance only.",
+    "split": "Exclude every historical Exact-opened, development, and holdout speaker; no split selected by this audit.",
+    "baseline": "The earlier partial TAU exclusion ledger.",
+    "primary_measure": "Unused same-speaker clean CS/SV speaker capacity after complete historical exclusion.",
+    "guardrails": "Unchanged component readiness, joint authorization and generator-training gates; no scoring, simulation or optimization.",
+    "failure_mode": "All current sources already opened; missing sex metadata cannot be imputed.",
+    "unacceptable": "Relabeling historical speakers as fresh, changing thresholds, selecting by historical scores, or testing SVD.",
+    "next_experiment": "Only a separately frozen source-panel experiment if scientific prerequisites pass.",
+    "fallback": "Preserve immutable NO_GO and request a new scientific authorization if no fresh source remains."
+  },
+  "source_policy": {
+    "dataset": "TAU",
+    "active_collections": [
+      "Elina",
+      "Nelly"
+    ],
+    "origin_directories": "provenance_only_not_successor_source",
+    "minimum_raw_mono_seconds": {
+      "cs": 3,
+      "sv": 1
+    },
+    "sex_inference_permitted": false,
+    "metric_or_severity_ranking_permitted": false,
+    "all_historical_opened_or_development_speakers_excluded": true
+  },
+  "capacity_gates": {
+    "six_gradient_distinct_speaker_quotas": {
+      "patient/female": 4,
+      "patient/male": 4
+    },
+    "joint_distinct_speaker_quotas": {
+      "patient/female": 3,
+      "patient/male": 3,
+      "healthy/female": 3,
+      "healthy/male": 3
+    },
+    "gradient_and_joint_speakers_disjoint": true,
+    "all_speakers_require_same_speaker_cs_sv": true,
+    "thresholds_may_not_be_weakened": true
+  },
+  "active_source_roots": {
+    "Elina": "/scratch/work/lil14/data/TAU/Elina",
+    "Nelly": "/scratch/work/lil14/data/TAU/Nelly"
+  },
+  "inputs": {
+    "tau_manifest": {
+      "path": "/scratch/work/lil14/use_simulation_pipeline/outputs/organized/csv/sampling/tau_clean_avqi_sampling_manifest.csv",
+      "sha256": "ea227a724ced6436b9aa7c75d4b1ca3d78bc28e157baa0bd73d662d28d2549bf"
+    },
+    "tau_inventory": {
+      "path": "/scratch/work/lil14/use_simulation_pipeline/outputs/organized/csv/core/data_inventory.csv",
+      "sha256": "55288d4dd278402fc5a4a64c250199e8044713ccab3e9e00abd4dfaf7fcef36b"
+    },
+    "tau_paired_scores": {
+      "path": "/scratch/work/lil14/use_simulation_pipeline/outputs/organized/csv/core/avqi_paired_scores.csv",
+      "sha256": "41c83ccf61ddccc535fcd0b0c488f4c3096d00ba823fc8445c38291bf48bafb5"
+    },
+    "tau_directory_policy": {
+      "path": "/scratch/work/lil14/data/TAU/README.md",
+      "sha256": "c6276de4eec96b794ac59fa276f486cf65a057394caa6d4ed8c84b833aa27e54"
+    },
+    "tau_elina_metadata": {
+      "path": "/scratch/work/lil14/data/TAU/origin_Elina/s_r_e_metadata.csv",
+      "sha256": "8819d49d1ddbdc09dd5d0f8bc945b79ddf6370316db13904c2940e5e20ec96f3"
+    },
+    "expanded_labels": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_component_expanded_data_20260813_02/outputs/exact_component_label_bank_v2.csv",
+      "sha256": "9a8a9a9523fd9b61125489a9a2ec7d200cb35adde36288e31b3400c68ccd66e3"
+    },
+    "expanded_label_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_component_expanded_data_20260813_02/outputs/exact_component_label_bank_v2.json",
+      "sha256": "a5e4e03ad440d48f07fff3d170823eb4e3d30d9efebc99f24c10cecff6da7b09"
+    },
+    "external_exact": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/tau_pathology_three_tracks_20260810_01/outputs/intensity_eval/exact_components_all.csv",
+      "sha256": "1e401d2d3343d5d5e8dc38245d14a2e4f9fbb568b11a26269e4ce0aca30c249a"
+    },
+    "external_exact_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/tau_pathology_three_tracks_20260810_01/outputs/intensity_eval/exact_components_all.json",
+      "sha256": "e68c80fbebb66bea0e1c0e63fc3b6c7c530109b71a435ef9f2aa3d4908ab69db"
+    },
+    "sd13_exact": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/tau_s1_old_guard_mechanism_eval_20260809_01/outputs/formal/exact_task_components.csv",
+      "sha256": "4acc788f0d4910610c6ac01478da9e51f1df3a0d37a104e7ce3a0ce5aeaee6cc"
+    },
+    "sd13_exact_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/tau_s1_old_guard_mechanism_eval_20260809_01/outputs/formal/exact_task_components.json",
+      "sha256": "f7adc84666358e2bd715094b2d91a9bab6b71a2f7829e8d8ce07cbfe869ebb9c"
+    },
+    "prior_ledger": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_svd_history_capacity_audit_v3_20260906_01/outputs/complete_historical_svd_speaker_ledger_v3.json",
+      "sha256": "f3bad03861c2361b197afe3f67d9fef0214121b76baffc1408e4f2e1637f4f5e"
+    },
+    "readiness_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_six_joint_candidate_e_readiness_v4_20260903_01/outputs/candidate_e_component_readiness_report_v4.json",
+      "sha256": "7357bb0fb6b7fd655cfc4ea693473fa76e48b714e87a50eb8ecb95af045821b0"
+    },
+    "readiness_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_six_joint_candidate_e_readiness_v4_20260903_01/outputs/completion_receipt_v4.json",
+      "sha256": "18705aba74601b6344013ce207eacf472846071b0c55cdac5c030f43663d105f"
+    },
+    "exact_main": {
+      "path": "/scratch/work/lil14/avqi/avqi_code/main.py",
+      "sha256": "b3018da3b41aa17d1382a390f1c2bbf31520a824b82db871d5d67b4417f6bcc6"
+    }
+  },
+  "history_roots": [
+    "/scratch/work/lil14/SEMambapp-Interspeech/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech/exp",
+    "/scratch/work/lil14/SEMambapp-Interspeech-advisor-avqi-review/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-advisor-avqi-review/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-artifacts-archive",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-cpps-hnr-integration-v1/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-cpps-hnr-integration-v1/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-cpps-v7/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-cpps-v7/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-five-component-integration-v1/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-five-component-integration-v1/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-hnr-v7/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-hnr-v7/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-ltas-slope-promotion-v1/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-ltas-slope-promotion-v1/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-multicomponent-integration-v1/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-multicomponent-integration-v1/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-promotion-v23/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-promotion-v23/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-global-v9/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-global-v9/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-hybrid-v9/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-hybrid-v9/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-ltas-v8/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-ltas-v8/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-v19-pretest/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-v6/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-component-scaffold-v1/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/outputs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-master-verify/runs",
+    "/scratch/work/lil14/SEMambapp-Interspeech-master-verify/outputs",
+    "/scratch/work/lil14/Hybrid_Unise/runs",
+    "/scratch/work/lil14/Hybrid_Unise/outputs",
+    "/scratch/work/lil14/use_simulation_pipeline/outputs/organized/csv",
+    "/scratch/work/lil14/use_simulation_pipeline/outputs/validation"
+  ],
+  "boundaries": {
+    "new_target_scalar_values_opened": false,
+    "base_or_candidate_exact_outcomes_opened": false,
+    "new_waveforms_materialized": false,
+    "successor_source_selection_performed": false,
+    "six_gradient_evaluation_submitted": false,
+    "joint_panel_authorized": false,
+    "joint_panel_submitted": false,
+    "svd_used_for_new_testing": false,
+    "formal_generator_training_submitted": false,
+    "generator_optimizer_created": false,
+    "generator_optimizer_steps": 0,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  }
+}
