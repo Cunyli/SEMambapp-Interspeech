@@ -33,10 +33,12 @@ import torch
 from scipy import stats
 
 
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from model.waveform_output_safety import attenuate_output_peak
 from model.avqi_components import (
     AVQI_COMPONENT_LOSS_WEIGHTS,
     AVQI_COMPONENT_NAMES,
@@ -607,6 +609,12 @@ def enhance_waveform(
 ) -> torch.Tensor:
     magnitude, phase, scale = normalized_stft_input(waveform, config)
     enhanced_magnitude, enhanced_phase, _ = model(magnitude, phase)
+    peak_limit = config.get("signal_safety_cfg", {}).get("output_peak_limit")
+    if peak_limit is not None:
+        if (not bool(torch.isfinite(enhanced_magnitude).all())
+                or not bool(torch.isfinite(enhanced_phase).all())
+                or bool((enhanced_magnitude < 0).any())):
+            raise ValueError("nonfinite magnitude/phase or negative decoded magnitude")
     stft_cfg = config["stft_cfg"]
     enhanced = mag_phase_istft(
         enhanced_magnitude,
@@ -616,7 +624,10 @@ def enhance_waveform(
         stft_cfg["win_size"],
         config["model_cfg"]["compress_factor"],
     )
-    return enhanced / scale
+    restored = enhanced / scale
+    if peak_limit is not None:
+        restored, _ = attenuate_output_peak(restored, float(peak_limit))
+    return restored
 
 
 def extract_shared_features(

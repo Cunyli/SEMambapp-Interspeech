@@ -1,0 +1,73 @@
+{
+  "goal": "Fix general amplitude and numerical issues, validate them, then complete a bounded real six-component TAU generator training run with nonzero optimizer updates, checkpoints, and before/after evidence.",
+  "authorization": {
+    "latest_user_text": "首先把这个幅度问题修改好。修改好并验证完之后，你再启动任务。出现别的问题先修复完，然后再继续跑。总之，就是把训练给跑起来。",
+    "training_authorized": true,
+    "repair_then_continue_authorized": true
+  },
+  "task": "Bidirectional distance from six AVQI components to same-speaker clean pathological CS/SV targets; preserve full-band speech and denoising.",
+  "dataset": "Existing hash-sealed 20-speaker TAU diagnostic cohort. Reuse the fixed data, no speaker or recipe replacement; all speakers historically opened.",
+  "split": "Use the 4 surrogate_calibration patients for training, the 4 surrogate_holdout patients for validation, and retain the 12 joint-reserve speakers for evaluation only. Never train on any held-out row.",
+  "baseline": "S3_500 checkpoint, existing per-input 0.9 normalization, native ISTFT lengths; opt-in differentiable utterance-constant output attenuation to peak <=0.95.",
+  "changes": "Numerically stable Softplus, shared output-peak safeguard, versioned training protocol, six real waveform-gradient backpropagation through the generator.",
+  "primary_metric": "Before/after Exact Praat normalized component gaps to sealed same-speaker clean targets; no fixed-direction healthification.",
+  "guardrails": "Finite magnitude, phase, output, losses and parameter gradients; waveform peak, full-band/low-frequency/airflow/pause/CS-SV/denoising checks; no high-pass in emitted audio.",
+  "expected_failure_modes": "Magnitude overflow or underflow, amplitude overshoot, detached graph, incompatible topology, gradient conflict, GPU launch or checkpoint issues.",
+  "unacceptable_mistakes": "Fake training, zero optimizer updates passed off as training, data leakage, SVD data tests, hiding or overwriting historical failures, lowering scientific thresholds to claim promotion.",
+  "training": {
+    "initial_checkpoint": "S3_500",
+    "maximum_optimizer_steps": 128,
+    "optimizer": "AdamW",
+    "learning_rate": 0.000001,
+    "weight_decay": 0,
+    "gradient_clip_norm": 1,
+    "batch_size": 1,
+    "seed": 20260908,
+    "checkpoint_interval": 32,
+    "trainable": "generator parameters",
+    "full_scale_promotion_claimed": false
+  },
+  "next_experiment": "Regression tests and real 104-waveform peak safety validation; recompute train-only weights, confirm all six waveform and generator gradients, then execute 128 real updates and evaluate frozen pre/post outputs.",
+  "rollback": "Keep original NO_GO receipts and checkpoints immutable; stop invalid updates, preserve a last valid checkpoint, repair the cause and resume under a versioned receipt.",
+  "schema_version": "avqi-route-c-tau-amplitude-training-v1",
+  "historical_contract": {
+    "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/configs/avqi_route_c_tau_joint_diagnostic_contract_v1.json",
+    "sha256": "3fe2cc9c4bd2c41fb95a4ee79f7cd77877af683a1e8dd98cc848479efd69118e"
+  },
+  "historical_inputs": {
+    "source_seal": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_tau_joint_diagnostic_v1_seal_20260907T175105Z/outputs/tau_diagnostic_split_seal.json",
+      "sha256": "078be18143b78135c9e0ab600217b6b93c33dc3c25c5e426c77e97b87c11c5a7"
+    },
+    "gradient_materialized": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_tau_joint_diagnostic_v1_materialize_20260907T180157Z/outputs/tau_gradient_materialized_manifest.json",
+      "sha256": "8f88ad009af255d46eda3f7c99062ebc0e1a6665998366c2c27a5d477c697927"
+    },
+    "joint_audit": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_tau_joint_diagnostic_v1_baseline_failure_audit_20260907T184542Z/outputs/joint_baseline_failure_report.json",
+      "sha256": "26d717465cf0ed42ca3d76ce9380e05639c228ed6c0791cba057cf9489fb6510"
+    },
+    "joint_targets": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_tau_joint_diagnostic_v1_joint_prepare_20260907T183817Z/outputs/clean_target_label_bank.json",
+      "sha256": "c6dea36c4593b079b95486947907a0a1ca0c44ec5773a49689b17f2c5da231a6"
+    }
+  },
+  "signal_safety_cfg": {
+    "output_peak_limit": 0.95
+  },
+  "loss": {
+    "six_component_gap": "smooth_l1 normalized bidirectional to same-speaker raw clean target",
+    "six_component_gradient_scale": 1,
+    "time_l1_weight": 1,
+    "compressed_magnitude_mse_weight": 1,
+    "weights": "inverse median waveform gradient norms fit on the four training rows before holdout measurement",
+    "fusion": "existing dominance-capped fusion; abort conflicting directions for general repair",
+    "topology": "refresh detached Exact current full waveform at every step",
+    "emitted_waveform_highpass": false
+  },
+  "acceptance": {
+    "engineering": "128 finite optimizer updates, changed generator parameters, reloadable checkpoint, complete before/after evaluation",
+    "scientific_promotion": false,
+    "independent_validation": false
+  }
+}

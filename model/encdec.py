@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 
 
@@ -35,7 +36,9 @@ class LearnableSoftplus(nn.Module):
         - torch.Tensor: Output tensor after applying the learnable sigmoid activation.
         """
         beta = torch.exp(self.beta).view(1, -1, 1)
-        return (1/beta+1e-6) * torch.log(1 + torch.exp(beta * x))
+        # Preserve checkpoint parameters and the activation's original scale,
+        # while avoiding exp overflow in the magnitude decoder.
+        return (1 / beta + 1e-6) * F.softplus(beta * x)
 
 
 
@@ -223,5 +226,4 @@ class PhaseDecoder(nn.Module):
         x_i = self.phase_conv_i(x)
         x = torch.atan2(x_i, x_r)
         return x
-
 

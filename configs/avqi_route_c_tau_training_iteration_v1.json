@@ -1,0 +1,32 @@
+{
+  "goal": "Fix general amplitude and numerical issues, validate them, then complete a bounded real six-component TAU generator training run with nonzero optimizer updates, checkpoints, and before/after evidence.",
+  "authorization": {
+    "latest_user_text": "首先把这个幅度问题修改好。修改好并验证完之后，你再启动任务。出现别的问题先修复完，然后再继续跑。总之，就是把训练给跑起来。",
+    "training_authorized": true,
+    "repair_then_continue_authorized": true
+  },
+  "task": "Bidirectional distance from six AVQI components to same-speaker clean pathological CS/SV targets; preserve full-band speech and denoising.",
+  "dataset": "Existing hash-sealed 20-speaker TAU diagnostic cohort. Reuse the fixed data, no speaker or recipe replacement; all speakers historically opened.",
+  "split": "Use the 4 surrogate_calibration patients for training, the 4 surrogate_holdout patients for validation, and retain the 12 joint-reserve speakers for evaluation only. Never train on any held-out row.",
+  "baseline": "S3_500 checkpoint, existing per-input 0.9 normalization, native ISTFT lengths; opt-in differentiable utterance-constant output attenuation to peak <=0.95.",
+  "changes": "Numerically stable Softplus, shared output-peak safeguard, versioned training protocol, six real waveform-gradient backpropagation through the generator.",
+  "primary_metric": "Before/after Exact Praat normalized component gaps to sealed same-speaker clean targets; no fixed-direction healthification.",
+  "guardrails": "Finite magnitude, phase, output, losses and parameter gradients; waveform peak, full-band/low-frequency/airflow/pause/CS-SV/denoising checks; no high-pass in emitted audio.",
+  "expected_failure_modes": "Magnitude overflow or underflow, amplitude overshoot, detached graph, incompatible topology, gradient conflict, GPU launch or checkpoint issues.",
+  "unacceptable_mistakes": "Fake training, zero optimizer updates passed off as training, data leakage, SVD data tests, hiding or overwriting historical failures, lowering scientific thresholds to claim promotion.",
+  "training": {
+    "initial_checkpoint": "S3_500",
+    "maximum_optimizer_steps": 128,
+    "optimizer": "AdamW",
+    "learning_rate": 0.000001,
+    "weight_decay": 0,
+    "gradient_clip_norm": 1,
+    "batch_size": 1,
+    "seed": 20260908,
+    "checkpoint_interval": 32,
+    "trainable": "generator parameters",
+    "full_scale_promotion_claimed": false
+  },
+  "next_experiment": "Regression tests and real 104-waveform peak safety validation; recompute train-only weights, confirm all six waveform and generator gradients, then execute 128 real updates and evaluate frozen pre/post outputs.",
+  "rollback": "Keep original NO_GO receipts and checkpoints immutable; stop invalid updates, preserve a last valid checkpoint, repair the cause and resume under a versioned receipt."
+}
