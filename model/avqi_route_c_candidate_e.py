@@ -8,11 +8,13 @@ exact pulse topology is supplied by the sealed runtime worker.
 from __future__ import annotations
 
 import hashlib
+import io
 import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 import numpy as np
+import soundfile as sf
 import torch
 
 
@@ -179,11 +181,24 @@ def validate_candidate_e_base_peak_certificate(
     }
 
 
+def libsndfile_pcm16(values: np.ndarray) -> np.ndarray:
+    """Use the real double-to-PCM16 conversion, including boundary rounding."""
+    buffer = io.BytesIO()
+    sf.write(buffer, np.asarray(values, dtype=np.float64), SAMPLE_RATE,
+             format="WAV", subtype="PCM_16")
+    buffer.seek(0)
+    quantized, sample_rate = sf.read(buffer, dtype="float64")
+    if sample_rate != SAMPLE_RATE:
+        raise ValueError("Candidate-E PCM16 roundtrip changed sample rate")
+    return quantized
+
+
 def pcm16_ste(values: torch.Tensor) -> torch.Tensor:
     """Mirror libsndfile input PCM16 with an identity backward."""
     bounded = values.clamp(-1.0, 1.0 - 1.0 / 32768.0)
-    quantized = torch.floor(bounded * 32768.0) / 32768.0
-    return bounded + (quantized - bounded).detach()
+    samples = values.detach().to(device="cpu", dtype=torch.float64).contiguous().numpy()
+    quantized = torch.from_numpy(libsndfile_pcm16(samples)).to(values)
+    return quantized + (bounded - bounded.detach())
 
 
 def praat_pcm16_ste(values: torch.Tensor) -> torch.Tensor:
@@ -252,8 +267,7 @@ def exact_numpy_highpass_pcm16(
         .contiguous()
         .numpy()
     )
-    bounded = np.clip(values, -1.0, 1.0 - 1.0 / 32768.0)
-    input_pcm16 = np.floor(bounded * 32768.0) / 32768.0
+    input_pcm16 = libsndfile_pcm16(values)
     fft_sample_count = next_power_of_two(input_pcm16.size)
     spectrum = np.fft.rfft(input_pcm16, n=fft_sample_count)
     frequencies = (

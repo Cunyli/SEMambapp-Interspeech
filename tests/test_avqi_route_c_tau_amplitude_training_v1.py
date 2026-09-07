@@ -7,7 +7,7 @@ import torch
 
 from scripts.avqi_route_c_tau_amplitude_training_v1 import (
     fidelity_loss, finite_parameter_gradients, parameter_delta, validate_protocol,
-    validate_roles,
+    validate_roles, binding, restore_training,
 )
 
 
@@ -79,3 +79,38 @@ def test_fidelity_silent_bins_have_finite_gradients():
     loss.backward()
     assert torch.isfinite(y.grad).all()
     assert values["magnitude_mse"] > 0
+
+
+def test_resume_preserves_adam_momentum_and_continues_same_next_update(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROTOCOL_SHA256", "a" * 64)
+    torch.manual_seed(11)
+    original = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(original.parameters(), lr=1e-6, weight_decay=0)
+    x = torch.tensor([0.5, -0.3])
+    for _ in range(64):
+        optimizer.zero_grad()
+        original(x).square().sum().backward()
+        optimizer.step()
+    checkpoint = tmp_path / "generator_step_000064.pt"
+    torch.save(dict(generator=original.state_dict(), optimizer=optimizer.state_dict(),
+                    generator_optimizer_steps=64, protocol_sha256="a" * 64,
+                    torch_rng_state=torch.get_rng_state(), cuda_rng_state=[], delta_from_initial={}), checkpoint)
+    rows = [dict(case_id=str(i)) for i in range(4)]
+    log = tmp_path / "training_steps.jsonl"
+    log.write_text("".join(json.dumps(dict(step=i, case_id=str((i-1)%4), role="train")) + "\n"
+                           for i in range(1, 65)))
+    receipt = tmp_path / "execution_receipt.json"
+    receipt.write_text(json.dumps(dict(stage="train", protocol_sha256="a" * 64,
+                                      artifacts=[binding(checkpoint), binding(log)])))
+    run = tmp_path / "resumed"
+    (run / "outputs").mkdir(parents=True)
+    restored = torch.nn.Linear(2, 1)
+    restored_optimizer = torch.optim.AdamW(restored.parameters(), lr=1e-6, weight_decay=0)
+    step, prefix, _ = restore_training(run, restored, restored_optimizer, binding(receipt), rows)
+    assert step == len(prefix) == 64
+    for model, opt in ((original, optimizer), (restored, restored_optimizer)):
+        opt.zero_grad()
+        model(x).square().sum().backward()
+        opt.step()
+    for before, after in zip(original.parameters(), restored.parameters()):
+        assert torch.equal(before, after)

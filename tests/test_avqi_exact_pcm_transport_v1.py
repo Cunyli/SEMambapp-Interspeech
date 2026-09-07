@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 import torch
 
-from model.avqi_route_c_candidate_e import exact_metric_branch_ste, exact_numpy_highpass_pcm16
+from model.avqi_route_c_candidate_e import (
+    exact_metric_branch_ste, exact_numpy_highpass_pcm16, libsndfile_pcm16, pcm16_ste,
+)
 from scripts.avqi_shimmer_exact_pcm_worker_v1 import export_engine_type
 
 
@@ -61,3 +63,17 @@ def test_worker_exports_this_refresh_without_recomputing_metric():
         result = engine.refresh_waveform(np.full(16, value))
         assert result["highpass_pcm16_codes"] == [round(value * 32768)] * 16
     assert engine.calls == 2
+
+
+def test_pcm16_boundary_rounding_uses_actual_wav_conversion():
+    boundaries = np.arange(1, 1024, dtype=np.float64) / 32768
+    values = np.nextafter(boundaries, -np.inf)
+    expected = libsndfile_pcm16(values)
+    # These boundary values distinguish actual libsndfile conversion from the
+    # former mathematical floor approximation.
+    assert np.any(expected != np.floor(values * 32768) / 32768)
+    x = torch.from_numpy(values).requires_grad_()
+    actual = pcm16_ste(x)
+    assert np.array_equal(actual.detach().numpy(), expected)
+    actual.sum().backward()
+    assert torch.equal(x.grad, torch.ones_like(x))

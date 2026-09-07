@@ -356,7 +356,46 @@ def save_checkpoint(run, model, optimizer, step, p, cfg, initial):
     return dict(**binding(path), optimizer_steps=step, delta_from_initial=delta)
 
 
-def train(run, p, rows, cfg, paths, old, exact, preflight_dir, safety_dir):
+def restore_training(run, model, optimizer, resume_binding, train_rows):
+    receipt = read_json(verified(resume_binding))
+    if receipt["stage"] != "train" or receipt["protocol_sha256"] != os.environ["PROTOCOL_SHA256"]:
+        raise ValueError("resume training protocol differs")
+    artifacts = receipt["artifacts"]
+    checkpoints = [b for b in artifacts if Path(b["path"]).name.startswith("generator_step_")
+                   and Path(b["path"]).suffix == ".pt"]
+    checkpoint_binding = max(checkpoints, key=lambda b: int(Path(b["path"]).stem.rsplit("_", 1)[1]))
+    checkpoint = torch.load(verified(checkpoint_binding), map_location="cpu", weights_only=True)
+    step = checkpoint["generator_optimizer_steps"]
+    if not 0 < step < 128 or checkpoint["protocol_sha256"] != os.environ["PROTOCOL_SHA256"]:
+        raise ValueError("resume checkpoint step or protocol invalid")
+    log_binding = next(b for b in artifacts if Path(b["path"]).name == "training_steps.jsonl")
+    all_rows = [json.loads(line) for line in verified(log_binding).read_text().splitlines()]
+    prefix = all_rows[:step]
+    if len(prefix) != step:
+        raise ValueError("resume log does not prove checkpoint steps")
+    for index, row in enumerate(prefix, 1):
+        if (row["step"] != index or row["case_id"] != train_rows[(index - 1) % 4]["case_id"]
+                or row["role"] != "train"):
+            raise ValueError("resume log contains a step gap or held-out update")
+    model.load_state_dict(checkpoint["generator"], strict=True)
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    if any(int(s["step"].item()) != step for s in optimizer.state.values()):
+        raise ValueError("resume Adam state step differs")
+    torch.set_rng_state(checkpoint["torch_rng_state"])
+    torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+    with (run / "outputs/training_steps.jsonl").open("x") as handle:
+        for row in prefix:
+            handle.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+    write_json(run / "outputs/resume_receipt.json", dict(
+        previous_execution=resume_binding, checkpoint=checkpoint_binding,
+        previous_training_log=log_binding, restored_optimizer_step=step,
+        previous_logged_updates=len(all_rows), previous_updates_after_checkpoint_replayed=len(all_rows) - step,
+        optimizer_state_restored=True, torch_rng_restored=True, prior_prefix_steps=step))
+    return step, prefix, dict(**checkpoint_binding, optimizer_steps=step,
+                             delta_from_initial=checkpoint["delta_from_initial"])
+
+
+def train(run, p, rows, cfg, paths, old, exact, preflight_dir, safety_dir, resume_binding=None):
     weights = read_json(preflight_dir / "frozen_weights.json")["weights"]
     train_rows = [r for r in rows if r["training_role"] == "train"]
     if len(train_rows) != 4:
@@ -367,14 +406,18 @@ def train(run, p, rows, cfg, paths, old, exact, preflight_dir, safety_dir):
     optimizer = torch.optim.AdamW(model.parameters(), lr=t["learning_rate"], weight_decay=0)
     scorer = scorer_bundle(old, paths)
     runtime = load_runtime_module(paths["candidate_e_runtime_client"])
-    checkpoints = [save_checkpoint(run, model, optimizer, 0, p, cfg, initial)]
-    steps = []
+    if resume_binding:
+        start_step, steps, restored_checkpoint = restore_training(run, model, optimizer, resume_binding, train_rows)
+        checkpoints = [restored_checkpoint]
+    else:
+        start_step, steps = 0, []
+        checkpoints = [save_checkpoint(run, model, optimizer, 0, p, cfg, initial)]
     with runtime.ExactShimmerTopologyWorker(
         Path(old["exact"]["python"]).resolve(), EXACT_PCM_WORKER,
         Path(old["exact"]["root"]), exact["avqi_code_tree_sha256"],
     ) as worker:
         worker.warmup()
-        for step in range(1, t["maximum_optimizer_steps"] + 1):
+        for step in range(start_step + 1, t["maximum_optimizer_steps"] + 1):
             started = time.monotonic()
             row = train_rows[(step - 1) % len(train_rows)]
             optimizer.zero_grad(set_to_none=True)
@@ -413,12 +456,14 @@ def train(run, p, rows, cfg, paths, old, exact, preflight_dir, safety_dir):
         if not torch.equal(value, restored.state_dict()[name]):
             raise ValueError("checkpoint reload differs: " + name)
     write_json(run / "outputs/training_report.json", dict(
-        optimizer_steps=len(steps), train_case_ids=[r["case_id"] for r in train_rows],
+        optimizer_steps=len(steps), local_optimizer_steps=len(steps) - start_step,
+        resumed_from_optimizer_step=start_step, train_case_ids=[r["case_id"] for r in train_rows],
         heldout_optimizer_steps=0, checkpoints=checkpoints, checkpoint_reload_exact=True,
         delta_from_initial=parameter_delta(model, initial),
         before_safety_report=binding(safety_dir / "safety_report.json"),
         preflight_report=binding(preflight_dir / "preflight_report.json")))
-    save_stage(run, "train", p, generator_optimizer_steps=len(steps), checkpoints=checkpoints)
+    save_stage(run, "train", p, generator_optimizer_steps=len(steps),
+               local_optimizer_steps=len(steps) - start_step, checkpoints=checkpoints)
 
 
 def evaluate(run, p, rows, cfg, paths, old, exact, train_dir, safety_dir):
@@ -491,6 +536,8 @@ def main():
     parser.add_argument("--safety-receipt", type=Path)
     parser.add_argument("--preflight-receipt", type=Path)
     parser.add_argument("--train-receipt", type=Path)
+    parser.add_argument("--resume-receipt", type=Path)
+    parser.add_argument("--resume-receipt-sha256")
     args = parser.parse_args()
     p = read_json(args.protocol)
     validate_protocol(p)
@@ -516,7 +563,9 @@ def main():
     elif args.stage == "preflight":
         preflight(run, p, rows, cfg, paths, old, exact, safety_dir)
     elif args.stage == "train":
-        train(run, p, rows, cfg, paths, old, exact, preflight_dir, safety_dir)
+        resume_binding = ({"path": str(args.resume_receipt), "sha256": args.resume_receipt_sha256}
+                          if args.resume_receipt else None)
+        train(run, p, rows, cfg, paths, old, exact, preflight_dir, safety_dir, resume_binding)
     else:
         evaluate(run, p, rows, cfg, paths, old, exact, train_dir, safety_dir)
 
