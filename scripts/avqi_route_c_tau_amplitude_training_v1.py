@@ -25,6 +25,7 @@ from model.avqi_components import AVQI_COMPONENT_NAMES
 from model.avqi_route_c_candidate_e_scorer import load_route_c_candidate_e_six_scorer
 from model.avqi_route_c_candidate_e import exact_numpy_highpass_pcm16
 from model.avqi_route_c_gradient_fusion import fuse_tensor_gradients
+from model.avqi_route_c_training_fusion import fuse_training_gradients
 from model.stfts import mag_phase_stft
 from model.waveform_output_safety import attenuate_output_peak
 from scripts.avqi_route_c_tau_joint_diagnostic_v1 import (
@@ -62,7 +63,7 @@ def audio(value):
 
 
 def validate_protocol(p):
-    if p["schema_version"] != SCHEMA or p["authorization"]["training_authorized"] is not True:
+    if p["schema_version"] not in (SCHEMA, SCHEMA.replace("v1", "v2")) or p["authorization"]["training_authorized"] is not True:
         raise ValueError("explicit bounded training authorization missing")
     t = p["training"]
     if (t["maximum_optimizer_steps"] != 128 or t["checkpoint_interval"] != 32
@@ -135,12 +136,18 @@ def context(p):
     return old, paths, exact, cfg
 
 
-def load_dependency(path, stage):
+def load_dependency(path, stage, protocol):
     r = read_json(path)
     if r["stage"] != stage or r["status"] != "COMPLETED":
         raise ValueError("successful prerequisite receipt missing: " + stage)
     if r["protocol_sha256"] != os.environ["PROTOCOL_SHA256"]:
-        raise ValueError("prerequisite protocol differs")
+        previous = protocol.get("previous_protocol")
+        if stage != "safety" or not previous or r["protocol_sha256"] != previous["sha256"]:
+            raise ValueError("prerequisite protocol differs")
+        old = read_json(verified(previous))
+        for key in ("historical_inputs", "historical_contract", "signal_safety_cfg", "training"):
+            if old[key] != protocol[key]:
+                raise ValueError("previous amplitude validation is incompatible")
     for b in r["artifacts"]:
         verified(b)
     return Path(r["run_root"]) / "outputs"
@@ -204,6 +211,17 @@ def scorer_bundle(old, paths):
         if not torch.equal(getattr(scorer, key).cpu(), expected):
             raise ValueError("six-component normalization drift")
     return scorer
+
+
+def protocol_fusion(p, record, gradients, weights):
+    v2 = p["schema_version"].endswith("v2")
+    joint, fusion = (fuse_training_gradients if v2 else fuse_tensor_gradients)(NAMES, gradients, weights)
+    gates = full_gradient_gates(record, fusion)
+    if v2:
+        gates.pop("only_unique_dominant_component_attenuated")
+        gates["all_six_contributions_positive_and_attenuation_only"] = all(
+            0 < fusion["effective_weights"][n] <= weights[n] for n in NAMES)
+    return joint, fusion, gates
 
 
 def measure(row, waveform, scorer, runtime, worker, output, tag):
@@ -306,8 +324,7 @@ def preflight(run, p, rows, cfg, paths, old, exact, safety_dir):
             print(f"real_backward_preflight={index + 1}/8", flush=True)
     fusions = []
     for record, gradients in zip(measured, saved_gradients):
-        joint, fusion = fuse_tensor_gradients(NAMES, gradients, weights)
-        gates = full_gradient_gates(record, fusion)
+        joint, fusion, gates = protocol_fusion(p, record, gradients, weights)
         fusions.append(dict(case_id=record["source_case_id"], measurement=record, fusion=fusion, gates=gates))
     write_json(run / "outputs/preflight_report.json", dict(rows=fusions, generator_optimizer_steps=0))
     if not all(all(r["gates"].values()) for r in fusions):
@@ -365,8 +382,7 @@ def train(run, p, rows, cfg, paths, old, exact, preflight_dir, safety_dir):
             if not torch.isfinite(y).all() or y.abs().max() > 0.95:
                 raise ValueError("invalid training output before update")
             record, gradients = measure(row, y, scorer, runtime, worker, run / "outputs", f"step{step:06d}")
-            joint, fusion = fuse_tensor_gradients(NAMES, gradients, weights)
-            gates = full_gradient_gates(record, fusion)
+            joint, fusion, gates = protocol_fusion(p, record, gradients, weights)
             if not all(gates.values()):
                 write_json(run / "outputs" / f"failed_step_{step:06d}.json",
                            dict(measurement=record, fusion=fusion, gates=gates))
@@ -492,9 +508,9 @@ def main():
     (run / "checkpoints").mkdir(exist_ok=True)
     old, paths, exact, cfg = context(p)
     rows = dataset(p)
-    safety_dir = load_dependency(args.safety_receipt, "safety") if args.safety_receipt else None
-    preflight_dir = load_dependency(args.preflight_receipt, "preflight") if args.preflight_receipt else None
-    train_dir = load_dependency(args.train_receipt, "train") if args.train_receipt else None
+    safety_dir = load_dependency(args.safety_receipt, "safety", p) if args.safety_receipt else None
+    preflight_dir = load_dependency(args.preflight_receipt, "preflight", p) if args.preflight_receipt else None
+    train_dir = load_dependency(args.train_receipt, "train", p) if args.train_receipt else None
     if args.stage == "safety":
         safety(run, p, rows, cfg, paths)
     elif args.stage == "preflight":
