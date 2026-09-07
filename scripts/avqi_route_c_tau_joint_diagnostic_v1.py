@@ -418,6 +418,21 @@ def target_component_rows(
     return output
 
 
+def baseline_length_certificate(input_samples: int, output_samples: int, hop_size: int) -> dict[str, Any]:
+    """Verify the existing center=True ISTFT length without changing its audio."""
+    if input_samples <= 0 or hop_size <= 0 or output_samples <= 0:
+        raise ValueError("invalid S3_500 length metadata")
+    expected = (input_samples // hop_size) * hop_size
+    if output_samples != expected:
+        raise ValueError("S3_500 output differs from its native centered ISTFT length")
+    return {
+        "input_samples": input_samples, "output_samples": output_samples,
+        "hop_size": hop_size, "native_centered_istft_samples": expected,
+        "tail_samples_not_reconstructed": input_samples - output_samples,
+        "output_padding_or_truncation_applied": False,
+    }
+
+
 def materialize(
     contract: Mapping[str, Any], paths: Mapping[str, Path], output: Path,
     source_dir: Path, device_name: str,
@@ -493,8 +508,9 @@ def materialize(
             enhanced = enhance_waveform(generator, torch.from_numpy(degraded.copy()).to(device), generator_config).detach().cpu().reshape(-1)
             if not bool(torch.isfinite(enhanced).all()) or float(enhanced.abs().max()) >= 1.0:
                 raise ValueError("frozen S3_500 baseline is invalid or clipped")
-            if enhanced.numel() != degraded.size:
-                raise ValueError("frozen S3_500 baseline length differs")
+            row["baseline_length_certificate"] = baseline_length_certificate(
+                int(degraded.size), enhanced.numel(), int(generator_config["stft_cfg"]["hop_size"])
+            )
             row["base"] = write_audio(base_root / f"{row['case_id']}.wav", enhanced.numpy())
             print(f"tau_gradient_base={index}/{len(prepared)}", flush=True)
     write_json(output / "tau_gradient_materialized_manifest.json", {

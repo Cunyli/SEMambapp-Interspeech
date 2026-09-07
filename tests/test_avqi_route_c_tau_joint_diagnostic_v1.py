@@ -20,9 +20,11 @@ from scripts.avqi_route_c_tau_joint_diagnostic_v1 import (
     JOINT_ALLOCATION,
     SOURCE_DECISION,
     aggregate_measurements,
+    baseline_length_certificate,
     binding,
     calibration_inverse_gradient_weights,
     evaluate_fusion,
+    enhance_waveform,
     finalize_case_measurement,
     load_stage,
     receipt,
@@ -196,6 +198,28 @@ def test_float_audio_roundtrip_and_no_overwrite(tmp_path):
     assert bound["subtype"] == "FLOAT"
     with pytest.raises(FileExistsError):
         write_audio(tmp_path / "a.wav", audio)
+
+
+class IdentitySpectrogramGenerator(torch.nn.Module):
+    def forward(self, magnitude, phase):
+        return magnitude, phase, None
+
+
+@pytest.mark.parametrize("samples", [48000, 48037])
+def test_native_generator_istft_length_is_preserved(samples):
+    waveform = 0.1 * torch.sin(torch.arange(samples, dtype=torch.float32) * 0.1)
+    config = {"stft_cfg": {"n_fft": 400, "hop_size": 100, "win_size": 400},
+              "model_cfg": {"compress_factor": 1.0}}
+    result = enhance_waveform(IdentitySpectrogramGenerator(), waveform, config)
+    certificate = baseline_length_certificate(samples, result.numel(), 100)
+    assert certificate["tail_samples_not_reconstructed"] == samples % 100
+    assert certificate["output_padding_or_truncation_applied"] is False
+
+
+@pytest.mark.parametrize("input_samples,output_samples,hop_size", [(48037, 47900, 100), (48037, 48037, 100), (48037, 0, 100)])
+def test_length_certificate_still_rejects_invalid_output(input_samples, output_samples, hop_size):
+    with pytest.raises(ValueError):
+        baseline_length_certificate(input_samples, output_samples, hop_size)
 
 
 def test_receipt_rejects_failed_scope_and_artifact_drift(tmp_path):
