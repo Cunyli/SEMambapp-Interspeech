@@ -672,6 +672,7 @@ def extract_waveform_measurement(
                 expected_highpass_pcm16_sha256=topology_input.topology.get(
                     "highpass_pcm16_sha256"
                 ),
+                authoritative_highpass_pcm16_codes=topology_input.topology.get("highpass_pcm16_codes"),
             )
             peak_certificate = validate_candidate_e_base_peak_certificate(
                 topology_input.topology,

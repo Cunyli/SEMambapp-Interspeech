@@ -155,6 +155,7 @@ class RouteCCandidateESixScorer(RouteCSixActiveScorer):
             expected_highpass_pcm16_sha256=topology.get(
                 "highpass_pcm16_sha256"
             ),
+            authoritative_highpass_pcm16_codes=topology.get("highpass_pcm16_codes"),
         )
         validate_candidate_e_base_peak_certificate(topology, candidate_result)
         raw_shimmer_db = candidate_result.shimmer_db.to(

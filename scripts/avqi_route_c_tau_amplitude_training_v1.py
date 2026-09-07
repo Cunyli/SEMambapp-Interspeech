@@ -23,6 +23,7 @@ import torch.nn.functional as F
 
 from model.avqi_components import AVQI_COMPONENT_NAMES
 from model.avqi_route_c_candidate_e_scorer import load_route_c_candidate_e_six_scorer
+from model.avqi_route_c_candidate_e import exact_numpy_highpass_pcm16
 from model.avqi_route_c_gradient_fusion import fuse_tensor_gradients
 from model.stfts import mag_phase_stft
 from model.waveform_output_safety import attenuate_output_peak
@@ -47,6 +48,7 @@ from utils import load_config
 
 SCHEMA = "avqi-route-c-tau-amplitude-training-v1"
 NAMES = tuple(AVQI_COMPONENT_NAMES)
+EXACT_PCM_WORKER = Path(__file__).with_name("avqi_shimmer_exact_pcm_worker_v1.py")
 
 
 def audio(value):
@@ -213,6 +215,17 @@ def measure(row, waveform, scorer, runtime, worker, output, tag):
               exact_metric_topology=True, highpass_mode=runtime.NUMPY_HIGHPASS_MODE)],
         [values], highpass_mode=runtime.NUMPY_HIGHPASS_MODE)
     topology = topologies[0]
+    if topology.get("highpass_pcm_transport_schema") != "exact-worker-current-pcm16-v1":
+        raise ValueError("current Exact PCM transport is required")
+    waveform_binding = write_audio(output / (tag + "_" + row["case_id"] + "_current.wav"), values)
+    _, legacy_digest = exact_numpy_highpass_pcm16(
+        waveform.detach().to(dtype=torch.float64),
+        peak_scale_required=topology["timing_ms"]["highpass_peak_scaled"])
+    write_json(output / (tag + "_" + row["case_id"] + "_topology.json"),
+               dict(topology=topology, topology_sha256=runtime.topology_sha256(topology),
+                    waveform=waveform_binding, runtime_ms=runtime_ms, staging=staging,
+                    local_recomputation_pcm16_sha256=legacy_digest,
+                    local_recomputation_matches_exact=legacy_digest == topology["highpass_pcm16_sha256"]))
     topo = TopologyAuditInput(case_id, topology, runtime.topology_sha256(topology),
                               waveform_float32_sha256(values))
     case = AuditCase(split=row["split"], speaker_id=row["canonical_speaker_id"],
@@ -223,9 +236,6 @@ def measure(row, waveform, scorer, runtime, worker, output, tag):
                      clean_target=torch.tensor([row["target_components"][n] for n in NAMES]))
     record = extract_waveform_measurement(scorer, case, topo, waveform.detach(), torch.device("cuda"))
     gradients = record.pop("_gradients")
-    write_json(output / (tag + "_" + row["case_id"] + "_topology.json"),
-               dict(topology=topology, topology_sha256=topo.topology_sha256,
-                    runtime_ms=runtime_ms, staging=staging))
     return record, gradients
 
 
@@ -269,7 +279,7 @@ def preflight(run, p, rows, cfg, paths, old, exact, safety_dir):
     runtime = load_runtime_module(paths["candidate_e_runtime_client"])
     measured, saved_gradients = [], []
     with runtime.ExactShimmerTopologyWorker(
-        Path(old["exact"]["python"]).resolve(), paths["candidate_e_worker"],
+        Path(old["exact"]["python"]).resolve(), EXACT_PCM_WORKER,
         Path(old["exact"]["root"]), exact["avqi_code_tree_sha256"],
     ) as worker:
         worker.warmup()
@@ -343,7 +353,7 @@ def train(run, p, rows, cfg, paths, old, exact, preflight_dir, safety_dir):
     checkpoints = [save_checkpoint(run, model, optimizer, 0, p, cfg, initial)]
     steps = []
     with runtime.ExactShimmerTopologyWorker(
-        Path(old["exact"]["python"]).resolve(), paths["candidate_e_worker"],
+        Path(old["exact"]["python"]).resolve(), EXACT_PCM_WORKER,
         Path(old["exact"]["root"]), exact["avqi_code_tree_sha256"],
     ) as worker:
         worker.warmup()

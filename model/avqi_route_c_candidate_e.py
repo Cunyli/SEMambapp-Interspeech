@@ -298,6 +298,7 @@ def exact_metric_branch_ste(
     *,
     peak_scale_required: bool = False,
     expected_highpass_pcm16_sha256: str | None = None,
+    authoritative_highpass_pcm16_codes: list[int] | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Construct the exact-forward metric waveform with an STE Jacobian."""
     if waveform.ndim != 1:
@@ -329,17 +330,26 @@ def exact_metric_branch_ste(
     exact_pcm16_sha256: str | None = None
     peak_scale_support_pass = not peak_scale_required
     if expected_highpass_pcm16_sha256 is not None:
-        exact_pcm16, exact_pcm16_sha256 = exact_numpy_highpass_pcm16(
-            waveform,
-            peak_scale_required=peak_scale_required,
-        )
+        if authoritative_highpass_pcm16_codes is None:
+            exact_pcm16, exact_pcm16_sha256 = exact_numpy_highpass_pcm16(
+                waveform, peak_scale_required=peak_scale_required,
+            )
+        else:
+            codes = np.asarray(authoritative_highpass_pcm16_codes)
+            if (codes.ndim != 1 or codes.size != waveform.numel()
+                    or codes.dtype.kind not in "iu"
+                    or np.any(codes < -32768) or np.any(codes > 32767)):
+                raise ValueError("authoritative high-pass PCM16 codes are invalid")
+            codes = codes.astype("<i4")
+            exact_pcm16_sha256 = hashlib.sha256(codes.tobytes()).hexdigest()
+            exact_pcm16 = torch.from_numpy(codes.astype(np.float64) / 32768).to(waveform)
         if exact_pcm16_sha256 != expected_highpass_pcm16_sha256:
             raise ValueError("Candidate-E exact high-pass PCM16 hash differs")
-        metric_pcm16_full = approximate_pcm16 + (
-            exact_pcm16 - approximate_pcm16
-        ).detach()
+        # Preserve the Exact forward bit-for-bit, with the existing surrogate
+        # Jacobian. Subtract identical tensors before adding the Exact values.
+        metric_pcm16_full = exact_pcm16 + (approximate_pcm16 - approximate_pcm16.detach())
         peak_scale_support_pass = True
-    elif peak_scale_required:
+    elif peak_scale_required or authoritative_highpass_pcm16_codes is not None:
         raise ValueError("Candidate-E scaled base requires an exact PCM16 hash")
     else:
         metric_pcm16_full = approximate_pcm16
@@ -463,6 +473,7 @@ def candidate_e_proxy(
     *,
     peak_scale_required: bool = False,
     expected_highpass_pcm16_sha256: str | None = None,
+    authoritative_highpass_pcm16_codes: list[int] | None = None,
 ) -> CandidateEProxyResult:
     metric, certificate = exact_metric_branch_ste(
         waveform,
@@ -470,6 +481,7 @@ def candidate_e_proxy(
         metric_constant_prefix_samples,
         peak_scale_required=peak_scale_required,
         expected_highpass_pcm16_sha256=expected_highpass_pcm16_sha256,
+        authoritative_highpass_pcm16_codes=authoritative_highpass_pcm16_codes,
     )
     shimmer_db, amplitudes, centers, valid_pair, contributions = (
         fixed_pulse_shimmer_db(metric, pulse_positions)
