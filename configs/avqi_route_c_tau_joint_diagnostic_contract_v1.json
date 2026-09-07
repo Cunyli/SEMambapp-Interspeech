@@ -1,0 +1,553 @@
+{
+  "schema_version": "avqi-route-c-tau-joint-diagnostic-contract-v1",
+  "scope": "historically_opened_TAU_joint_diagnostic_only",
+  "user_scope_authorization": {
+    "date": "2026-09-08",
+    "request": "可以 那你接着跑吧",
+    "context": "User accepted reuse of historically Exact-opened TAU speakers for diagnostic testing after the fresh-capacity NO_GO was explained."
+  },
+  "iteration_compact": {
+    "goal": "Measure six-component gradient compatibility, then the sealed TAU joint efficacy panel only when every prerequisite passes.",
+    "target": "Bidirectional normalized distance to the same speaker and view clean pathological target.",
+    "dataset": "Hash-bound authoritative TAU Elina/Nelly snapshot; known-sex and same-speaker CS/SV metadata eligibility.",
+    "split": "8 gradient patients in 4 calibration and 4 holdout cases; 12 disjoint joint speakers in calibration/final, each 3 patients and 3 healthy controls.",
+    "baseline": "Frozen S3_500 inference on fixed noise and RIR recipes.",
+    "primary_metric": "Unchanged six-gradient gates; subsequent equal-weight and per-component Exact target-gap reduction.",
+    "guardrails": "Original clipping, residual, cosine, full-band pathology, pause, airflow and denoising gates.",
+    "expected_failures": "Unscorable target/topology, gradient norm invalidity, dominance or direction conflict, insufficient material efficacy.",
+    "unacceptable_mistakes": "Selecting from results, replacing failed speakers, fresh-promotion claims, SVD data tests, generator optimizer steps.",
+    "candidate_change": "No component/fusion algorithm changes; explicit TAU data adapter only.",
+    "eval_slices": "Sex and CS/SV on gradients; CS/SV by clean, RIR, SNR20, SNR10 on joint panel.",
+    "known_risk": "Every current TAU speaker has historical Exact records; within-run disjointness does not establish historical independence.",
+    "next_experiment": "Seal metadata selection, materialize targets/bases, refresh detached topology, compute all six real waveform gradients and judge frozen fusion.",
+    "stop_rule": "Any failed prerequisite retains NO_GO and leaves the reserved joint panel unexecuted; no alternate seed or speaker replacement."
+  },
+  "inputs": {
+    "candidate_e_promotion_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27/runs/avqi_route_c_shimmer_db_candidate_e_external_svd_v32r8r2_20260903_01/outputs/completion_receipt_v32r8.json",
+      "sha256": "d256073901fd708cfbad10687c8e281007f98a64b46e902bd8eeb528e06cc84f"
+    },
+    "candidate_e_promotion_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27/runs/avqi_route_c_shimmer_db_candidate_e_external_svd_v32r8r2_20260903_01/outputs/external_svd_report_v32r8.json",
+      "sha256": "4a5b49dbdf3a1324d6b0f1e084d5153469f7c178afae0ded9cefd9060206e632"
+    },
+    "candidate_e_reference_source": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27/scripts/avqi_shimmer_db_candidate_e_proxy_v27.py",
+      "sha256": "e9266444fa1a8a9589471fb1edd08dbec020368e4dc984551eab304f20d4a9cf"
+    },
+    "candidate_e_runtime_client": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27/scripts/avqi_shimmer_exact_topology_runtime.py",
+      "sha256": "28e48fc3de99bb2c7258559f4f58be2760c7804f53a08bab162fff670b36153b"
+    },
+    "candidate_e_runtime_config": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27/configs/avqi_route_c_shimmer_db_candidate_e_external_svd_runtime_v32r8.json",
+      "sha256": "4dec4b018b6cd9f7a5a7f87966cc7f2dde057f152df256f65fc397faefb53b98"
+    },
+    "candidate_e_selector_source": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27/scripts/evaluate_avqi_shimmer_db_topology_family_selector_v18.py",
+      "sha256": "7401b4b80f6dbb546a4a88886c469bb4df6b4681bad9314f1244a046fbb2b69b"
+    },
+    "candidate_e_worker": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27/scripts/avqi_shimmer_exact_topology_worker.py",
+      "sha256": "c78cdb277274a9f46153c80ca5ad8c47536e3c1009cf1b3c2b613aee744d276f"
+    },
+    "cpps_checkpoint": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-cpps-v7/checkpoints/avqi_route_c_cpps_v12_screen_20260823_20/direct_direct_praat_hard_cpps_view_input_v12_estimator.pt",
+      "sha256": "f893783cccf09f3b4fe707e881afdfc889724861a6b86eb0600fb5400534c543"
+    },
+    "cpps_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-cpps-v7/runs/avqi_route_c_cpps_v12_waveform_pilot_20260823_28/outputs/completion_receipt.json",
+      "sha256": "c7c3fd22b7b713c59a1d9c2708289ddf64a723c96714cb5e185e6a4b765e41da"
+    },
+    "cpps_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-cpps-v7/runs/avqi_route_c_cpps_v12_waveform_pilot_20260823_28/outputs/waveform_optimization_report.json",
+      "sha256": "dc4ae219706fb5b23af1ed4e38dfe7a80a8e3ee31daebf0ef1c47ad914dc6dcc"
+    },
+    "exact_authority_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_six_joint_exact_authority_v1_20260903_01/outputs/completion_receipt.json",
+      "sha256": "74fe231c85e9d633e9c19a771199e1903bd57067f4445664cc607df90cfc1e98"
+    },
+    "exact_code_tree_manifest": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_six_joint_exact_authority_v1_20260903_01/outputs/exact_avqi_code_tree_manifest.json",
+      "sha256": "52949816514dc3005870f5e2823787bce44dc379a584eb5f049f395950001f11"
+    },
+    "exact_runtime_manifest": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_six_joint_exact_authority_v1_20260903_01/outputs/exact_runtime_manifest.json",
+      "sha256": "a132e6b93791e8775cd956577140410ed863e8c10e3b564ea72fd1ac93511c9e"
+    },
+    "five_gradient_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-five-component-integration-v1/runs/avqi_route_c_five_component_gradient_audit_v1_20260824_01/outputs/completion_receipt.json",
+      "sha256": "34ad15ea001ffada940b74edf06b4b71ad98a4756d121e4f98361192470f6bc6"
+    },
+    "five_gradient_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-five-component-integration-v1/runs/avqi_route_c_five_component_gradient_audit_v1_20260824_01/outputs/gradient_interference_report.json",
+      "sha256": "b752377dbb14d4f91616b5179457f3246ffa173df5d423c2ee503cc19a519847"
+    },
+    "hnr_checkpoint": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-hnr-v7/checkpoints/avqi_route_c_hnr_v7_screen_20260824_01/direct_direct_praat_hard_hnr_pitch_path_v7_estimator.pt",
+      "sha256": "93f5b122486bcdc54215244fb894ffa3b34d1993fca32011dbf57650467c412c"
+    },
+    "hnr_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-hnr-v7/runs/avqi_route_c_hnr_v7_fresh_panel_20260824_01/outputs/completion_receipt.json",
+      "sha256": "603d4935708907ee6c403ee1b062a3d70f9af7c0b7e9e7b224ef7aa7e7fbf1b7"
+    },
+    "hnr_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-hnr-v7/runs/avqi_route_c_hnr_v7_fresh_panel_20260824_01/outputs/fresh_panel_report.json",
+      "sha256": "67c5d4327ddd33fa45d03ead9028f52031a1b2d0645200af223bcc3053137d7d"
+    },
+    "label_bank": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_component_direct_c_v5_data_20260817_03/outputs/label_bank/exact_component_label_bank_v4.csv",
+      "sha256": "03b8d5e3d0542dbfe60e54723bc89431e8dfd475dcc38284a6058465c5224760"
+    },
+    "shimmer_percent_checkpoint": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/checkpoints/avqi_route_c_shimmer_v6_screen_20260821_01/direct_direct_praat_hard_shimmer_pulse_path_v6_estimator.pt",
+      "sha256": "40b819946abdcb8a4b643fe4238d1bb4d31168a3eb2a6d6c786a61752da629bc"
+    },
+    "shimmer_percent_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_route_c_shimmer_v6_fresh_panel_20260821_02/outputs/completion_receipt.json",
+      "sha256": "0a3a09591099106ccf25226516896ff4f3c81b22d93247901f96c4bb042be963"
+    },
+    "shimmer_percent_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_route_c_shimmer_v6_fresh_panel_20260821_02/outputs/fresh_panel_report.json",
+      "sha256": "f40a8e16c0467c0d52654173a48c1b515eb68c223a2097557dc14eb1999350ac"
+    },
+    "slope_checkpoint": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/checkpoints/avqi_route_c_shimmer_v6_screen_20260821_01/direct_direct_praat_hard_shimmer_pulse_path_v6_estimator.pt",
+      "sha256": "40b819946abdcb8a4b643fe4238d1bb4d31168a3eb2a6d6c786a61752da629bc"
+    },
+    "slope_final_panel_seal": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-ltas-slope-promotion-v1/runs/avqi_route_c_ltas_slope_fresh_panel_v1_20260824_01/outputs/final_panel_seal.json",
+      "sha256": "52a2afff063825e9c68228b5fafc0a9073853fd07deaeb7aee36aa09334b151c"
+    },
+    "slope_final_results": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-ltas-slope-promotion-v1/runs/avqi_route_c_ltas_slope_fresh_panel_v1_20260824_01/outputs/final_results.csv",
+      "sha256": "c4bc55d2074d93d7425a018d92aa00f38a402a1ea2b2394bc2b87ee5ca48ea2a"
+    },
+    "slope_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-ltas-slope-promotion-v1/runs/avqi_route_c_ltas_slope_fresh_panel_v1_20260824_01/outputs/completion_receipt.json",
+      "sha256": "35b5f787df7b4b053a3d502878df5d92938438c1cf9bb6dc494b564b65e3b74e"
+    },
+    "slope_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-ltas-slope-promotion-v1/runs/avqi_route_c_ltas_slope_fresh_panel_v1_20260824_01/outputs/fresh_panel_report.json",
+      "sha256": "7301291f8f4ab3fe0454bce293b346865d81261ce6f4e86a31615dde153e26b0"
+    },
+    "tilt_checkpoint": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/checkpoints/avqi_component_direct_c_v5_screen_20260817_01/direct_direct_praat_hard_v2_estimator.pt",
+      "sha256": "07b69e6722db46467626bd68ffaceb32844908c1a8378ee7e3bdc327fdc81aef"
+    },
+    "tilt_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_direct_waveform_opt_balanced_hnr_tilt_final_20260814_01/outputs/completion_receipt.json",
+      "sha256": "d969e61bab4df7bea9d3f439b36774ad86e07a56bf294481d9224298366fb897"
+    },
+    "tilt_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/avqi_direct_waveform_opt_balanced_hnr_tilt_final_20260814_01/outputs/waveform_optimization_report.json",
+      "sha256": "0fa3cd09638c105fdcc31cd3a9460ffe9bcf85d9083159571750f7802c32678a"
+    },
+    "historical_raw_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_six_component_gradient_raw_candidate_e_v2_20260903_03/outputs/six_gradient_measurement_report.json",
+      "sha256": "ece23eadd03c268b7da223fa7a9e50aac8361d52e0fbf5f1bcdd1aa701266874"
+    },
+    "tau_history_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_tau_history_capacity_audit_v1_20260906T190322Z/outputs/tau_history_capacity_report_v1.json",
+      "sha256": "2e1643d0e385b9c8f15bb84f69b08776bb159cb906b6a590bab976b19c945bf4"
+    },
+    "tau_history_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_tau_history_capacity_audit_v1_20260906T190322Z/outputs/completion_receipt.json",
+      "sha256": "398960476e5d337939dd18323f1bfe7fc75a1410dc6ac1d63172f1db0d7605ad"
+    },
+    "tau_history_ledger": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_tau_history_capacity_audit_v1_20260906T190322Z/outputs/complete_current_tau_speaker_ledger_v1.json",
+      "sha256": "2318941bcf986df7b570a52d94f1bc4e2126985fabf1fe9d811a84ee824c5732"
+    },
+    "readiness_report": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_six_joint_candidate_e_readiness_v4_20260903_01/outputs/candidate_e_component_readiness_report_v4.json",
+      "sha256": "7357bb0fb6b7fd655cfc4ea693473fa76e48b714e87a50eb8ecb95af045821b0"
+    },
+    "readiness_receipt": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_route_c_six_joint_candidate_e_readiness_v4_20260903_01/outputs/completion_receipt_v4.json",
+      "sha256": "18705aba74601b6344013ce207eacf472846071b0c55cdac5c030f43663d105f"
+    },
+    "generator_config": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/runs/tau_s1_sv_threshold_ablation_20260719_01/configs/s_fidelity_m3_stage0500.yaml",
+      "sha256": "5c3f75ecd2b2a9fa9c938509e9ac8917bb19b22fdbdbf07b275c868685360407"
+    },
+    "generator_checkpoint": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech/checkpoints/S3_500/ln_g_00000500.pth",
+      "sha256": "d1ef31ec180b2378fce5a36b5a29ae5a601ed2fa1a26b1b18a81de7941bc6dd9"
+    },
+    "fixed_recipes": {
+      "path": "/scratch/elec/t412-speechcom/Triton - Symptonic/lijie/gap_webdataset_active/splits/hybrid_unise_v1_stream_80_10_10/test/fixed_recipes.jsonl",
+      "sha256": "9f9654dd4e078cb111ee2fae0b039893b6ae61094f35fb328b305250555cc8c6"
+    },
+    "simulation_config": {
+      "path": "/scratch/work/lil14/USE_simulation/configs/phone_room_22050.yaml",
+      "sha256": "0e665b5f3d97ad617cd1dde22a84b1ec5a8089e31b7657c7cb9989363115e276"
+    },
+    "simulation_source": {
+      "path": "/scratch/work/lil14/USE_simulation/simulate_degradation.py",
+      "sha256": "7f74a5727122bf3f8a6dbee297d9f3dd10165cba3bf2312bf2bd8704abc273bb"
+    },
+    "exact_main": {
+      "path": "/scratch/work/lil14/avqi/avqi_code/main.py",
+      "sha256": "b3018da3b41aa17d1382a390f1c2bbf31520a824b82db871d5d67b4417f6bcc6"
+    },
+    "exact_python": {
+      "path": "/scratch/work/lil14/.conda_envs/avqi/bin/python",
+      "sha256": "7833038c61a2148f3a1f7fd6aacd0e6bbd576da9e125c0ac0917a22d0298ce68"
+    },
+    "joint_gate_contract": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/configs/avqi_route_c_six_joint_gate_contract_v1.json",
+      "sha256": "88abd31686ec514ac6b684ae5db80885997c3828fbe35b7adb990c00874cffa0"
+    },
+    "fusion_precedent": {
+      "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/configs/avqi_route_c_six_gradient_fusion_contract_v2.json",
+      "sha256": "58d520e998adc7825f4ed0555734d49a40a3ede01ea202c65997a617c6a27690"
+    }
+  },
+  "source_roots": {
+    "Elina": "/scratch/work/lil14/data/TAU/Elina",
+    "Nelly": "/scratch/work/lil14/data/TAU/Nelly"
+  },
+  "selection": {
+    "salt": "route-c-tau-joint-diagnostic-v1-predeclared-20260908",
+    "seed": 20260908,
+    "gradient_splits": [
+      "surrogate_calibration",
+      "surrogate_holdout"
+    ],
+    "gradient_strata": [
+      "female/cs",
+      "female/sv",
+      "male/cs",
+      "male/sv"
+    ],
+    "joint_allocation": [
+      [
+        "calibration",
+        "patient",
+        "female",
+        2
+      ],
+      [
+        "calibration",
+        "patient",
+        "male",
+        1
+      ],
+      [
+        "calibration",
+        "healthy",
+        "female",
+        1
+      ],
+      [
+        "calibration",
+        "healthy",
+        "male",
+        2
+      ],
+      [
+        "final",
+        "patient",
+        "female",
+        1
+      ],
+      [
+        "final",
+        "patient",
+        "male",
+        2
+      ],
+      [
+        "final",
+        "healthy",
+        "female",
+        2
+      ],
+      [
+        "final",
+        "healthy",
+        "male",
+        1
+      ]
+    ],
+    "order": "gradient split and strata order then joint allocation order; minimum SHA256(salt:role:split:label:sex:view:canonical_speaker_id) among remaining metadata-eligible speakers",
+    "speaker_disjoint_across_all_current_roles": true,
+    "exclude_every_historically_opened_speaker": false,
+    "historical_overlap_must_be_reported": true,
+    "unknown_sex_ineligible": true,
+    "diagnosis_or_severity_used": false,
+    "exact_values_used": false,
+    "target_scorability_used_for_selection": false,
+    "failed_speaker_replacement_allowed": false,
+    "minimum_seconds": {
+      "cs": 3.0,
+      "sv": 1.0
+    }
+  },
+  "materialization": {
+    "sample_rate": 16000,
+    "subtype": "FLOAT",
+    "gradient_segment_samples": 48000,
+    "gradient_recipe_indices": [
+      972,
+      973,
+      974,
+      975,
+      976,
+      977,
+      978,
+      979
+    ],
+    "gradient_snr_db": [
+      20,
+      10,
+      20,
+      10,
+      20,
+      10,
+      20,
+      10
+    ],
+    "joint_conditions": [
+      "clean",
+      "rir_only",
+      "snr20",
+      "snr10"
+    ],
+    "joint_recipe_indices": [
+      900,
+      901,
+      902,
+      903,
+      904,
+      905,
+      906,
+      907,
+      908,
+      909,
+      910,
+      911,
+      912,
+      913,
+      914,
+      915,
+      916,
+      917,
+      918,
+      919,
+      920,
+      921,
+      922,
+      923,
+      924,
+      925,
+      926,
+      927,
+      928,
+      929,
+      930,
+      931,
+      932,
+      933,
+      934,
+      935,
+      936,
+      937,
+      938,
+      939,
+      940,
+      941,
+      942,
+      943,
+      944,
+      945,
+      946,
+      947,
+      948,
+      949,
+      950,
+      951,
+      952,
+      953,
+      954,
+      955,
+      956,
+      957,
+      958,
+      959,
+      960,
+      961,
+      962,
+      963,
+      964,
+      965,
+      966,
+      967,
+      968,
+      969,
+      970,
+      971
+    ],
+    "generator": "S3_500",
+    "generator_mode": "frozen_inference_only",
+    "target": "same_speaker_same_view_raw_resampled_clean_pathological",
+    "target_exact_sealed_before_any_candidate": true,
+    "target_and_base_segment_rule": "Gradient audit uses the first 48000 base samples, zero-padded if shorter; target Exact uses the full clean view as in the frozen gradient precedent. Joint uses full waveforms.",
+    "healthy_loss_enabled": false,
+    "healthy_waveform_step_enabled": false,
+    "final_waveform_highpass": false,
+    "metric_branch_highpass_only": true
+  },
+  "normalization": {
+    "source": "surrogate_train exact-component standard deviation",
+    "target_mean": {
+      "cpps": 9.268698692321777,
+      "hnr": 11.405787467956543,
+      "shimmer_db": 1.1900330781936646,
+      "shimmer_percent": 13.16408920288086,
+      "slope": -22.29303550720215,
+      "tilt": -11.94625186920166
+    },
+    "target_scale": {
+      "cpps": 3.35233211517334,
+      "hnr": 5.120549201965332,
+      "shimmer_db": 0.44207602739334106,
+      "shimmer_percent": 5.322719097137451,
+      "slope": 4.152123928070068,
+      "tilt": 1.5836259126663208
+    }
+  },
+  "fusion_rule": {
+    "schema_version": "avqi-route-c-six-gradient-dominance-capped-fusion-v1",
+    "maximum_weighted_component_norm_share": 0.8,
+    "threshold_source": "unchanged frozen five-component numeric precedent",
+    "cap_scope": "per_case_before_joint_sum",
+    "cap_policy": "attenuate_only_the_unique_dominant_weighted_gradient_to_the_existing_maximum_norm_share",
+    "component_amplification_allowed": false,
+    "joint_normalization": "divide_by_sum_of_calibration_frozen_base_component_weights",
+    "pairwise_negative_cosines": "diagnostic_only",
+    "direction_conflict_policy": "fail_closed_abstain_if_any_component_to_post_cap_joint_cosine_is_negative",
+    "speaker_or_case_identity_used_for_fusion": false,
+    "exact_candidate_outcome_used_for_fusion": false,
+    "learned_fusion_parameters": 0
+  },
+  "gradient_gates": {
+    "minimum_norm_exclusive": 1e-10,
+    "maximum_norm_inclusive": 10000.0,
+    "maximum_weighted_share": 0.8,
+    "minimum_component_to_joint_cosine": 0.0,
+    "maximum_calibration_weighted_median_ratio": 1.000001
+  },
+  "joint_gates": {
+    "schema_version": "avqi-route-c-six-joint-gate-contract-v1",
+    "frozen_before_panel_selection": true,
+    "component_order": [
+      "cpps",
+      "hnr",
+      "shimmer_percent",
+      "shimmer_db",
+      "slope",
+      "tilt"
+    ],
+    "global_alpha_grid": [
+      0.0,
+      1e-06,
+      3e-06,
+      1e-05,
+      3e-05,
+      0.0001,
+      0.0003,
+      0.001,
+      0.003
+    ],
+    "zero_alpha_selectable": false,
+    "selection_split": "calibration",
+    "selection_objective": "maximize_equal_weight_joint_exact_median_normalized_gap_reduction",
+    "selection_tie_break": "smaller_alpha",
+    "final_tuning_permitted": false,
+    "efficacy": {
+      "scope": "patient degraded rows only",
+      "material_normalized_before_gap_strictly_greater_than": 0.02,
+      "material_coverage_fraction_minimum": 0.8,
+      "material_cases_absolute_minimum": 5,
+      "material_cases_per_18_minimum": 15,
+      "exact_improvement_fraction_minimum": 0.8,
+      "median_normalized_gap_reduction_minimum": 0.02,
+      "applies_to_each_component_and_equal_weight_joint": true
+    },
+    "required_slices": {
+      "keys": [
+        "condition=rir_only&view=cs",
+        "condition=rir_only&view=sv",
+        "condition=snr20&view=cs",
+        "condition=snr20&view=sv",
+        "condition=snr10&view=cs",
+        "condition=snr10&view=sv"
+      ],
+      "expected_rows_per_slice": 3,
+      "improvement_fraction_strictly_greater_than": 0.5,
+      "median_normalized_reduction_minimum": 0.0,
+      "zero_coverage_decision": "FAIL"
+    },
+    "waveform_safety": {
+      "residual_rms_db_maximum": -50.0,
+      "cosine_similarity_minimum": 0.99999,
+      "clip_fraction_maximum": 0.0
+    },
+    "full_band_pathology": {
+      "low_frequency_bands_hz": [
+        [
+          20.0,
+          80.0
+        ],
+        [
+          80.0,
+          300.0
+        ]
+      ],
+      "airflow_proxy_frequency_range_hz": [
+        500.0,
+        4000.0
+      ],
+      "low_energy_quantile": 0.25,
+      "pathology_db_median_gap_increase_maximum": 0.5,
+      "pathology_db_worst_gap_increase_maximum": 1.5,
+      "airflow_flatness_median_gap_increase_maximum": 0.05,
+      "airflow_flatness_worst_gap_increase_maximum": 0.1,
+      "pause_f1_median_decrease_maximum": 0.05,
+      "pause_f1_worst_decrease_maximum": 0.15,
+      "guardrail_pass_fraction_minimum": 0.6666666666666666,
+      "emitted_waveform_highpass": false
+    },
+    "denoising": {
+      "metrics": [
+        "snr",
+        "si_sdr"
+      ],
+      "median_change_minimum_db": -0.1,
+      "worst_change_minimum_db": -0.5
+    },
+    "generator_optimizer_steps": 0,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  },
+  "exact": {
+    "python": "/scratch/work/lil14/.conda_envs/avqi/bin/python",
+    "root": "/scratch/work/lil14/avqi",
+    "tree_sha256": "46987b3c447cb579aab4d34e87655938e4aa64e1b28c0e2348c4ea3e48f107f2"
+  },
+  "candidate_e_source": {
+    "root": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-shimmer-db-candidate-e-v27",
+    "commit": "109f398d607bce936a9576c826ff74ce0ea9f636"
+  },
+  "boundaries": {
+    "historical_fresh_no_go_preserved": true,
+    "independent_fresh_validation": false,
+    "scientific_promotion_granted": false,
+    "svd_used_for_new_testing": false,
+    "generator_optimizer_created": false,
+    "generator_optimizer_steps": 0,
+    "formal_generator_training_submitted": false,
+    "authoritative_training_decision": "NO_GO_AVQI_T2_TRAINING"
+  }
+}
