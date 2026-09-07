@@ -54,6 +54,7 @@ from scripts.evaluate_avqi_route_c_six_component_gradients import (
     aggregate_measurements,
     calibration_inverse_gradient_weights,
     extract_case_measurement,
+    extract_waveform_measurement,
     finalize_case_measurement,
     load_topology_inputs,
     load_v19_evidence_manifest,
@@ -588,3 +589,21 @@ def test_readiness_distinguishes_raw_collector_from_frozen_decision() -> None:
     assert requirement["status"] == (
         "present_dev_only_raw_measurement_plus_frozen_code_decision"
     )
+
+@pytest.mark.parametrize("samples", [2207, 50037])
+def test_supplied_waveform_measurement_keeps_entire_topology_bound_audio(tmp_path, samples):
+    time = torch.arange(samples, dtype=torch.float32) / 16000
+    waveform = torch.sin(2 * math.pi * 200 * time) * (0.1 + 0.01 * torch.sin(2 * math.pi * 4 * time))
+    case = AuditCase(
+        split="calibration", speaker_id="TAU:synthetic", sample_id="full-a", sample_group="patient_female",
+        view="cs", condition="rir_only", waveform_path=tmp_path / "not-read.wav",
+        waveform_sha256="a" * 64, clean_target=torch.zeros(6),
+    )
+    topology, topology_hash = _synthetic_topology(waveform, case_id="full-a")
+    topology_input = TopologyAuditInput("full-a", topology, topology_hash, _waveform_sha256(waveform))
+    result = extract_waveform_measurement(ContractCheckingSixScorer(), case, topology_input, waveform, torch.device("cpu"))
+    assert result["segment_samples"] == samples
+    assert all(gradient.shape == (samples,) for gradient in result["_gradients"].values())
+    assert not waveform.requires_grad
+    with pytest.raises(ValueError, match="differs from detached topology"):
+        extract_waveform_measurement(ContractCheckingSixScorer(), case, topology_input, waveform.flip(0), torch.device("cpu"))

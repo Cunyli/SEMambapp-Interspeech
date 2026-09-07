@@ -288,6 +288,12 @@ def fuse_tensor_gradients(
             pairwise[f"{left}__{right}"] = float(
                 torch.dot(canonical[left].reshape(-1), canonical[right].reshape(-1))
             ) / denominator
+            # Match the Gram path's unit-interval roundoff handling. This only
+            # corrects machine rounding at +/-1; negative direction conflicts
+            # and genuinely invalid cosine values still fail their gates.
+            key = f"{left}__{right}"
+            if abs(pairwise[key]) <= 1.0 + 1e-12:
+                pairwise[key] = min(1.0, max(-1.0, pairwise[key]))
     metadata = fusion_from_gram(
         order,
         norms,

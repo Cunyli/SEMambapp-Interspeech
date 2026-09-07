@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 import os
@@ -592,7 +593,31 @@ def extract_case_measurement(
     topology_input: TopologyAuditInput,
     device: torch.device,
 ) -> dict[str, Any]:
-    waveform = load_fixed_segment(case).to(device).requires_grad_(True)
+    return extract_waveform_measurement(
+        scorer, case, topology_input, load_fixed_segment(case), device
+    )
+
+
+def extract_waveform_measurement(
+    scorer: torch.nn.Module,
+    case: AuditCase,
+    topology_input: TopologyAuditInput,
+    source_waveform: torch.Tensor,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Measure the supplied, topology-bound waveform without cropping or padding."""
+    if (
+        source_waveform.ndim != 1 or source_waveform.numel() == 0
+        or source_waveform.dtype != torch.float32
+        or not bool(torch.isfinite(source_waveform).all())
+    ):
+        raise ValueError("six-component source waveform must be finite mono float32")
+    source_hash = hashlib.sha256(
+        source_waveform.detach().cpu().contiguous().numpy().tobytes()
+    ).hexdigest()
+    if source_hash != topology_input.source_waveform_float32_sha256:
+        raise ValueError("six-component waveform differs from detached topology")
+    waveform = source_waveform.detach().clone().to(device).requires_grad_(True)
     raw_target = case.clean_target.to(device).unsqueeze(0)
     prediction = scorer(
         waveform,
@@ -743,7 +768,7 @@ def extract_case_measurement(
         "source_waveform_float32_sha256": (
             topology_input.source_waveform_float32_sha256
         ),
-        "segment_samples": SEGMENT_SAMPLES,
+        "segment_samples": waveform.numel(),
         "topology": {
             "role": "base_current_output",
             "worker_role": topology_input.topology["role"],

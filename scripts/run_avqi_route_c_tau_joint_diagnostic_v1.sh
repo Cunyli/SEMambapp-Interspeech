@@ -44,7 +44,7 @@ echo "event=start stage=$RUN_STAGE job=$SLURM_JOB_ID source=$SOURCE_COMMIT"
 if [[ "$RUN_STAGE" == "focused" || "$RUN_STAGE" == "full" ]]; then
   mkdir "$OUTPUT_DIR"
   if [[ "$RUN_STAGE" == "focused" ]]; then
-    TEST_ARGS=(tests/test_avqi_route_c_tau_joint_diagnostic_v1.py)
+    TEST_ARGS=(tests/test_avqi_route_c_tau_joint_diagnostic_v1.py tests/test_avqi_route_c_tau_joint_panel_v1.py tests/test_avqi_route_c_six_component_gradients.py)
   else
     TEST_ARGS=(tests)
   fi
@@ -57,7 +57,11 @@ else
     : "${DEPENDENCY_RECEIPT_SHA256:?}"
     EXTRA_ARGS=(--dependency-receipt "$DEPENDENCY_RECEIPT" --dependency-receipt-sha256 "$DEPENDENCY_RECEIPT_SHA256")
   fi
-  COMMAND=("$RUNTIME_PYTHON" -m scripts.avqi_route_c_tau_joint_diagnostic_v1
+  ENTRYPOINT=scripts.avqi_route_c_tau_joint_diagnostic_v1
+  if [[ "$RUN_STAGE" == joint_* ]]; then
+    ENTRYPOINT=scripts.avqi_route_c_tau_joint_panel_v1
+  fi
+  COMMAND=("$RUNTIME_PYTHON" -m "$ENTRYPOINT"
     --stage "$RUN_STAGE" --contract "$SOURCE_ROOT/configs/avqi_route_c_tau_joint_diagnostic_contract_v1.json"
     --contract-sha256 "$CONTRACT_SHA256" --source-commit "$SOURCE_COMMIT"
     --output-dir "$OUTPUT_DIR" --device "${RUN_DEVICE:-cuda}" "${EXTRA_ARGS[@]}")
