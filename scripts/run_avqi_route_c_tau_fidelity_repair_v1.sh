@@ -16,6 +16,29 @@ module load gcc/13.3.0
 RUNTIME_PYTHON=/scratch/work/lil14/.conda_envs/semambapp/bin/python
 export PYTHONPATH="$SOURCE_ROOT" PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+if [[ "$RUN_STAGE" == train ]]; then
+  "$RUNTIME_PYTHON" - "$RUN_ROOT" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+import torch
+
+if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+    raise ValueError("training requires exactly one allocated GPU")
+properties = torch.cuda.get_device_properties(0)
+minimum_gib = 30 if os.environ.get("RUN_ARM") == "aligned_joint" else 0
+record = dict(name=properties.name, total_memory_bytes=properties.total_memory,
+              required_minimum_gib=minimum_gib, cuda_version=torch.version.cuda,
+              torch_version=torch.__version__,
+              matmul_allow_tf32=torch.backends.cuda.matmul.allow_tf32,
+              cudnn_allow_tf32=torch.backends.cudnn.allow_tf32)
+(Path(sys.argv[1]) / "inputs/gpu_environment.json").write_text(json.dumps(record, indent=2) + "\n")
+if properties.total_memory < minimum_gib * 1024 ** 3:
+    raise ValueError("six-component CPPS training requires a 32 GB class GPU; no optimizer has started")
+PY
+fi
 if [[ "$RUN_STAGE" == full ]]; then
   mkdir "$RUN_ROOT/outputs"
   COMMAND=("$RUNTIME_PYTHON" -m pytest -q tests --junitxml="$RUN_ROOT/outputs/pytest.xml")
