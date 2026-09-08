@@ -5,9 +5,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from dataloaders.legacy_online_degradation import _target_audio_for_selected_degradations
 from scripts.avqi_route_c_tau_amplitude_training_v1 import binding, fidelity_loss
 from scripts.avqi_route_c_tau_fidelity_repair_v1 import (
     fidelity_for_arm, fixed_input_lag, load_alignment, paired_metrics,
+    RIR_REFERENCE, shifted_dry_reference,
 )
 
 
@@ -89,3 +91,38 @@ def test_fixed_alignment_rejects_tampering_and_input_swap(tmp_path):
     with pytest.raises(ValueError, match="different waveform"):
         load_alignment(path, binding(path)["sha256"], p,
                        [dict(rows[0], degraded={"sha256": "c"})])
+
+
+@pytest.mark.parametrize("lag", [0, 79, 715])
+def test_physical_rir_reference_matches_canonical_pretraining_target(lag):
+    target = waveform()
+    rir = torch.zeros(900)
+    rir[lag] = -1.0  # Delay follows absolute RIR peak; target polarity stays intact.
+    expected = _target_audio_for_selected_degradations(
+        target.numpy(), rir.numpy(), ["reverb", "noise"], target_type="shifted_anechoic")
+    actual = shifted_dry_reference(target, lag)
+    assert torch.equal(actual, torch.from_numpy(expected))
+    p = protocol()
+    p["alignment"]["method"] = RIR_REFERENCE
+    y = actual.clone().requires_grad_()
+    loss, terms = fidelity_for_arm(y, target, lag, CFG, p, "aligned_fidelity")
+    assert float(loss) == 0 and terms["fidelity_samples"] == y.numel()
+    loss.backward()
+    assert torch.isfinite(y.grad).all()
+
+
+def test_physical_reference_penalizes_noise_before_speech_arrival():
+    target = waveform()
+    y = shifted_dry_reference(target, 200).clone()
+    y[:200] = 0.04
+    y.requires_grad_()
+    p = protocol()
+    p["alignment"]["method"] = RIR_REFERENCE
+    loss, _ = fidelity_for_arm(y, target, 200, CFG, p, "aligned_fidelity")
+    loss.backward()
+    assert float(loss) > 0 and y.grad[:200].abs().sum() > 0
+
+
+def test_physical_reference_rejects_entirely_truncated_target():
+    with pytest.raises(ValueError, match="nonempty"):
+        shifted_dry_reference(waveform(), 8192)

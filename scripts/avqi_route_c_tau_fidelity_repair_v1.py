@@ -2,23 +2,32 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
+import copy
 import json
 import os
 from pathlib import Path
+import random
 import statistics
 import subprocess
+import sys
 import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+import yaml
 
+from dataloaders.legacy_online_degradation import _rir_direct_path_delay
 from model.sv_guardrail_v2 import align_waveform_pair, best_normalized_cross_correlation_lag
 from scripts import avqi_route_c_tau_amplitude_training_v1 as prior
+from scripts.evaluate_avqi_shimmer_fresh_panel import read_fixed_recipes, recipe_wds_row
+from scripts.prepare_avqi_component_expanded_data import WdsReader, crop_or_tile, match_length, stable_seed
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "avqi-route-c-tau-fidelity-repair-v1"
+RIR_REFERENCE = "rir_argmax_abs_shifted_anechoic_full_reference"
 
 
 def fixed_input_lag(target: torch.Tensor, degraded: torch.Tensor, maximum_lag: int = 1600) -> int:
@@ -32,10 +41,26 @@ def fixed_input_lag(target: torch.Tensor, degraded: torch.Tensor, maximum_lag: i
     return lag
 
 
+def shifted_dry_reference(target: torch.Tensor, lag: int) -> torch.Tensor:
+    """Match the original shifted-anechoic target, including its zero prefix."""
+    if target.ndim != 1 or not 0 <= lag < target.numel():
+        raise ValueError("RIR delay must preserve a nonempty mono reference")
+    return F.pad(target, (lag, 0))[:target.numel()] if lag else target
+
+
+def reference_pair(target: torch.Tensor, estimate: torch.Tensor, lag: int,
+                   method: str) -> tuple[torch.Tensor, torch.Tensor]:
+    if method == RIR_REFERENCE:
+        reference = shifted_dry_reference(target, lag)
+        n = min(reference.numel(), estimate.numel())
+        return reference[:n], estimate[:n]
+    return align_waveform_pair(target, estimate, lag)
+
+
 def fidelity_for_arm(y: torch.Tensor, target: torch.Tensor, lag: int, cfg: dict,
                      protocol: dict, arm: str):
     effective_lag = lag if protocol["arms"][arm]["alignment"] else 0
-    aligned_target, aligned_y = align_waveform_pair(target, y, effective_lag)
+    aligned_target, aligned_y = reference_pair(target, y, effective_lag, protocol["alignment"]["method"])
     loss_protocol = {"loss": {
         "time_l1_weight": protocol["training"]["time_l1_weight"],
         "compressed_magnitude_mse_weight": protocol["training"]["compressed_magnitude_mse_weight"],
@@ -45,11 +70,11 @@ def fidelity_for_arm(y: torch.Tensor, target: torch.Tensor, lag: int, cfg: dict,
                       fidelity_samples=aligned_y.numel())
 
 
-def paired_metrics(target, before, after, lag):
+def paired_metrics(target, before, after, lag, method="input_correlation"):
     n = min(target.numel(), before.numel(), after.numel())
     target, before, after = target[:n], before[:n], after[:n]
-    aligned_target, aligned_before = align_waveform_pair(target, before, lag)
-    _, aligned_after = align_waveform_pair(target, after, lag)
+    aligned_target, aligned_before = reference_pair(target, before, lag, method)
+    _, aligned_after = reference_pair(target, after, lag, method)
     relative_gain = float(torch.dot(before.double(), after.double()) / before.double().square().sum())
     denominator = aligned_target.double().square().sum().clamp_min(1e-12)
     coherent_before = float(torch.dot(aligned_target.double(), aligned_before.double()) / denominator)
@@ -100,18 +125,71 @@ def receipt(run, stage, **extra):
     prior.write_json(run / "outputs/completion_receipt.json", result)
 
 
+def load_frozen_simulator(contract):
+    source = prior.verified(contract["inputs"]["simulation_source"])
+    sys.path.insert(0, str(source.parent))
+    # This optional simulator and its audio dependencies exist only on Triton;
+    # keep local unit tests independent from that external installation.
+    from simulate_degradation import apply_degradation_with_wind
+
+    if Path(apply_degradation_with_wind.__code__.co_filename).resolve() != source.resolve():
+        raise ValueError("simulator resolved outside the verified source")
+    config = yaml.safe_load(prior.verified(contract["inputs"]["simulation_config"]).read_text())
+    config["stft_cfg"]["sampling_rate"] = 16000
+    return apply_degradation_with_wind, config
+
+
 def freeze_alignment(run, protocol, rows, baseline):
     entries, measurements = [], []
-    for row in rows:
-        target, degraded = prior.audio(row["target"]), prior.audio(row["degraded"])
-        lag = fixed_input_lag(target, degraded, protocol["alignment"]["maximum_lag_samples"])
-        entries.append(dict(case_id=row["case_id"], role=row["training_role"],
-                            target=row["target"], degraded=row["degraded"],
-                            lag_samples=lag, lag_ms=lag / 16, candidate_used_for_lag=False))
-        if row["training_role"] != "evaluation":
-            before = prior.audio(baseline[row["case_id"]])
-            measurements.append(dict(case_id=row["case_id"], role=row["training_role"],
-                                     metrics=paired_metrics(target, before, before, lag)))
+    method = protocol["alignment"]["method"]
+    reader_context = nullcontext(None)
+    recipes = None
+    simulator, simulation_config = None, None
+    if method == RIR_REFERENCE:
+        old_protocol = prior.read_json(ROOT / protocol["previous_protocol"])
+        contract = prior.read_json(prior.verified(old_protocol["historical_contract"]))
+        recipes = read_fixed_recipes(prior.verified(contract["inputs"]["fixed_recipes"]))
+        simulator, simulation_config = load_frozen_simulator(contract)
+        reader_context = closing(WdsReader())
+    with reader_context as reader:
+        for row in rows:
+            target, degraded = prior.audio(row["target"]), prior.audio(row["degraded"])
+            rir_evidence = None
+            if method == RIR_REFERENCE:
+                lag = 0
+                if row["condition"] != "clean":
+                    recipe = recipes[row["recipe_index"]]
+                    if recipe["uid"] != row["recipe_uid"] or recipe["target_sample_rate"] != 16000:
+                        raise ValueError("RIR recipe binding differs")
+                    rir = reader.read(recipe_wds_row(recipe, "rir"))
+                    lag = _rir_direct_path_delay(rir, mode="argmax_abs")
+                    rir_evidence = dict(recipe_uid=recipe["uid"], source=recipe["rir"],
+                        float32_sha256=prior.waveform_float32_sha256(rir.reshape(-1)),
+                        samples=int(rir.size), peak_value=float(rir.reshape(-1)[lag]))
+                    if row["training_role"] != "evaluation":
+                        seed = stable_seed(contract["selection"]["seed"], contract["selection"]["salt"],
+                                           row["case_id"], recipe["uid"])
+                        noise, start = crop_or_tile(reader.read(recipe_wds_row(recipe, "noise")),
+                                                   target.numel(), random.Random(seed))
+                        returned_clean, rebuilt = simulator(copy.deepcopy(simulation_config),
+                            target.numpy()[None], noise, rir, None, {"snr": row["snr_db"]},
+                            ["reverb", "noise"], seed=seed)
+                        rebuilt = match_length(rebuilt, target.numel())[0]
+                        np.testing.assert_array_equal(returned_clean[0], target.numpy())
+                        np.testing.assert_allclose(rebuilt, degraded.numpy(), rtol=1e-5, atol=1e-7)
+                        rir_evidence["degraded_replay_max_sample_error"] = float(np.max(np.abs(rebuilt - degraded.numpy())))
+                        rir_evidence["noise_start_sample"] = start
+                shifted_dry_reference(target, lag)  # Validate physical reference support.
+            else:
+                lag = fixed_input_lag(target, degraded, protocol["alignment"]["maximum_lag_samples"])
+            entries.append(dict(case_id=row["case_id"], role=row["training_role"],
+                                target=row["target"], degraded=row["degraded"],
+                                lag_samples=lag, lag_ms=lag / 16, candidate_used_for_lag=False,
+                                rir_evidence=rir_evidence))
+            if row["training_role"] != "evaluation":
+                before = prior.audio(baseline[row["case_id"]])
+                measurements.append(dict(case_id=row["case_id"], role=row["training_role"],
+                                         metrics=paired_metrics(target, before, before, lag, method)))
     prior.write_json(run / "outputs/fixed_alignment.json", dict(
         schema_version=SCHEMA, alignment_rule=protocol["alignment"], rows=entries,
         source_safety_report_sha256=protocol["safety_report_sha256"],
@@ -138,7 +216,7 @@ def load_alignment(path, expected_sha256, protocol, rows):
     return {key: value["lag_samples"] for key, value in entries.items()}
 
 
-def evaluate_development(run, model, rows, baseline, lags, cfg, device):
+def evaluate_development(run, model, rows, baseline, lags, cfg, device, protocol):
     model.eval()
     measured = []
     (run / "outputs/after").mkdir()
@@ -153,7 +231,8 @@ def evaluate_development(run, model, rows, baseline, lags, cfg, device):
         measured.append(dict(case_id=row["case_id"], role=row["training_role"],
                              before=baseline[row["case_id"]], after=after,
                              metrics=paired_metrics(prior.audio(row["target"]),
-                                      prior.audio(baseline[row["case_id"]]), y, lags[row["case_id"]])))
+                                      prior.audio(baseline[row["case_id"]]), y, lags[row["case_id"]],
+                                      protocol["alignment"]["method"])))
     result = dict(rows=measured, summaries=summaries(measured), evaluation_reserve_opened=False,
                   gain_matching_used=False, lag_sealed_before_training=True)
     prior.write_json(run / "outputs/development_report.json", result)
@@ -230,7 +309,7 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
     prior.write_json(run / "outputs/training_report.json", dict(
         arm=arm, optimizer_steps=t["maximum_optimizer_steps"], heldout_optimizer_steps=0,
         checkpoints=checkpoints, delta_from_initial=delta, checkpoint_reload_exact=True))
-    result = evaluate_development(run, restored, rows, baseline, lags, cfg, device)
+    result = evaluate_development(run, restored, rows, baseline, lags, cfg, device, protocol)
     receipt(run, "train", arm=arm, generator_optimizer_steps=t["maximum_optimizer_steps"],
             heldout_optimizer_steps=0, evaluation_reserve_opened=False)
     print(json.dumps(result["summaries"], allow_nan=False), flush=True)
@@ -248,7 +327,7 @@ def main():
     if not os.environ.get("SLURM_JOB_ID"):
         raise ValueError("Slurm compute node required")
     protocol = prior.read_json(args.protocol)
-    if protocol["schema_version"] != SCHEMA or protocol["scientific_promotion"] is not False:
+    if protocol["schema_version"] not in (SCHEMA, SCHEMA.replace("v1", "v2")) or protocol["scientific_promotion"] is not False:
         raise ValueError("repair protocol differs")
     if prior.binding(args.protocol)["sha256"] != os.environ["PROTOCOL_SHA256"]:
         raise ValueError("repair protocol hash differs")
