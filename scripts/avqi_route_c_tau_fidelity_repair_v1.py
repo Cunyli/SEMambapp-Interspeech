@@ -19,6 +19,9 @@ import torch.nn.functional as F
 import yaml
 
 from dataloaders.legacy_online_degradation import _rir_direct_path_delay
+from model.avqi_training_reference import (
+    five_component_clean_prediction, training_row_with_same_formula_reference,
+)
 from model.fidelity_gradient_budget import bound_auxiliary_parameter_gradients
 from model.sv_guardrail_v2 import align_waveform_pair, best_normalized_cross_correlation_lag
 from scripts import avqi_route_c_tau_amplitude_training_v1 as prior
@@ -250,6 +253,7 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
     optimizer = torch.optim.AdamW(model.parameters(), lr=t["learning_rate"], weight_decay=0)
     use_six = protocol["arms"][arm]["six_component_fusion"]
     scorer, runtime, weights = None, None, None
+    proxy_rows = {}
     worker_context = nullcontext(None)
     if use_six:
         scorer = prior.scorer_bundle(old, paths)
@@ -259,6 +263,18 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
         worker_context = runtime.ExactShimmerTopologyWorker(
             Path(old["exact"]["python"]).resolve(), prior.EXACT_PCM_WORKER,
             Path(old["exact"]["root"]), exact["avqi_code_tree_sha256"])
+        if protocol["arms"][arm].get("same_formula_clean_reference", False):
+            references = []
+            for row in train_rows:
+                clean = five_component_clean_prediction(scorer, prior.audio(row["target"]), row["view"])
+                loss_row = training_row_with_same_formula_reference(row, clean)
+                proxy_rows[row["case_id"]] = loss_row
+                references.append(dict(case_id=row["case_id"], role="train", waveform=row["target"],
+                    clean_proxy=clean, loss_target_components=loss_row["target_components"],
+                    exact_target_components=row["target_components"]))
+            prior.write_json(run / "outputs/frozen_proxy_references.json", dict(rows=references,
+                sealed_before_optimizer_step=True, candidate_outcomes_used_for_references=False,
+                exact_evaluation_targets_changed=False, calibration_weights_changed=False))
     checkpoints = [prior.save_checkpoint(run, model, optimizer, 0, protocol, cfg, initial)]
     with worker_context as worker:
         if use_six:
@@ -276,9 +292,11 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
                                                lags[row["case_id"]], cfg, protocol, arm)
             fidelity_gradient = torch.autograd.grad(fidelity, y, retain_graph=True)[0]
             fusion = None
+            record = None
             auxiliary_balance = None
             if use_six:
-                record, gradients = prior.measure(row, y, scorer, runtime, worker,
+                loss_row = proxy_rows.get(row["case_id"], row)
+                record, gradients = prior.measure(loss_row, y, scorer, runtime, worker,
                                                   run / "outputs", f"step{step:06d}")
                 joint, fusion, gates = prior.protocol_fusion(old_protocol, record, gradients, weights)
                 if not all(gates.values()):
@@ -302,6 +320,8 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
             optimizer.step()
             log = dict(step=step, case_id=row["case_id"], role="train", arm=arm,
                        fidelity=terms, fidelity_waveform_gradient_norm=float(fidelity_gradient.double().norm()),
+                       component_measurements=(record["components"] if record is not None else None),
+                       gradient_target_source=(proxy_rows.get(row["case_id"], {}).get("gradient_target_source", "exact_clean_target")),
                        fusion=fusion, auxiliary_balance=auxiliary_balance, parameter_gradient=parameter_gradient,
                        output_peak=float(y.detach().abs().max()), seconds=time.monotonic() - started)
             with (run / "outputs/training_steps.jsonl").open("a") as handle:
@@ -332,14 +352,14 @@ def main():
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--stage", choices=("alignment", "train"), required=True)
-    parser.add_argument("--arm", choices=("unaligned_fidelity", "aligned_fidelity", "aligned_joint", "aligned_joint_bounded"))
+    parser.add_argument("--arm", choices=("unaligned_fidelity", "aligned_fidelity", "aligned_joint", "aligned_joint_bounded", "aligned_joint_proxy_reference"))
     parser.add_argument("--alignment", type=Path)
     parser.add_argument("--alignment-sha256")
     args = parser.parse_args()
     if not os.environ.get("SLURM_JOB_ID"):
         raise ValueError("Slurm compute node required")
     protocol = prior.read_json(args.protocol)
-    if protocol["schema_version"] not in tuple(SCHEMA.replace("v1", v) for v in ("v1", "v2", "v3")) or protocol["scientific_promotion"] is not False:
+    if protocol["schema_version"] not in tuple(SCHEMA.replace("v1", v) for v in ("v1", "v2", "v3", "v4")) or protocol["scientific_promotion"] is not False:
         raise ValueError("repair protocol differs")
     if prior.binding(args.protocol)["sha256"] != os.environ["PROTOCOL_SHA256"]:
         raise ValueError("repair protocol hash differs")

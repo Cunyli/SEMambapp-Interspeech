@@ -1,0 +1,39 @@
+{
+  "protocol": {
+    "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/configs/avqi_route_c_tau_fidelity_repair_v3.json",
+    "sha256": "aca33b85f700de578ae01502c26c6289dbb0cdd79740f4fb13c0c2c896fcdeea"
+  },
+  "alignment": {
+    "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_tau_fidelity_repair_v2_alignment_20260908T173811Z/outputs/fixed_alignment.json",
+    "sha256": "785c3cc0b1c2f8d323ca2b7ddf163266aab0cb85fbf34472c781e9d25c53724b"
+  },
+  "development_report": {
+    "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_tau_fidelity_repair_v3_train_aligned_joint_bounded_20260908T182310Z/outputs/development_report.json",
+    "sha256": "0344968a2778fac2bc8f23099f8593760da60328274cb8ec357b498dd840a052"
+  },
+  "exact_audit": {
+    "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_tau_fidelity_repair_exact_bounded_20260908T183248Z/outputs/development_exact_audit.json",
+    "sha256": "80aeff9cbe88b418aa79c143c03623cda8ef0c047e748c7f4853b1cc73b62ebd"
+  },
+  "iteration": {
+    "goal": "Diagnose remaining SI-SDR and six Exact component median error regressions before another training repair.",
+    "authorization": "User requests continuing SI-SDR and six-component median error repair.",
+    "target": "The same patient clean pathological waveform and component values.",
+    "split": "Existing four train and four development-validation TAU rows only; 96 evaluation reserve rows excluded.",
+    "baseline": "Hash-bound S3_500 baseline versus already completed bounded joint step 128.",
+    "hypotheses": [
+      "SI-SDR regression can be decomposed into projection signal and residual energy; weak negative correlation may explain conflict with fixed-reference SNR.",
+      "Proxy and Exact may disagree about which side of target an output is on or which way the trajectory improved.",
+      "Waveform fusion descent can be lost after model propagation, fidelity addition and optimizer updates; cumulative displacement diagnostic is only a clue."
+    ],
+    "primary_metrics": [
+      "signed correlation and projection/residual energies",
+      "each-component proxy versus Exact target error and change"
+    ],
+    "guardrails": "No optimizer, new generator inference, new dataset or outcomes on reserve; no waveform modification, polarity/gain/lag selection or metric redefinition.",
+    "failure_modes": "Zero-gradient exact targets require forward-only clean identity scoring; CPPS requires 32 GB GPU; current PCM topology must be bound.",
+    "unacceptable_mistakes": "Counting diagnostic geometry as repaired SI-SDR, treating net trajectory derivatives as per-step proof, hiding individual medians with aggregate error.",
+    "next_experiment": "Freeze 24 existing waveform bindings then replay proxy/Exact comparisons and geometry. Make a training decision only after this audit.",
+    "rollback": "Versioned diagnosis leaves every previous run and model intact."
+  }
+}
