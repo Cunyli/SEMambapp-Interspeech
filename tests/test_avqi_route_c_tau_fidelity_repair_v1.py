@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from dataloaders.legacy_online_degradation import _target_audio_for_selected_degradations
 from scripts.avqi_route_c_tau_amplitude_training_v1 import binding, fidelity_loss
 from scripts.avqi_route_c_tau_fidelity_repair_v1 import (
-    fidelity_for_arm, fixed_input_lag, load_alignment, paired_metrics,
+    configure_training_scope, fidelity_for_arm, fixed_input_lag, load_alignment, paired_metrics,
     RIR_REFERENCE, shifted_dry_reference,
 )
 
@@ -126,3 +126,31 @@ def test_physical_reference_penalizes_noise_before_speech_arrival():
 def test_physical_reference_rejects_entirely_truncated_target():
     with pytest.raises(ValueError, match="nonempty"):
         shifted_dry_reference(waveform(), 8192)
+
+
+def test_mask_only_training_keeps_shared_state_and_phase_fixed():
+    torch.manual_seed(11)
+    model = torch.nn.Module()
+    model.shared = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.BatchNorm1d(4))
+    model.phase_decoder = torch.nn.Linear(4, 4)
+    model.mask_decoder = torch.nn.Linear(4, 4)
+    configure_training_scope(model, "mask_decoder_only")
+    initial = {name: value.clone() for name, value in model.state_dict().items()}
+    x = torch.randn(3, 4)
+    phase_before = model.phase_decoder(model.shared(x)).detach().clone()
+    magnitude_before = model.mask_decoder(model.shared(x)).detach().clone()
+    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=.01)
+    model.mask_decoder(model.shared(x)).square().sum().backward()
+    optimizer.step()
+    assert torch.equal(model.phase_decoder(model.shared(x)), phase_before)
+    assert not torch.equal(model.mask_decoder(model.shared(x)), magnitude_before)
+    for name, value in model.state_dict().items():
+        if not name.startswith("mask_decoder."):
+            assert torch.equal(value, initial[name])
+    configure_training_scope(model, "all_parameters")
+    assert model.training and all(p.requires_grad for p in model.parameters())
+
+
+def test_unknown_training_scope_abstains():
+    with pytest.raises(ValueError, match="unknown"):
+        configure_training_scope(torch.nn.Linear(2, 2), "phase_sometimes")

@@ -25,6 +25,7 @@ from model.avqi_training_reference import (
 from model.fidelity_gradient_budget import bound_auxiliary_parameter_gradients
 from model.sv_guardrail_v2 import align_waveform_pair, best_normalized_cross_correlation_lag
 from scripts import avqi_route_c_tau_amplitude_training_v1 as prior
+from scripts.evaluate_avqi_component_backprop import normalized_stft_input
 from scripts.evaluate_avqi_shimmer_fresh_panel import read_fixed_recipes, recipe_wds_row
 from scripts.prepare_avqi_component_expanded_data import WdsReader, crop_or_tile, match_length, stable_seed
 
@@ -32,6 +33,27 @@ from scripts.prepare_avqi_component_expanded_data import WdsReader, crop_or_tile
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "avqi-route-c-tau-fidelity-repair-v1"
 RIR_REFERENCE = "rir_argmax_abs_shifted_anechoic_full_reference"
+
+
+def configure_training_scope(model, scope):
+    if scope == "all_parameters":
+        model.requires_grad_(True).train()
+    elif scope == "mask_decoder_only":
+        model.requires_grad_(False).eval()
+        model.mask_decoder.requires_grad_(True).train()
+    else:
+        raise ValueError("unknown training parameter scope")
+
+
+def development_phases(model, rows, cfg, device):
+    result = {}
+    with torch.no_grad():
+        for row in rows:
+            if row["training_role"] == "evaluation":
+                continue
+            magnitude, phase, _ = normalized_stft_input(prior.audio(row["degraded"]).to(device), cfg)
+            result[row["case_id"]] = model(magnitude, phase)[1].detach().cpu().clone()
+    return result
 
 
 def fixed_input_lag(target: torch.Tensor, degraded: torch.Tensor, maximum_lag: int = 1600) -> int:
@@ -248,6 +270,9 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
     train_rows = [r for r in rows if r["training_role"] == "train"]
     prior.set_model_seed(protocol["training"]["seed"])
     model = prior.load_generator(cfg, paths["generator_checkpoint"], device).train()
+    scope = protocol["arms"][arm].get("trainable_scope", "all_parameters")
+    configure_training_scope(model, scope)
+    initial_phases = development_phases(model, rows, cfg, device) if scope == "mask_decoder_only" else None
     initial = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     t = protocol["training"]
     optimizer = torch.optim.AdamW(model.parameters(), lr=t["learning_rate"], weight_decay=0)
@@ -306,7 +331,7 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
                 if ratio is None:
                     torch.autograd.backward((y, fidelity), (joint.to(y), None))
                 else:
-                    parameters = tuple(model.parameters())
+                    parameters = tuple(p for p in model.parameters() if p.requires_grad)
                     primary = torch.autograd.grad(fidelity, parameters, retain_graph=True)
                     auxiliary = torch.autograd.grad(y, parameters, grad_outputs=joint.to(y))
                     combined, auxiliary_balance = bound_auxiliary_parameter_gradients(primary, auxiliary, ratio)
@@ -338,9 +363,28 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
     delta = prior.parameter_delta(model, initial)
     if delta["changed_tensors"] == 0:
         raise ValueError("optimizer did not change the generator")
+    if initial_phases is not None:
+        frozen_changes = [name for name, value in restored.state_dict().items()
+                          if not name.startswith("mask_decoder.") and not torch.equal(value.cpu(), initial[name])]
+        if frozen_changes:
+            raise ValueError("frozen shared or phase state changed: " + str(frozen_changes))
+        final_phases = development_phases(restored, rows, cfg, device)
+        phase_rows = []
+        for case_id, before_phase in initial_phases.items():
+            after_phase = final_phases[case_id]
+            error = float((after_phase - before_phase).abs().max())
+            if error > 1e-6:
+                raise ValueError("frozen model phase changed on development input")
+            phase_rows.append(dict(case_id=case_id, maximum_absolute_phase_error=error,
+                before_sha256=prior.waveform_float32_sha256(before_phase.reshape(-1).numpy()),
+                after_sha256=prior.waveform_float32_sha256(after_phase.reshape(-1).numpy())))
+        prior.write_json(run / "outputs/phase_preservation.json", dict(rows=phase_rows,
+            frozen_state_unchanged=True, trainable_scope=scope, teacher_or_second_model_required=False,
+            applies_to="generator predicted phase; emitted waveform STFT phase can differ after overlap-add"))
     prior.write_json(run / "outputs/training_report.json", dict(
         arm=arm, optimizer_steps=t["maximum_optimizer_steps"], heldout_optimizer_steps=0,
-        checkpoints=checkpoints, delta_from_initial=delta, checkpoint_reload_exact=True))
+        checkpoints=checkpoints, delta_from_initial=delta, checkpoint_reload_exact=True,
+        trainable_scope=scope, trainable_parameter_names=[name for name, p in model.named_parameters() if p.requires_grad]))
     result = evaluate_development(run, restored, rows, baseline, lags, cfg, device, protocol)
     receipt(run, "train", arm=arm, generator_optimizer_steps=t["maximum_optimizer_steps"],
             heldout_optimizer_steps=0, evaluation_reserve_opened=False)
@@ -352,14 +396,14 @@ def main():
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--stage", choices=("alignment", "train"), required=True)
-    parser.add_argument("--arm", choices=("unaligned_fidelity", "aligned_fidelity", "aligned_joint", "aligned_joint_bounded", "aligned_joint_proxy_reference"))
+    parser.add_argument("--arm", choices=("unaligned_fidelity", "aligned_fidelity", "aligned_joint", "aligned_joint_bounded", "aligned_joint_proxy_reference", "aligned_joint_frozen_phase"))
     parser.add_argument("--alignment", type=Path)
     parser.add_argument("--alignment-sha256")
     args = parser.parse_args()
     if not os.environ.get("SLURM_JOB_ID"):
         raise ValueError("Slurm compute node required")
     protocol = prior.read_json(args.protocol)
-    if protocol["schema_version"] not in tuple(SCHEMA.replace("v1", v) for v in ("v1", "v2", "v3", "v4")) or protocol["scientific_promotion"] is not False:
+    if protocol["schema_version"] not in tuple(SCHEMA.replace("v1", v) for v in ("v1", "v2", "v3", "v4", "v5")) or protocol["scientific_promotion"] is not False:
         raise ValueError("repair protocol differs")
     if prior.binding(args.protocol)["sha256"] != os.environ["PROTOCOL_SHA256"]:
         raise ValueError("repair protocol hash differs")

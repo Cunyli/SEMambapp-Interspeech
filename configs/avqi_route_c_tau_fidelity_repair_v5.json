@@ -1,0 +1,111 @@
+{
+  "schema_version": "avqi-route-c-tau-fidelity-repair-v5",
+  "goal": "Test a direct model intervention that fixes the original predicted phase while training only the magnitude decoder, to address SI-SDR regression.",
+  "authorization": "User requests stepwise repair of SI-SDR and six-component median errors; bounded testing and training authorized.",
+  "task": "Preserve the same patient's clean pathological waveform and six voice components while enhancing the fixed degraded recording.",
+  "dataset": "Reuse only the existing hash-bound TAU cohort and original source waveforms; no new speakers, recipes, seeds or SVD tests.",
+  "split": "Four original train cases, four original validation cases; the 96 evaluation rows remain excluded from all optimizer updates and repair selection.",
+  "baseline": "S3_500 with the already-verified stable magnitude decoder and common peak safeguard; every arm starts from the same original checkpoint.",
+  "previous_protocol": "configs/avqi_route_c_tau_amplitude_training_v2.json",
+  "safety_report": "runs/avqi_route_c_tau_training_v1_safety_20260907T193253Z/outputs/safety_report.json",
+  "safety_report_sha256": "11bd5975c7b07126b6e2d90b7d122af6df8beba19cb890bc4086eafffaa300b2",
+  "original_preflight": "runs/avqi_route_c_tau_training_v1_preflight_20260907T195753Z/outputs/preflight_report.json",
+  "alignment": {
+    "method": "rir_argmax_abs_shifted_anechoic_full_reference",
+    "sample_rate": 16000,
+    "canonical_pretraining_config": "configs/train/semambapp_shifted_anechoic_online_v1.yaml",
+    "canonical_target_helper": "dataloaders.legacy_online_degradation._target_audio_for_selected_degradations",
+    "delay_source": "the exact sealed recipe RIR resampled by the original WdsReader",
+    "uses_model_output_to_choose_lag": false,
+    "uses_candidate_scores_to_choose_lag": false,
+    "uses_waveform_correlation_to_choose_lag": false,
+    "gain_matching_in_loss_or_official_scores": false,
+    "emitted_waveforms_shifted_or_filtered": false,
+    "clean_reference_shifted_with_zero_front_and_truncated_tail": true,
+    "exact_voice_component_clean_targets_unchanged": true
+  },
+  "arms": {
+    "unaligned_fidelity": {
+      "alignment": false,
+      "six_component_fusion": false
+    },
+    "aligned_fidelity": {
+      "alignment": true,
+      "six_component_fusion": false
+    },
+    "aligned_joint": {
+      "alignment": true,
+      "six_component_fusion": true
+    },
+    "aligned_joint_bounded": {
+      "alignment": true,
+      "six_component_fusion": true,
+      "parameter_auxiliary_norm_ratio_cap": 0.5
+    },
+    "aligned_joint_frozen_phase": {
+      "alignment": true,
+      "six_component_fusion": true,
+      "parameter_auxiliary_norm_ratio_cap": 0.5,
+      "trainable_scope": "mask_decoder_only",
+      "same_formula_clean_reference": false
+    }
+  },
+  "training": {
+    "maximum_optimizer_steps": 128,
+    "learning_rate": 1e-06,
+    "optimizer": "AdamW",
+    "weight_decay": 0,
+    "gradient_clip_norm": 1,
+    "batch_size": 1,
+    "seed": 20260908,
+    "checkpoint_interval": 32,
+    "time_l1_weight": 1,
+    "compressed_magnitude_mse_weight": 1
+  },
+  "primary_metric": "Same fixed-reference SI-SDR plus each of six Exact normalized-gap medians on the original four development-validation cases.",
+  "guardrails": "Original unaligned scores retained; finite outputs, magnitude and gradients; peak <=0.95; gain and waveform-identity drift; held-out optimizer steps zero; unchanged six-gradient gate for joint arm.",
+  "expected_failure_modes": "Restricting trainable capacity may impede enhancement or six-component improvement. Fixed predicted phase does not imply unchanged waveform STFT phase after overlap-add. Amplitude updates can still change SI-SDR.",
+  "unacceptable_mistakes": "Moving or changing target polarity, gain or lag; hiding phase changes in the shared backbone; changing frozen normalization buffers; introducing a second teacher at inference; claiming proxy improvement as Exact success.",
+  "next_experiment": "From the same original S3_500 baseline, repeat v3 bounded joint training with only mask_decoder trainable. Shared encoder, Mamba blocks and phase decoder are frozen and kept in eval mode. Exact targets, fidelity, six formulas and weights, 0.5 norm budget and 128-step budget stay as in v3. This does not stack the unsuccessful v4 proxy-reference arm.",
+  "rollback": "Original code branch, all prior checkpoints, raw waveforms and scores remain available; every arm and any failure gets a distinct run directory.",
+  "scientific_promotion": false,
+  "independent_validation": false,
+  "previous_repair_protocol": "configs/avqi_route_c_tau_fidelity_repair_v3.json",
+  "rejected_alignment_audit": {
+    "job_id": "20125883",
+    "path": "runs/avqi_tau_fidelity_repair_v1_alignment_20260908T171947Z/outputs/fixed_alignment.json",
+    "sha256": "a241d633d664d7878fde629fcc436fb7dc9a1fed573309914b5484f103fb6c82",
+    "generator_optimizer_steps": 0,
+    "reason": "Input cross-correlation picks model-incompatible reflection or pitch-period peaks. Restore the canonical pretraining RIR delay definition instead of optimizing correlation."
+  },
+  "auxiliary_balance_rationale": "A common positive attenuation leaves all six internal directions and relative weights intact. The 0.5 norm budget guarantees at least 0.5 of the raw fidelity directional derivative before AdamW, by the Cauchy-Schwarz bound. It is an engineering bound, not a validation-score-fitted coefficient or an AdamW descent guarantee.",
+  "causal_control_evidence": {
+    "job_id": "20126833",
+    "development_report": "runs/avqi_tau_fidelity_repair_v2_train_aligned_joint_20260908T180005Z/outputs/development_report.json",
+    "sha256": "98d8d8cdfc25693e00eced1432e7cfa61689392690169430656a9e3b4a5e1c31",
+    "optimizer_steps": 128,
+    "validation_snr_median_delta_db": -0.5782935917377472,
+    "validation_relative_gain_median_db": 1.3034441567521091,
+    "evaluation_reserve_opened": false
+  },
+  "repair_acceptance": {
+    "all_six_validation_median_normalized_gap_reductions_nonnegative": true,
+    "validation_median_si_sdr_delta_nonnegative": true,
+    "validation_median_aligned_snr_delta_nonnegative": true,
+    "frozen_state_bitwise_unchanged": true,
+    "maximum_predicted_phase_change_radians": 1e-06,
+    "failure_action": "Retain failed evidence; do not promote or extend training based on partial metrics."
+  },
+  "phase_evidence": {
+    "path": "/scratch/work/lil14/SEMambapp-Interspeech-avqi-six-joint-runners-v1/runs/avqi_tau_phase_attribution_v1_20260908T194900Z/outputs/phase_attribution.json",
+    "sha256": "f19d03c553bd69009b4152b4c38493190fee243d83a7a80f4f288a9ef5901af5",
+    "job_id": "20128544",
+    "limitation": "Descriptive fixed STFT hybrids motivate this real parameter-freezing intervention; they are not official model results."
+  },
+  "unsuccessful_reference_trial": {
+    "job_id": "20128524",
+    "exact_job_id": "20128550",
+    "report_sha256": "f18758105ccd7e5535fc791cc076b3d80c267e7b182ab2a333c87dafa53edd61",
+    "accepted_for_promotion": false
+  }
+}
