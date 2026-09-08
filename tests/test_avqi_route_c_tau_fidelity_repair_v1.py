@@ -8,7 +8,8 @@ import torch.nn.functional as F
 from dataloaders.legacy_online_degradation import _target_audio_for_selected_degradations
 from scripts.avqi_route_c_tau_amplitude_training_v1 import binding, fidelity_loss
 from scripts.avqi_route_c_tau_fidelity_repair_v1 import (
-    configure_training_scope, fidelity_for_arm, fixed_input_lag, load_alignment, paired_metrics,
+    configure_numerical_policy, configure_training_scope, fidelity_for_arm, fixed_input_lag,
+    load_alignment, maximum_circular_phase_difference, paired_metrics,
     RIR_REFERENCE, shifted_dry_reference,
 )
 
@@ -154,3 +155,22 @@ def test_mask_only_training_keeps_shared_state_and_phase_fixed():
 def test_unknown_training_scope_abstains():
     with pytest.raises(ValueError, match="unknown"):
         configure_training_scope(torch.nn.Linear(2, 2), "phase_sometimes")
+
+
+def test_phase_invariance_uses_circular_distance_at_pi_boundary():
+    before = torch.tensor([torch.pi - 1e-8], dtype=torch.float64)
+    after = torch.tensor([-torch.pi + 1e-8], dtype=torch.float64)
+    assert maximum_circular_phase_difference(before, after) == pytest.approx(2e-8, abs=1e-14)
+    assert maximum_circular_phase_difference(before, before) == 0
+
+
+def test_stable_policy_is_explicit_and_does_not_relax_phase_tolerance(monkeypatch):
+    monkeypatch.setattr(torch.backends.cudnn, "deterministic", False)
+    monkeypatch.setattr(torch.backends.cudnn, "benchmark", True)
+    monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", True)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", True)
+    assert configure_numerical_policy("deterministic_float32") == dict(
+        policy="deterministic_float32", cudnn_deterministic=True,
+        cudnn_benchmark=False, cudnn_allow_tf32=False, matmul_allow_tf32=False)
+    with pytest.raises(ValueError, match="unknown numerical"):
+        configure_numerical_policy("automatic_relaxation")

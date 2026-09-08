@@ -35,6 +35,24 @@ SCHEMA = "avqi-route-c-tau-fidelity-repair-v1"
 RIR_REFERENCE = "rir_argmax_abs_shifted_anechoic_full_reference"
 
 
+def configure_numerical_policy(policy):
+    if policy != "deterministic_float32":
+        raise ValueError("unknown numerical execution policy")
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    return dict(policy=policy, cudnn_deterministic=torch.backends.cudnn.deterministic,
+                cudnn_benchmark=torch.backends.cudnn.benchmark,
+                cudnn_allow_tf32=torch.backends.cudnn.allow_tf32,
+                matmul_allow_tf32=torch.backends.cuda.matmul.allow_tf32)
+
+
+def maximum_circular_phase_difference(before, after):
+    difference = after.double() - before.double()
+    return float(torch.atan2(difference.sin(), difference.cos()).abs().max())
+
+
 def configure_training_scope(model, scope):
     if scope == "all_parameters":
         model.requires_grad_(True).train()
@@ -266,6 +284,9 @@ def evaluate_development(run, model, rows, baseline, lags, cfg, device, protocol
 
 
 def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
+    if protocol.get("numerical_policy"):
+        prior.write_json(run / "outputs/numerical_environment.json",
+                         configure_numerical_policy(protocol["numerical_policy"]))
     old, paths, exact, cfg = prior.context(old_protocol)
     train_rows = [r for r in rows if r["training_role"] == "train"]
     prior.set_model_seed(protocol["training"]["seed"])
@@ -372,7 +393,7 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
         phase_rows = []
         for case_id, before_phase in initial_phases.items():
             after_phase = final_phases[case_id]
-            error = float((after_phase - before_phase).abs().max())
+            error = maximum_circular_phase_difference(before_phase, after_phase)
             if error > 1e-6:
                 raise ValueError("frozen model phase changed on development input")
             phase_rows.append(dict(case_id=case_id, maximum_absolute_phase_error=error,
@@ -403,7 +424,7 @@ def main():
     if not os.environ.get("SLURM_JOB_ID"):
         raise ValueError("Slurm compute node required")
     protocol = prior.read_json(args.protocol)
-    if protocol["schema_version"] not in tuple(SCHEMA.replace("v1", v) for v in ("v1", "v2", "v3", "v4", "v5")) or protocol["scientific_promotion"] is not False:
+    if protocol["schema_version"] not in tuple(SCHEMA.replace("v1", v) for v in ("v1", "v2", "v3", "v4", "v5", "v6")) or protocol["scientific_promotion"] is not False:
         raise ValueError("repair protocol differs")
     if prior.binding(args.protocol)["sha256"] != os.environ["PROTOCOL_SHA256"]:
         raise ValueError("repair protocol hash differs")
