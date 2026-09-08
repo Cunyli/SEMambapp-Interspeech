@@ -1,0 +1,48 @@
+{
+  "schema_version": "avqi-route-c-tau-fidelity-repair-v1",
+  "goal": "Repair the coupled timing, fidelity and output-gain regression step by step, using frozen TAU development data and controlled real training before any final evaluation.",
+  "authorization": "User: 这三个问题可能是同一个问题 现在我们试着一步步修好他",
+  "task": "Preserve the same patient's clean pathological waveform and six voice components while enhancing the fixed degraded recording.",
+  "dataset": "Reuse only the existing hash-bound TAU cohort and original source waveforms; no new speakers, recipes, seeds or SVD tests.",
+  "split": "Four original train cases, four original validation cases; the 96 evaluation rows remain excluded from all optimizer updates and repair selection.",
+  "baseline": "S3_500 with the already-verified stable magnitude decoder and common peak safeguard; every arm starts from the same original checkpoint.",
+  "previous_protocol": "configs/avqi_route_c_tau_amplitude_training_v2.json",
+  "safety_report": "runs/avqi_route_c_tau_training_v1_safety_20260907T193253Z/outputs/safety_report.json",
+  "safety_report_sha256": "11bd5975c7b07126b6e2d90b7d122af6df8beba19cb890bc4086eafffaa300b2",
+  "original_preflight": "runs/avqi_route_c_tau_training_v1_preflight_20260907T195753Z/outputs/preflight_report.json",
+  "alignment": {
+    "method": "existing input-anchored normalized cross-correlation, frozen before any training",
+    "maximum_lag_samples": 1600,
+    "sample_rate": 16000,
+    "uses_model_output_to_choose_lag": false,
+    "uses_candidate_scores_to_choose_lag": false,
+    "residual_output_lag_optimization": false,
+    "gain_matching_in_loss_or_official_scores": false,
+    "emitted_waveforms_shifted_or_filtered": false
+  },
+  "arms": {
+    "unaligned_fidelity": {"alignment": false, "six_component_fusion": false},
+    "aligned_fidelity": {"alignment": true, "six_component_fusion": false},
+    "aligned_joint": {"alignment": true, "six_component_fusion": true}
+  },
+  "training": {
+    "maximum_optimizer_steps": 128,
+    "learning_rate": 1e-6,
+    "optimizer": "AdamW",
+    "weight_decay": 0,
+    "gradient_clip_norm": 1,
+    "batch_size": 1,
+    "seed": 20260908,
+    "checkpoint_interval": 32,
+    "time_l1_weight": 1,
+    "compressed_magnitude_mse_weight": 1
+  },
+  "primary_metric": "Development paired fixed-input-aligned SNR and waveform error, with both baseline and candidate evaluated at the same pre-frozen lag and without gain rescaling.",
+  "guardrails": "Original unaligned scores retained; finite outputs, magnitude and gradients; peak <=0.95; gain and waveform-identity drift; held-out optimizer steps zero; unchanged six-gradient gate for joint arm.",
+  "expected_failure_modes": "A fixed delay may not be the only cause; spectral and waveform losses may remain imbalanced; four noisy examples may not preserve clean-input identity.",
+  "unacceptable_mistakes": "Selecting lags from candidate outputs or outcomes, post-hoc gain correction counted as improvement, held-out tuning, changing multiple repair factors without controls, weakening old scientific gates.",
+  "next_experiment": "Validate alignment on synthetic delayed and gain-scaled signals and on the frozen input pairs. Then compare 128-step unaligned-fidelity and aligned-fidelity arms. Only progress to the unchanged six-component fusion after inspecting the controlled fidelity results.",
+  "rollback": "Original code branch, all prior checkpoints, raw waveforms and scores remain available; every arm and any failure gets a distinct run directory.",
+  "scientific_promotion": false,
+  "independent_validation": false
+}
