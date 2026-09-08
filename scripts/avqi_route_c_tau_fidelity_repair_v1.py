@@ -19,6 +19,7 @@ import torch.nn.functional as F
 import yaml
 
 from dataloaders.legacy_online_degradation import _rir_direct_path_delay
+from model.fidelity_gradient_budget import bound_auxiliary_parameter_gradients
 from model.sv_guardrail_v2 import align_waveform_pair, best_normalized_cross_correlation_lag
 from scripts import avqi_route_c_tau_amplitude_training_v1 as prior
 from scripts.evaluate_avqi_shimmer_fresh_panel import read_fixed_recipes, recipe_wds_row
@@ -275,6 +276,7 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
                                                lags[row["case_id"]], cfg, protocol, arm)
             fidelity_gradient = torch.autograd.grad(fidelity, y, retain_graph=True)[0]
             fusion = None
+            auxiliary_balance = None
             if use_six:
                 record, gradients = prior.measure(row, y, scorer, runtime, worker,
                                                   run / "outputs", f"step{step:06d}")
@@ -282,7 +284,17 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
                 if not all(gates.values()):
                     prior.write_json(run / "outputs/failed_gradient_gate.json", dict(step=step, gates=gates, fusion=fusion))
                     raise ValueError("unchanged six-component gradient gate failed")
-                torch.autograd.backward((y, fidelity), (joint.to(y), None))
+                ratio = protocol["arms"][arm].get("parameter_auxiliary_norm_ratio_cap")
+                if ratio is None:
+                    torch.autograd.backward((y, fidelity), (joint.to(y), None))
+                else:
+                    parameters = tuple(model.parameters())
+                    primary = torch.autograd.grad(fidelity, parameters, retain_graph=True)
+                    auxiliary = torch.autograd.grad(y, parameters, grad_outputs=joint.to(y))
+                    combined, auxiliary_balance = bound_auxiliary_parameter_gradients(primary, auxiliary, ratio)
+                    for parameter, gradient in zip(parameters, combined):
+                        parameter.grad = gradient
+                    del primary, auxiliary, combined
             else:
                 fidelity.backward()
             parameter_gradient = prior.finite_parameter_gradients(model)
@@ -290,7 +302,7 @@ def train(run, protocol, old_protocol, rows, baseline, lags, arm, device):
             optimizer.step()
             log = dict(step=step, case_id=row["case_id"], role="train", arm=arm,
                        fidelity=terms, fidelity_waveform_gradient_norm=float(fidelity_gradient.double().norm()),
-                       fusion=fusion, parameter_gradient=parameter_gradient,
+                       fusion=fusion, auxiliary_balance=auxiliary_balance, parameter_gradient=parameter_gradient,
                        output_peak=float(y.detach().abs().max()), seconds=time.monotonic() - started)
             with (run / "outputs/training_steps.jsonl").open("a") as handle:
                 handle.write(json.dumps(log, allow_nan=False) + "\n")
@@ -320,14 +332,14 @@ def main():
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--stage", choices=("alignment", "train"), required=True)
-    parser.add_argument("--arm", choices=("unaligned_fidelity", "aligned_fidelity", "aligned_joint"))
+    parser.add_argument("--arm", choices=("unaligned_fidelity", "aligned_fidelity", "aligned_joint", "aligned_joint_bounded"))
     parser.add_argument("--alignment", type=Path)
     parser.add_argument("--alignment-sha256")
     args = parser.parse_args()
     if not os.environ.get("SLURM_JOB_ID"):
         raise ValueError("Slurm compute node required")
     protocol = prior.read_json(args.protocol)
-    if protocol["schema_version"] not in (SCHEMA, SCHEMA.replace("v1", "v2")) or protocol["scientific_promotion"] is not False:
+    if protocol["schema_version"] not in tuple(SCHEMA.replace("v1", v) for v in ("v1", "v2", "v3")) or protocol["scientific_promotion"] is not False:
         raise ValueError("repair protocol differs")
     if prior.binding(args.protocol)["sha256"] != os.environ["PROTOCOL_SHA256"]:
         raise ValueError("repair protocol hash differs")

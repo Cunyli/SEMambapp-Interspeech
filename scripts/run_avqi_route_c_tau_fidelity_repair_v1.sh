@@ -28,7 +28,7 @@ import torch
 if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
     raise ValueError("training requires exactly one allocated GPU")
 properties = torch.cuda.get_device_properties(0)
-minimum_gib = 30 if os.environ.get("RUN_ARM") == "aligned_joint" else 0
+minimum_gib = 30 if os.environ.get("RUN_ARM", "").startswith("aligned_joint") else 0
 record = dict(name=properties.name, total_memory_bytes=properties.total_memory,
               required_minimum_gib=minimum_gib, cuda_version=torch.version.cuda,
               torch_version=torch.__version__,

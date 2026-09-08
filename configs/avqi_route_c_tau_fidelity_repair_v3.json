@@ -1,0 +1,84 @@
+{
+  "schema_version": "avqi-route-c-tau-fidelity-repair-v3",
+  "goal": "Repair the coupled timing, fidelity and output-gain regression step by step, using frozen TAU development data and controlled real training before any final evaluation.",
+  "authorization": "User: 这三个问题可能是同一个问题 现在我们试着一步步修好他",
+  "task": "Preserve the same patient's clean pathological waveform and six voice components while enhancing the fixed degraded recording.",
+  "dataset": "Reuse only the existing hash-bound TAU cohort and original source waveforms; no new speakers, recipes, seeds or SVD tests.",
+  "split": "Four original train cases, four original validation cases; the 96 evaluation rows remain excluded from all optimizer updates and repair selection.",
+  "baseline": "S3_500 with the already-verified stable magnitude decoder and common peak safeguard; every arm starts from the same original checkpoint.",
+  "previous_protocol": "configs/avqi_route_c_tau_amplitude_training_v2.json",
+  "safety_report": "runs/avqi_route_c_tau_training_v1_safety_20260907T193253Z/outputs/safety_report.json",
+  "safety_report_sha256": "11bd5975c7b07126b6e2d90b7d122af6df8beba19cb890bc4086eafffaa300b2",
+  "original_preflight": "runs/avqi_route_c_tau_training_v1_preflight_20260907T195753Z/outputs/preflight_report.json",
+  "alignment": {
+    "method": "rir_argmax_abs_shifted_anechoic_full_reference",
+    "sample_rate": 16000,
+    "canonical_pretraining_config": "configs/train/semambapp_shifted_anechoic_online_v1.yaml",
+    "canonical_target_helper": "dataloaders.legacy_online_degradation._target_audio_for_selected_degradations",
+    "delay_source": "the exact sealed recipe RIR resampled by the original WdsReader",
+    "uses_model_output_to_choose_lag": false,
+    "uses_candidate_scores_to_choose_lag": false,
+    "uses_waveform_correlation_to_choose_lag": false,
+    "gain_matching_in_loss_or_official_scores": false,
+    "emitted_waveforms_shifted_or_filtered": false,
+    "clean_reference_shifted_with_zero_front_and_truncated_tail": true,
+    "exact_voice_component_clean_targets_unchanged": true
+  },
+  "arms": {
+    "unaligned_fidelity": {
+      "alignment": false,
+      "six_component_fusion": false
+    },
+    "aligned_fidelity": {
+      "alignment": true,
+      "six_component_fusion": false
+    },
+    "aligned_joint": {
+      "alignment": true,
+      "six_component_fusion": true
+    },
+    "aligned_joint_bounded": {
+      "alignment": true,
+      "six_component_fusion": true,
+      "parameter_auxiliary_norm_ratio_cap": 0.5
+    }
+  },
+  "training": {
+    "maximum_optimizer_steps": 128,
+    "learning_rate": 1e-06,
+    "optimizer": "AdamW",
+    "weight_decay": 0,
+    "gradient_clip_norm": 1,
+    "batch_size": 1,
+    "seed": 20260908,
+    "checkpoint_interval": 32,
+    "time_l1_weight": 1,
+    "compressed_magnitude_mse_weight": 1
+  },
+  "primary_metric": "Same fixed-reference development waveform SNR and signed gain drift; retain Exact six-component gap and SI-SDR as independent reported outcomes.",
+  "guardrails": "Original unaligned scores retained; finite outputs, magnitude and gradients; peak <=0.95; gain and waveform-identity drift; held-out optimizer steps zero; unchanged six-gradient gate for joint arm.",
+  "expected_failure_modes": "AdamW moments can still change the update direction; four training examples may not preserve every held-out pathology feature; waveform L1 and magnitude gradients remain unbalanced and are not changed in this arm.",
+  "unacceptable_mistakes": "Selecting lags from candidate outputs or outcomes, post-hoc gain correction counted as improvement, held-out tuning, changing multiple repair factors without controls, weakening old scientific gates.",
+  "next_experiment": "Keep the canonical RIR timing and all fidelity/six formulas fixed. Compare the completed unbounded joint arm with one 128-step arm that bounds the total six-component parameter gradient norm to one half of fidelity's parameter gradient norm.",
+  "rollback": "Original code branch, all prior checkpoints, raw waveforms and scores remain available; every arm and any failure gets a distinct run directory.",
+  "scientific_promotion": false,
+  "independent_validation": false,
+  "previous_repair_protocol": "configs/avqi_route_c_tau_fidelity_repair_v2.json",
+  "rejected_alignment_audit": {
+    "job_id": "20125883",
+    "path": "runs/avqi_tau_fidelity_repair_v1_alignment_20260908T171947Z/outputs/fixed_alignment.json",
+    "sha256": "a241d633d664d7878fde629fcc436fb7dc9a1fed573309914b5484f103fb6c82",
+    "generator_optimizer_steps": 0,
+    "reason": "Input cross-correlation picks model-incompatible reflection or pitch-period peaks. Restore the canonical pretraining RIR delay definition instead of optimizing correlation."
+  },
+  "auxiliary_balance_rationale": "A common positive attenuation leaves all six internal directions and relative weights intact. The 0.5 norm budget guarantees at least 0.5 of the raw fidelity directional derivative before AdamW, by the Cauchy-Schwarz bound. It is an engineering bound, not a validation-score-fitted coefficient or an AdamW descent guarantee.",
+  "causal_control_evidence": {
+    "job_id": "20126833",
+    "development_report": "runs/avqi_tau_fidelity_repair_v2_train_aligned_joint_20260908T180005Z/outputs/development_report.json",
+    "sha256": "98d8d8cdfc25693e00eced1432e7cfa61689392690169430656a9e3b4a5e1c31",
+    "optimizer_steps": 128,
+    "validation_snr_median_delta_db": -0.5782935917377472,
+    "validation_relative_gain_median_db": 1.3034441567521091,
+    "evaluation_reserve_opened": false
+  }
+}
